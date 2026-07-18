@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "shapeic-core",
+    "shapeic-mna",
+    "shapeic-lut"
+]
+
+[workspace.package]
+version = "0.1.0"
+license = ""
+categories = ["science"]
+edition = "2024"
+rust-version = "1.92"
+repository = "https://github.com/hm-aemy/shapeic#"
