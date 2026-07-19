@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::Path;
+use symbolica::prelude::{Matrix};
+use symbolica::domains::atom::AtomField;
+
 use crate::spice_parser::{NodeMap, SpiceError, spice_parser};
-use crate::symmna::{Matrix, SmnaError, Vector, smna};
+use crate::symmna::{SmnaError, Vector, smna};
 
 #[derive(Debug)]
 pub struct MnaResult {
     pub report: String,
-    pub a: Matrix,
+    pub a: Matrix<AtomField>,
     pub x: Vector,
     pub z: Vector,
     pub nodes: NodeMap,

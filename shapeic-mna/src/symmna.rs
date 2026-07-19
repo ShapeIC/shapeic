@@ -1,64 +1,8 @@
-use std::collections::HashMap;
-use std::fmt;
+use symbolica::atom::Atom;
+use symbolica::prelude::{Matrix, parse};
+use symbolica::domains::atom::AtomField;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expr(String);
-
-impl Expr {
-    pub fn zero() -> Self {
-        Self("0".to_string())
-    }
-
-    pub fn one() -> Self {
-        Self("1".to_string())
-    }
-
-    pub fn symbol(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-
-    pub fn add(&self, rhs: &Self) -> Self {
-        match (self.0.as_str(), rhs.0.as_str()) {
-            ("0", _) => rhs.clone(),
-            (_, "0") => self.clone(),
-            _ => Self(format!("({} + {})", self.0, rhs.0)),
-        }
-    }
-
-    pub fn sub(&self, rhs: &Self) -> Self {
-        match (self.0.as_str(), rhs.0.as_str()) {
-            (_, "0") => self.clone(),
-            ("0", _) => Self(format!("-{}", rhs.0)),
-            _ => Self(format!("({} - {})", self.0, rhs.0)),
-        }
-    }
-
-    pub fn neg(&self) -> Self {
-        match self.0.as_str() {
-            "0" => Self::zero(),
-            _ => Self(format!("-{}", self.0)),
-        }
-    }
-
-    pub fn mul(&self, rhs: &Self) -> Self {
-        match (self.0.as_str(), rhs.0.as_str()) {
-            ("0", _) | (_, "0") => Self::zero(),
-            ("1", _) => rhs.clone(),
-            (_, "1") => self.clone(),
-            _ => Self(format!("{}*{}", self.0, rhs.0)),
-        }
-    }
-
-    pub fn reciprocal(&self) -> Self {
-        match self.0.as_str() {
-            "1" => Self::one(),
-            _ => Self(format!("1/{}", self.0)),
-        }
-    }
-}
-
-pub type Matrix = Vec<Vec<Expr>>;
-pub type Vector = Vec<Expr>;
+pub type Vector = Vec<Atom>;
 
 #[derive(Debug)]
 pub enum SmnaError {
@@ -88,7 +32,7 @@ pub enum SmnaError {
 
 pub struct SmnaResult {
     pub report: String,
-    pub a: Matrix,
+    pub a: Matrix<AtomField>,
     pub x: Vector,
     pub z: Vector,
 }
@@ -97,14 +41,14 @@ pub struct SmnaResult {
 pub struct Counts {
     branch_cnt: usize,
     num_rlc: usize,
-    num_ind: usize,
-    num_v: usize,
+    num_ind: u32,
+    num_v: u32,
     num_i: usize,
-    num_opamps: usize,
-    num_vcvs: usize,
-    num_vccs: usize,
-    num_cccs: usize,
-    num_ccvs: usize,
+    num_opamps: u32,
+    num_vcvs: u32,
+    num_vccs: u32,
+    num_cccs: u32,
+    num_ccvs: u32,
     num_cpld_ind: usize,
 }
 
@@ -116,7 +60,7 @@ pub struct Branch {
     pub cp_node: Option<usize>,
     pub cn_node: Option<usize>,
     pub vout: Option<usize>,
-    pub value: Option<Expr>,
+    pub value: Option<Atom>,
     pub vname: Option<String>,
     pub lname1: Option<String>,
     pub lname2: Option<String>,
@@ -150,10 +94,6 @@ pub struct CurrentUnknown {
     pub n_node: Option<usize>,
 }
 
-fn zeros(rows: usize, cols: usize) -> Matrix {
-    vec![vec![Expr::zero(); cols]; rows]
-}
-
 pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
     let content = preprocess(net_list);
     let counts = validate_and_count_elements(&content)?;
@@ -171,12 +111,12 @@ pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
         + counts.num_ind
         + counts.num_cccs;
 
-    let mut g = zeros(num_nodes,  num_nodes);
-    let mut b = zeros(num_nodes, i_unk);
-    let mut c = zeros(i_unk, num_nodes);
-    let mut d = zeros(i_unk, i_unk);
-    let mut i_vec = vec![Expr::zero(); num_nodes];
-    let mut ev = vec![Expr::zero(); i_unk];
+    let mut g = Matrix::new(num_nodes,  num_nodes, AtomField::new());
+    let mut b = Matrix::new(num_nodes, i_unk, AtomField::new());
+    let mut c = Matrix::new(i_unk, num_nodes, AtomField::new());
+    let mut d = Matrix::new(i_unk, i_unk, AtomField::new());
+    let mut i_vec = vec![Atom::zero(); num_nodes as usize];
+    let mut ev = vec![Atom::zero(); i_unk as usize];
 
     stamp_g(&df, &mut g);
     stamp_b(&df, &mut b, i_unk)?;
@@ -185,41 +125,41 @@ pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
     stamp_i(&df, &mut i_vec);
     stamp_ev(&df, &mut ev);
 
-    let mut x = Vec::with_capacity(num_nodes + i_unk);
+    let mut x = Vec::with_capacity(usize::try_from(num_nodes + i_unk).expect("vector capacity does not fit in usize"));
     for node in 1..=num_nodes {
-        x.push(Expr::symbol(format!("v{node}")));
+        x.push(parse!((format!("v{node}")).as_str()));
     }
     for unknown in &df2 {
-        x.push(Expr::symbol(format!("I_{}", unknown.element)));
+        x.push(parse!((format!("I_{}", unknown.element)).as_str()));
     }
 
     let mut z = i_vec;
     z.extend(ev);
 
-    let mut a = zeros(num_nodes + i_unk, num_nodes + i_unk);
+    let mut a = Matrix::new(num_nodes + i_unk, num_nodes + i_unk, AtomField::new());
     for row in 0..num_nodes {
         for col in 0..num_nodes {
-            a[row][col] = g[row][col].clone();
+            a[(row, col)] = g[(row, col)].clone();
         }
     }
     for row in 0..num_nodes {
         for col in 0..i_unk {
-            a[row][num_nodes + col] = b[row][col].clone();
+            a[(row, num_nodes + col)] = b[(row, col)].clone();
         }
     }
     for row in 0..i_unk {
         for col in 0..num_nodes {
-            a[num_nodes + row][col] = c[row][col].clone();
+            a[(num_nodes + row, col)] = c[(row, col)].clone();
         }
     }
     for row in 0..i_unk {
         for col in 0..i_unk {
-            a[num_nodes + row][num_nodes + col] = d[row][col].clone();
+            a[(num_nodes + row, num_nodes + col)] = d[(row, col)].clone();
         }
     }
 
     Ok(SmnaResult {
-        report: report(&counts, line_cnt, num_nodes, i_unk),
+        report: report(&counts, line_cnt, num_nodes as usize, i_unk as usize),
         a,
         x,
         z,
@@ -382,13 +322,13 @@ fn parse_node(token: &str) -> Result<usize, SmnaError> {
     })
 }
 
-fn parse_value(token: &str) -> Result<Expr, SmnaError> {
+fn parse_value(token: &str) -> Result<Atom, SmnaError> {
     if token.is_empty() {
         Err(SmnaError::BadValue {
             token: token.to_string(),
         })
     } else {
-        Ok(Expr::symbol(token))
+        Ok(parse!(token))
     }
 }
 
@@ -408,7 +348,7 @@ fn move_voltage_sources_first(df: &mut Vec<Branch>) {
     *df = source;
 }
 
-fn count_nodes(df: &[Branch], line_cnt: usize) -> Result<usize, SmnaError> {
+fn count_nodes(df: &[Branch], line_cnt: usize) -> Result<u32, SmnaError> {
     let mut present = vec![false; line_cnt + 1];
     let mut largest = 0;
 
@@ -439,7 +379,7 @@ fn count_nodes(df: &[Branch], line_cnt: usize) -> Result<usize, SmnaError> {
         }
     }
 
-    Ok(largest)
+    Ok(matrix_index(largest))
 }
 
 fn current_unknowns(df: &[Branch]) -> Vec<CurrentUnknown> {
@@ -452,80 +392,79 @@ fn current_unknowns(df: &[Branch]) -> Vec<CurrentUnknown> {
         })
         .collect()
 }
+fn branch_symbol(branch: &Branch, lowercase: bool) -> Atom {
+    branch.value.clone().unwrap_or_else(|| {
+        let name = if lowercase {
+            branch.element.to_lowercase()
+        } else {
+            branch.element.clone()
+        };
 
-fn sym(branch: &Branch) -> Expr {
-    branch
-        .value
-        .clone()
-        .unwrap_or_else(|| Expr::symbol(branch.element.clone()))
+        parse!(name.as_str())
+    })
 }
 
-fn controlled_sym(branch: &Branch) -> Expr {
-    branch
-        .value
-        .clone()
-        .unwrap_or_else(|| Expr::symbol(branch.element.to_lowercase()))
+fn idx(node: usize) -> u32 {
+    u32::try_from(node - 1)
+        .expect("node index does not fit in u32")
 }
 
+fn stamp_g(df: &[Branch], g_matrix: &mut Matrix<AtomField>) {
+    let s = parse!("s");
+    let one = parse!("1");
 
-fn sub_cell(matrix: &mut Matrix, row: usize, col: usize, value: Expr) {
-    matrix[row][col] = matrix[row][col].sub(&value);
-}
-
-fn add_cell(matrix: &mut Matrix, row: usize, col: usize, value: Expr) {
-    matrix[row][col] = matrix[row][col].add(&value);
-}
-
-fn set_cell(matrix: &mut Matrix, row: usize, col: usize, value: Expr) {
-    matrix[row][col] = value;
-}
-
-fn stamp_g(df: &[Branch], g_matrix: &mut Matrix) {
     for branch in df {
-        let x = branch.kind();
+        let kind = branch.kind();
+
         let n1 = branch.p_node.unwrap_or(0);
         let n2 = branch.n_node.unwrap_or(0);
         let cn1 = branch.cp_node.unwrap_or(0);
         let cn2 = branch.cn_node.unwrap_or(0);
 
-        let g = match x {
-            'R' => sym(branch).reciprocal(),
-            'C' => Expr::symbol("s").mul(&sym(branch)),
-            'G' => controlled_sym(branch),
+        let g: Atom = match kind {
+            'R' => {
+                let r = branch_symbol(branch, false);
+                &one / &r
+            }
+            'C' => {
+                let c = branch_symbol(branch, false);
+                &s * &c
+            }
+            'G' => branch_symbol(branch, true),
             _ => continue,
         };
 
-        if matches!(x, 'R' | 'C') {
+        if matches!(kind, 'R' | 'C') {
             if n1 != 0 && n2 != 0 {
-                sub_cell(g_matrix, n1 - 1, n2 - 1, g.clone());
-                sub_cell(g_matrix, n2 - 1, n1 - 1, g.clone());
+                g_matrix[(idx(n1), idx(n2))] -= &g;
+                g_matrix[(idx(n2), idx(n1))] -= &g;
             }
             if n1 != 0 {
-                add_cell(g_matrix, n1 - 1, n1 - 1, g.clone());
+                g_matrix[(idx(n1), idx(n1))] += &g;
             }
             if n2 != 0 {
-                add_cell(g_matrix, n2 - 1, n2 - 1, g.clone());
+                g_matrix[(idx(n2), idx(n2))] += &g;
             }
         }
 
-        if x == 'G' {
+        if kind == 'G' {
             if n1 != 0 && cn1 != 0 {
-                add_cell(g_matrix, n1 - 1, cn1 - 1, g.clone());
+                g_matrix[(idx(n1), idx(cn1))] += &g;
             }
             if n2 != 0 && cn2 != 0 {
-                add_cell(g_matrix, n2 - 1, cn2 - 1, g.clone());
+                g_matrix[(idx(n2), idx(cn2))] += &g;
             }
             if n1 != 0 && cn2 != 0 {
-                sub_cell(g_matrix, n1 - 1, cn2 - 1, g.clone());
+                g_matrix[(idx(n1), idx(cn2))] -= &g;
             }
             if n2 != 0 && cn1 != 0 {
-                sub_cell(g_matrix, n2 - 1, cn1 - 1, g.clone());
+                g_matrix[(idx(n2), idx(cn1))] -= &g;
             }
         }
     }
 }
 
-fn stamp_b(df: &[Branch], b: &mut Matrix, i_unk: usize) -> Result<(), SmnaError> {
+fn stamp_b(df: &[Branch], b: &mut Matrix<AtomField>, i_unk: u32) -> Result<(), SmnaError> {
     let mut sn = 0;
 
     for branch in df {
@@ -540,10 +479,8 @@ fn stamp_b(df: &[Branch], b: &mut Matrix, i_unk: usize) -> Result<(), SmnaError>
                 sn += 1;
             }
             'O' => {
-                if let Some(vout) = branch.vout {
-                    if vout != 0 {
-                        set_cell(b, vout - 1, sn, Expr::one());
-                    }
+                if let Some(vout) = branch.vout.filter(|&vout| vout != 0) {
+                    b[(idx(vout), sn as u32)] = parse!("1");
                 }
                 sn += 1;
             }
@@ -554,17 +491,17 @@ fn stamp_b(df: &[Branch], b: &mut Matrix, i_unk: usize) -> Result<(), SmnaError>
     check_source_count("B", sn, i_unk)
 }
 
-fn stamp_current_column(matrix: &mut Matrix, col: usize, n1: usize, n2: usize) {
+fn stamp_current_column(matrix: &mut Matrix<AtomField>, col: usize, n1: usize, n2: usize) {
     if n1 != 0 {
-        set_cell(matrix, n1 - 1, col, Expr::one());
+        matrix[(idx(n1), col as u32)] = parse!("1");
     }
     if n2 != 0 {
-        set_cell(matrix, n2 - 1, col, Expr::one().neg());
+        matrix[(idx(n2), col as u32)] = parse!("-1");
     }
 }
 
-fn check_source_count(matrix_name: &str, sn: usize, i_unk: usize) -> Result<(), SmnaError> {
-    if sn == i_unk {
+fn check_source_count(matrix_name: &str, sn: usize, i_unk: u32) -> Result<(), SmnaError> {
+    if sn as u32 == i_unk {
         Ok(())
     } else {
         Err(SmnaError::MissingBranch {
@@ -576,8 +513,8 @@ fn check_source_count(matrix_name: &str, sn: usize, i_unk: usize) -> Result<(), 
 fn stamp_c(
     df: &[Branch],
     df2: &[CurrentUnknown],
-    c: &mut Matrix,
-    i_unk: usize,
+    c: &mut Matrix<AtomField>,
+    i_unk: u32,
 ) -> Result<(), SmnaError> {
     let mut sn = 0;
 
@@ -602,16 +539,12 @@ fn stamp_c(
                     branch.p_node.unwrap_or(0),
                     branch.n_node.unwrap_or(0),
                 );
-                let gain = controlled_sym(branch);
-                if let Some(cn1) = branch.cp_node {
-                    if cn1 != 0 {
-                        set_cell(c, sn, cn1 - 1, gain.clone().neg());
-                    }
+                let gain = branch_symbol(branch, true);
+                if let Some(cn1) = branch.cp_node.filter(|&cn1| cn1 != 0) {
+                    c[(sn as u32, idx(cn1))] = -&gain;
                 }
-                if let Some(cn2) = branch.cn_node {
-                    if cn2 != 0 {
-                        set_cell(c, sn, cn2 - 1, gain);
-                    }
+                if let Some(cn2) = branch.cn_node.filter(|&cn2| cn2 != 0) {
+                    c[(sn as u32, idx(cn2))] = gain;
                 }
                 sn += 1;
             }
@@ -623,39 +556,40 @@ fn stamp_c(
     check_source_count("C", sn, i_unk)
 }
 
-fn stamp_current_row(matrix: &mut Matrix, row: usize, n1: usize, n2: usize) {
+fn stamp_current_row(matrix: &mut Matrix<AtomField>, row: usize, n1: usize, n2: usize) {
     if n1 != 0 {
-        set_cell(matrix, row, n1 - 1, Expr::one());
+        matrix[(row as u32, idx(n1))] = parse!("1");
     }
     if n2 != 0 {
-        set_cell(matrix, row, n2 - 1, Expr::one().neg());
+        matrix[(row as u32, idx(n2))] = parse!("-1");
     }
 }
 
 fn stamp_d(
     df: &[Branch],
     df2: &[CurrentUnknown],
-    d: &mut Matrix,
-    i_unk: usize,
+    d: &mut Matrix<AtomField>,
+    i_unk: u32,
 ) -> Result<(), SmnaError> {
     let mut sn = 0;
+    let s = parse!("s");
 
     for branch in df {
         match branch.kind() {
             'V' | 'O' | 'E' => sn += 1,
             'L' => {
-                add_cell(d, sn, sn, Expr::symbol("s").mul(&sym(branch)).neg());
+                d[(sn as u32, sn as u32)] += &s*-branch_symbol(branch, false);
                 sn += 1;
             }
             'H' => {
                 let index = find_vname(df2, branch.vname.as_deref().unwrap_or(""))?;
-                add_cell(d, sn, index, controlled_sym(branch).neg());
+                d[(sn as u32, index as u32)] += -branch_symbol(branch, true);
                 sn += 1;
             }
             'F' => {
                 let index = find_vname(df2, branch.vname.as_deref().unwrap_or(""))?;
-                add_cell(d, sn, index, controlled_sym(branch).neg());
-                set_cell(d, sn, sn, Expr::one());
+                d[(sn as u32, index as u32)] += -branch_symbol(branch, true);
+                d[(sn as u32, sn as u32)] = parse!("1");
                 sn += 1;
             }
             'K' => {
@@ -666,11 +600,9 @@ fn stamp_d(
                     .to_lowercase()
                     .trim_start_matches('k')
                     .to_string();
-                let mutual = Expr::symbol("s")
-                    .mul(&Expr::symbol(format!("M{suffix}")))
-                    .neg();
-                add_cell(d, ind1, ind2, mutual.clone());
-                add_cell(d, ind2, ind1, mutual);
+                let mutual = &s*-parse!((format!("M{suffix}")).as_str());
+                d[(ind1 as u32, ind2 as u32)] += &mutual;
+                d[(ind2 as u32, ind1 as u32)] += mutual;
             }
             _ => {}
         }
@@ -694,15 +626,15 @@ fn stamp_i(df: &[Branch], i_vec: &mut Vector) {
             continue;
         }
 
-        let source = sym(branch);
+        let source = branch_symbol(branch, false);
         let n1 = branch.p_node.unwrap_or(0);
         let n2 = branch.n_node.unwrap_or(0);
 
         if n1 != 0 {
-            i_vec[n1 - 1] = i_vec[n1 - 1].sub(&source);
+            i_vec[n1 - 1] -= &source;
         }
         if n2 != 0 {
-            i_vec[n2 - 1] = i_vec[n2 - 1].add(&source);
+            i_vec[n2 - 1] += &source;
         }
     }
 }
@@ -711,7 +643,7 @@ fn stamp_ev(df: &[Branch], ev: &mut Vector) {
     let mut sn = 0;
     for branch in df {
         if branch.kind() == 'V' {
-            ev[sn] = sym(branch);
+            ev[sn] = branch_symbol(branch, false);
             sn += 1;
         }
     }
@@ -746,4 +678,21 @@ number of K - Coupled inductors: {}\n",
         counts.num_ccvs,
         counts.num_cpld_ind,
     )
+}
+
+fn matrix_index(index: usize) -> u32 {
+    u32::try_from(index)
+        .expect("MNA matrix index exceeds u32")
+}
+
+#[test]
+fn test_symmna() {
+    let content = "R1 1 0 1\nI1 1 0 1\n";
+    let mna_map = smna(content).expect("SMNA analysis failed");
+
+    println!("{}", mna_map.report);
+
+    assert_eq!(mna_map.a[(0_u32, 0_u32)], parse!("1"));
+    assert_eq!(mna_map.z[0], parse!("-1"));
+    assert_eq!(mna_map.x[0], parse!("v1"));
 }
