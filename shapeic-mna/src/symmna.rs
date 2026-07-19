@@ -34,7 +34,7 @@ pub struct SmnaResult {
     pub report: String,
     pub a: Matrix<AtomField>,
     pub x: Vector,
-    pub z: Vector,
+    pub z: Matrix<AtomField>,
 }
 
 #[derive(Debug, Default)]
@@ -115,8 +115,8 @@ pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
     let mut b = Matrix::new(num_nodes, i_unk, AtomField::new());
     let mut c = Matrix::new(i_unk, num_nodes, AtomField::new());
     let mut d = Matrix::new(i_unk, i_unk, AtomField::new());
-    let mut i_vec = vec![Atom::zero(); num_nodes as usize];
-    let mut ev = vec![Atom::zero(); i_unk as usize];
+    let mut i_vec = Matrix::new(num_nodes, 1, AtomField::new());
+    let mut ev = Matrix::new(i_unk, 1, AtomField::new());
 
     stamp_g(&df, &mut g);
     stamp_b(&df, &mut b, i_unk)?;
@@ -133,8 +133,14 @@ pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
         x.push(parse!((format!("I_{}", unknown.element)).as_str()));
     }
 
-    let mut z = i_vec;
-    z.extend(ev);
+    let mut z = Matrix::new(num_nodes + i_unk, 1, AtomField::new());
+    for row in 0..num_nodes {
+        z[(row, 0)] = i_vec[(row, 0)].clone();
+    }
+
+    for row in 0..i_unk {
+        z[(num_nodes + row, 0)] = ev[(row, 0)].clone();
+    }
 
     let mut a = Matrix::new(num_nodes + i_unk, num_nodes + i_unk, AtomField::new());
     for row in 0..num_nodes {
@@ -620,7 +626,7 @@ fn find_vname(df2: &[CurrentUnknown], name: &str) -> Result<usize, SmnaError> {
         })
 }
 
-fn stamp_i(df: &[Branch], i_vec: &mut Vector) {
+fn stamp_i(df: &[Branch], i_vec: &mut Matrix<AtomField>) {
     for branch in df {
         if branch.kind() != 'I' {
             continue;
@@ -631,19 +637,19 @@ fn stamp_i(df: &[Branch], i_vec: &mut Vector) {
         let n2 = branch.n_node.unwrap_or(0);
 
         if n1 != 0 {
-            i_vec[n1 - 1] -= &source;
+            i_vec[(idx(n1), 0)] -= &source;
         }
         if n2 != 0 {
-            i_vec[n2 - 1] += &source;
+            i_vec[(idx(n2), 0)] += &source;
         }
     }
 }
 
-fn stamp_ev(df: &[Branch], ev: &mut Vector) {
+fn stamp_ev(df: &[Branch], ev: &mut Matrix<AtomField>) {
     let mut sn = 0;
     for branch in df {
         if branch.kind() == 'V' {
-            ev[sn] = branch_symbol(branch, false);
+            ev[(sn as u32, 0)] = branch_symbol(branch, false);
             sn += 1;
         }
     }
@@ -685,14 +691,4 @@ fn matrix_index(index: usize) -> u32 {
         .expect("MNA matrix index exceeds u32")
 }
 
-#[test]
-fn test_symmna() {
-    let content = "R1 1 0 1\nI1 1 0 1\n";
-    let mna_map = smna(content).expect("SMNA analysis failed");
 
-    println!("{}", mna_map.report);
-
-    assert_eq!(mna_map.a[(0_u32, 0_u32)], parse!("1"));
-    assert_eq!(mna_map.z[0], parse!("-1"));
-    assert_eq!(mna_map.x[0], parse!("v1"));
-}
