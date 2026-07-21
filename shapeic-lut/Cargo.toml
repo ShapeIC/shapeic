@@ -6,3 +6,13 @@ license.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+description = "Native Rust reader and interpolator for SSTADEx MOS lookup tables"
+readme = "README.md"
+
+[dependencies]
+csv = "1"
+ndarray = "0.17"
+ndarray-npy = { version = "0.10", default-features = false }
+serde-pickle = "1.2"
+thiserror = "2"
+zip = { version = "6", default-features = false, features = ["deflate"] }

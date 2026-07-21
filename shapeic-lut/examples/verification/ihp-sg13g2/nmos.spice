@@ -1,0 +1,26 @@
+* shapeic-lut IHP SG13G2 LV NMOS verification
+.lib '{{model_library}}' mos_tt
+
+VGS NG 0 {{vgs}}
+VBS NB 0 {{vbs}}
+VDS ND 0 {{vds}}
+XM1 ND NG 0 NB sg13_lv_nmos l={{length}} w={{width}} ng={{nf}}
+
+.options temp=27 tnom=27
+.control
+pre_osdi {{psp_osdi}}
+pre_osdi {{psp_nqs_osdi}}
+save i(vds)
+save @n.xm1.nsg13_lv_nmos[gm]
+save @n.xm1.nsg13_lv_nmos[gds]
+op
+let id = abs(i(vds))
+let gm = @n.xm1.nsg13_lv_nmos[gm]
+let gds = @n.xm1.nsg13_lv_nmos[gds]
+let gm_id = gm / id
+let jd = id / {{width}}
+set wr_vecnames
+set wr_singlescale
+wrdata {{results_path}} id gm gds gm_id jd
+.endc
+.end
