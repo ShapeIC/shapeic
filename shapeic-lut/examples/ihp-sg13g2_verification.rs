@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let lengths = [0.4e-6];
     let vgs_values = [0.6];
-    let ids_values = [100e-6, 150e-6, 200e-6, 300e-6, 380e-6];
+    let ids_values = [100e-6, 150e-6, 200e-6, 300e-6, 380e-6, 400e-6, 500e-6, 1000e-6];
 
     let (coupled_points, coupled_ids): (Vec<OperatingPoint>, Vec<f64>) = lengths
         .into_iter()
@@ -221,7 +221,7 @@ fn manually_calculated_input_v3(
     let gm = model.query_parameter(point, "gm")? * nf;
     
     let gm_id = gm / id_final;
-    let jd = width / id_final;
+    let jd = id_final / width;
 
     //let nf = minimum_ihp_nf(width);
     Ok(VerificationInput::new(*point, width, nf as u32)
