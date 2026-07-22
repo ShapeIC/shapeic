@@ -3,12 +3,17 @@ use std::io::{Read, Seek};
 
 use ndarray::{ArrayD, IxDyn};
 use ndarray_npy::npy::header::{Header, Layout};
+use serde::Deserialize;
 use serde_pickle::{DeOptions, HashableValue, Value};
 use zip::ZipArchive;
 
 use crate::{Axis, DeviceLut, LookupTable, LutArray, LutError, LutMetadata};
 
 const LOOKUP_TABLE_MEMBER: &str = "lookup_table.npy";
+const MANIFEST_MEMBER: &str = "manifest.json";
+const SHAPEIC_FORMAT: &str = "shapeic-lut";
+const SHAPEIC_VERSION: u32 = 2;
+const V2_AXIS_NAMES: [&str; 5] = ["length", "vbs", "vgs", "vds", "finger_width"];
 const ROOT_METADATA_KEYS: [&str; 4] = [
     "description",
     "simulator",
@@ -27,6 +32,17 @@ where
     R: Read + Seek,
 {
     let mut archive = ZipArchive::new(reader)?;
+    let has_manifest = archive.file_names().any(|name| name == MANIFEST_MEMBER);
+    if has_manifest {
+        return read_shapeic_v2(&mut archive);
+    }
+    read_sstadex(&mut archive)
+}
+
+fn read_sstadex<R>(archive: &mut ZipArchive<R>) -> Result<LookupTable, LutError>
+where
+    R: Read + Seek,
+{
     let mut member = archive.by_name(LOOKUP_TABLE_MEMBER)?;
     let header = Header::from_reader(&mut member)?;
     validate_outer_header(&header)?;
@@ -39,6 +55,285 @@ where
     )?;
     let root = unwrap_lookup_table(value)?;
     parse_root(root)
+}
+
+#[derive(Deserialize)]
+struct V2Manifest {
+    format: String,
+    version: u32,
+    description: Option<String>,
+    simulator: Option<String>,
+    models: Vec<V2Model>,
+}
+
+#[derive(Deserialize)]
+struct V2Model {
+    name: String,
+    axis_order: Vec<String>,
+    axes: Vec<V2Member>,
+    parameters: Vec<V2Member>,
+    #[serde(default)]
+    device_parameters: BTreeMap<String, f64>,
+}
+
+#[derive(Deserialize)]
+struct V2Member {
+    name: String,
+    path: String,
+}
+
+fn read_shapeic_v2<R>(archive: &mut ZipArchive<R>) -> Result<LookupTable, LutError>
+where
+    R: Read + Seek,
+{
+    let manifest = {
+        let mut member = archive.by_name(MANIFEST_MEMBER)?;
+        let mut bytes = Vec::new();
+        member.read_to_end(&mut bytes)?;
+        serde_json::from_slice::<V2Manifest>(&bytes)?
+    };
+    if manifest.format != SHAPEIC_FORMAT || manifest.version != SHAPEIC_VERSION {
+        return Err(LutError::unsupported(
+            MANIFEST_MEMBER,
+            format!(
+                "expected format '{SHAPEIC_FORMAT}' version {SHAPEIC_VERSION}, found '{}' version {}",
+                manifest.format, manifest.version
+            ),
+        ));
+    }
+    if manifest.models.is_empty() {
+        return Err(LutError::schema(
+            MANIFEST_MEMBER,
+            "models must not be empty",
+        ));
+    }
+
+    let mut models = BTreeMap::new();
+    let mut used_paths = BTreeSet::new();
+    for model in manifest.models {
+        let name = model.name;
+        let context = format!("model '{name}'");
+        if name.is_empty() {
+            return Err(LutError::schema(
+                MANIFEST_MEMBER,
+                "model name must not be empty",
+            ));
+        }
+        let declared_order = model
+            .axis_order
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if declared_order != V2_AXIS_NAMES {
+            return Err(LutError::schema(
+                &context,
+                format!(
+                    "axis_order must be {:?}, found {:?}",
+                    V2_AXIS_NAMES, model.axis_order
+                ),
+            ));
+        }
+        if model.axes.len() != V2_AXIS_NAMES.len()
+            || model
+                .axes
+                .iter()
+                .map(|axis| axis.name.as_str())
+                .ne(V2_AXIS_NAMES)
+        {
+            return Err(LutError::schema(
+                &context,
+                "axes must follow axis_order exactly",
+            ));
+        }
+
+        let mut axes = std::array::from_fn(|_| Vec::new());
+        for (axis, member) in Axis::ALL.into_iter().zip(model.axes.iter()) {
+            register_member_path(&member.path, &mut used_paths, &context)?;
+            let array = read_npy_member(archive, &member.path)?;
+            axes[axis.index()] = decode_named_axis(array, &name, axis.as_str())?;
+        }
+        let width_member = &model.axes[4];
+        register_member_path(&width_member.path, &mut used_paths, &context)?;
+        let finger_widths = decode_named_axis(
+            read_npy_member(archive, &width_member.path)?,
+            &name,
+            "finger_width",
+        )?;
+
+        let expected_shape = [
+            axes[0].len(),
+            axes[1].len(),
+            axes[2].len(),
+            axes[3].len(),
+            finger_widths.len(),
+        ];
+        if model.parameters.is_empty() {
+            return Err(LutError::schema(&context, "parameters must not be empty"));
+        }
+        let mut parameters = BTreeMap::new();
+        let mut parameter_names = Vec::new();
+        for parameter in model.parameters {
+            if parameter.name.is_empty() || parameters.contains_key(&parameter.name) {
+                return Err(LutError::schema(
+                    &context,
+                    format!("duplicate or empty parameter name '{}'", parameter.name),
+                ));
+            }
+            register_member_path(&parameter.path, &mut used_paths, &context)?;
+            let array = read_npy_member(archive, &parameter.path)?;
+            validate_parameter_shape(&array, &expected_shape, &context, &parameter.name)?;
+            parameter_names.push(parameter.name.clone());
+            parameters.insert(parameter.name, array);
+        }
+        if model
+            .device_parameters
+            .values()
+            .any(|value| !value.is_finite())
+        {
+            return Err(LutError::NonFinite {
+                model: name.clone(),
+                context: "device parameters".to_owned(),
+            });
+        }
+
+        let device = DeviceLut {
+            name: name.clone(),
+            axes,
+            finger_widths: Some(finger_widths),
+            parameters,
+            parameter_names,
+            device_parameters: model.device_parameters,
+        };
+        if models.insert(name.clone(), device).is_some() {
+            return Err(LutError::schema(
+                MANIFEST_MEMBER,
+                format!("duplicate model name '{name}'"),
+            ));
+        }
+    }
+
+    Ok(LookupTable {
+        metadata: LutMetadata {
+            description: manifest.description,
+            simulator: manifest.simulator,
+        },
+        models,
+    })
+}
+
+fn register_member_path(
+    path: &str,
+    used_paths: &mut BTreeSet<String>,
+    context: &str,
+) -> Result<(), LutError> {
+    if path.is_empty() || !path.ends_with(".npy") {
+        return Err(LutError::schema(
+            context,
+            format!("array member path '{path}' must end in .npy"),
+        ));
+    }
+    if !used_paths.insert(path.to_owned()) {
+        return Err(LutError::schema(
+            context,
+            format!("array member path '{path}' is used more than once"),
+        ));
+    }
+    Ok(())
+}
+
+fn read_npy_member<R>(archive: &mut ZipArchive<R>, path: &str) -> Result<LutArray, LutError>
+where
+    R: Read + Seek,
+{
+    let mut member = archive.by_name(path)?;
+    let header = Header::from_reader(&mut member)?;
+    if header.layout != Layout::Standard {
+        return Err(LutError::unsupported(
+            path,
+            "Fortran-order arrays are not supported",
+        ));
+    }
+    if header.shape.is_empty() || header.shape.contains(&0) {
+        return Err(LutError::unsupported(
+            path,
+            "empty arrays are not supported",
+        ));
+    }
+    let descriptor = header
+        .type_descriptor
+        .as_string()
+        .ok_or_else(|| LutError::unsupported(path, "non-string dtype descriptor"))?;
+    let mut bytes = Vec::new();
+    member.read_to_end(&mut bytes)?;
+    decode_raw_array(&header.shape, descriptor, bytes, path)
+}
+
+fn decode_raw_array(
+    shape: &[usize],
+    descriptor: &str,
+    bytes: Vec<u8>,
+    context: &str,
+) -> Result<LutArray, LutError> {
+    if descriptor.starts_with('>') {
+        return Err(LutError::unsupported(
+            context,
+            "big-endian arrays are not supported",
+        ));
+    }
+    let item_size = if descriptor.ends_with("f4") {
+        4
+    } else if descriptor.ends_with("f8") {
+        8
+    } else {
+        return Err(LutError::unsupported(
+            context,
+            format!("expected a floating-point array, found dtype '{descriptor}'"),
+        ));
+    };
+    let element_count = shape.iter().try_fold(1_usize, |count, dimension| {
+        count
+            .checked_mul(*dimension)
+            .ok_or_else(|| LutError::schema(context, "array element count overflow"))
+    })?;
+    let expected_bytes = element_count
+        .checked_mul(item_size)
+        .ok_or_else(|| LutError::schema(context, "array byte length overflow"))?;
+    if bytes.len() != expected_bytes {
+        return Err(LutError::schema(
+            context,
+            format!(
+                "array contains {} bytes, expected {expected_bytes} for shape {shape:?}",
+                bytes.len()
+            ),
+        ));
+    }
+
+    match item_size {
+        4 => {
+            let values = bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            ArrayD::from_shape_vec(IxDyn(shape), values)
+                .map(LutArray::F32)
+                .map_err(|error| LutError::schema(context, error.to_string()))
+        }
+        8 => {
+            let values = bytes
+                .chunks_exact(8)
+                .map(|chunk| {
+                    f64::from_le_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
+                    ])
+                })
+                .collect();
+            ArrayD::from_shape_vec(IxDyn(shape), values)
+                .map(LutArray::F64)
+                .map_err(|error| LutError::schema(context, error.to_string()))
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn validate_outer_header(header: &Header) -> Result<(), LutError> {
@@ -199,7 +494,7 @@ fn parse_model(
             continue;
         };
         let array = decode_numeric_array(value, &format!("{context}.{parameter}"))?;
-        validate_parameter_shape(&array, expected_shape, &context, &parameter)?;
+        validate_parameter_shape(&array, &expected_shape, &context, &parameter)?;
         parameter_names.push(parameter.clone());
         parameters.insert(parameter, array);
     }
@@ -212,7 +507,7 @@ fn parse_model(
             continue;
         }
         let array = decode_numeric_array(value, &format!("{context}.{parameter}"))?;
-        validate_parameter_shape(&array, expected_shape, &context, &parameter)?;
+        validate_parameter_shape(&array, &expected_shape, &context, &parameter)?;
         parameter_names.push(parameter.clone());
         parameters.insert(parameter, array);
     }
@@ -227,6 +522,7 @@ fn parse_model(
     Ok(DeviceLut {
         name,
         axes,
+        finger_widths: None,
         parameters,
         parameter_names,
         device_parameters,
@@ -234,9 +530,13 @@ fn parse_model(
 }
 
 fn decode_axis(array: LutArray, model: &str, axis: Axis) -> Result<Vec<f64>, LutError> {
+    decode_named_axis(array, model, axis.as_str())
+}
+
+fn decode_named_axis(array: LutArray, model: &str, axis_name: &str) -> Result<Vec<f64>, LutError> {
     if array.shape().len() != 1 || array.is_empty() {
         return Err(LutError::schema(
-            format!("model '{model}'.{axis}"),
+            format!("model '{model}'.{axis_name}"),
             format!(
                 "axis must be a non-empty vector, found shape {:?}",
                 array.shape()
@@ -247,14 +547,14 @@ fn decode_axis(array: LutArray, model: &str, axis: Axis) -> Result<Vec<f64>, Lut
     if values.iter().any(|value| !value.is_finite()) {
         return Err(LutError::NonFinite {
             model: model.to_owned(),
-            context: format!("'{axis}' axis"),
+            context: format!("'{axis_name}' axis"),
         });
     }
     let ascending = values.windows(2).all(|window| window[0] < window[1]);
     let descending = values.windows(2).all(|window| window[0] > window[1]);
     if values.len() > 1 && !ascending && !descending {
         return Err(LutError::schema(
-            format!("model '{model}'.{axis}"),
+            format!("model '{model}'.{axis_name}"),
             "axis values must be strictly monotonic",
         ));
     }
@@ -263,7 +563,7 @@ fn decode_axis(array: LutArray, model: &str, axis: Axis) -> Result<Vec<f64>, Lut
 
 fn validate_parameter_shape(
     array: &LutArray,
-    expected: [usize; 4],
+    expected: &[usize],
     model_context: &str,
     parameter: &str,
 ) -> Result<(), LutError> {

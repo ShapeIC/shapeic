@@ -1,7 +1,9 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use shapeic_lut::{Axis, DType, Expr, LookupTable, LutError, MosExpression, OperatingPoint};
+use shapeic_lut::{
+    Axis, DType, Expr, LookupTable, LutError, LutPoint, MosExpression, OperatingPoint,
+};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sstadex_combined.npz")
@@ -9,6 +11,11 @@ fn fixture_path() -> PathBuf {
 
 fn fixture() -> LookupTable {
     LookupTable::open(fixture_path()).expect("fixture should load")
+}
+
+fn five_dimensional_fixture() -> LookupTable {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shapeic_v2_5d.npz");
+    LookupTable::open(path).expect("five-dimensional fixture should load")
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -203,4 +210,147 @@ fn reports_query_and_format_errors() {
         LookupTable::from_reader(empty_zip),
         Err(LutError::Zip(zip::result::ZipError::FileNotFound))
     ));
+}
+
+#[test]
+fn loads_shapeic_v2_metadata_and_five_dimensional_arrays() {
+    let table = five_dimensional_fixture();
+    assert_eq!(table.description(), Some("IHP SG13G2 LV NMOS smoke LUT"));
+    assert_eq!(table.simulator(), Some("ngspice"));
+    assert_eq!(table.model_names().collect::<Vec<_>>(), ["sg13_lv_nmos"]);
+
+    let model = table.model("sg13_lv_nmos").expect("nmos");
+    assert_eq!(model.axis(Axis::Length), [0.4e-6, 0.8e-6]);
+    assert_eq!(model.axis(Axis::Vbs), [0.0, -0.1]);
+    assert_eq!(model.finger_widths(), Some([0.5e-6, 1.0e-6].as_slice()));
+    assert_eq!(model.array("id").expect("id").dtype(), DType::F32);
+    assert_eq!(model.array("id").expect("id").shape(), [2, 2, 2, 2, 2]);
+    assert_eq!(model.device_parameter("nf").expect("nf"), 1.0);
+}
+
+#[test]
+fn interpolates_five_dimensions_and_expressions_on_corners() {
+    let table = five_dimensional_fixture();
+    let model = table.model("sg13_lv_nmos").expect("nmos");
+    let midpoint = LutPoint::new(OperatingPoint::new(0.6e-6, -0.05, 0.5, 0.5), 0.75e-6);
+    let id = model.array("id").expect("id");
+    let gm = model.array("gm").expect("gm");
+    let mut id_sum = 0.0;
+    let mut gmid_sum = 0.0;
+    let mut jd_sum = 0.0;
+    for corner in 0..32 {
+        let index = (0..5)
+            .map(|dimension| usize::from(corner & (1 << dimension) != 0))
+            .collect::<Vec<_>>();
+        let corner_id = id.get_f64(&index).expect("id corner");
+        id_sum += corner_id;
+        gmid_sum += gm.get_f64(&index).expect("gm corner") / corner_id;
+        jd_sum += corner_id / model.finger_widths().expect("widths")[index[4]];
+    }
+
+    assert_close(
+        model
+            .query_parameter_at(&midpoint, "id")
+            .expect("five-dimensional id"),
+        id_sum / 32.0,
+    );
+    let gmid = model
+        .standard_expression(MosExpression::GmOverId)
+        .expect("gmid");
+    assert_close(
+        model
+            .query_expression_at(&midpoint, &gmid)
+            .expect("five-dimensional gmid"),
+        gmid_sum / 32.0,
+    );
+    let jd = model
+        .standard_expression(MosExpression::CurrentDensity)
+        .expect("current density");
+    assert_close(
+        model
+            .query_expression_at(&midpoint, &jd)
+            .expect("five-dimensional current density"),
+        jd_sum / 32.0,
+    );
+}
+
+#[test]
+fn keeps_four_and_five_dimensional_query_apis_explicit() {
+    let five_dimensional = five_dimensional_fixture();
+    let model = five_dimensional.model("sg13_lv_nmos").expect("nmos");
+    let operating_point = OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4);
+    assert!(matches!(
+        model.query_parameter(&operating_point, "id"),
+        Err(LutError::FingerWidthRequired { .. })
+    ));
+    assert!(matches!(
+        model.query_parameter_at(&LutPoint::new(operating_point, 2.0e-6), "id"),
+        Err(LutError::FingerWidthOutOfRange { .. })
+    ));
+    assert!(matches!(
+        model.query_parameter_at(&LutPoint::new(operating_point, f64::NAN), "id"),
+        Err(LutError::NonFinite { .. })
+    ));
+
+    let legacy = fixture();
+    let model = legacy.model("fixture_nmos").expect("legacy nmos");
+    assert!(matches!(
+        model.query_parameter_at(&LutPoint::new(operating_point, 2.0), "id"),
+        Err(LutError::NoFingerWidthAxis { .. })
+    ));
+}
+
+#[test]
+fn evaluates_five_dimensional_batches() {
+    let table = five_dimensional_fixture();
+    let model = table.model("sg13_lv_nmos").expect("nmos");
+    let points = [
+        LutPoint::new(OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4), 0.5e-6),
+        LutPoint::new(OperatingPoint::new(0.8e-6, -0.1, 0.6, 0.6), 1.0e-6),
+    ];
+    let values = model
+        .query_many_at(&points, &[Expr::parameter("id"), Expr::finger_width()])
+        .expect("five-dimensional batch");
+    assert_eq!(values.len(), 2);
+    assert_close(values[0][1], 0.5e-6);
+    assert_close(values[1][1], 1.0e-6);
+}
+
+#[test]
+fn sizes_for_current_and_returns_per_finger_expressions() {
+    let table = five_dimensional_fixture();
+    let model = table.model("sg13_lv_nmos").expect("nmos");
+    let operating_point = OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4);
+    let widths = model.finger_widths().expect("finger widths");
+    let minimum_current = model
+        .query_parameter_at(&LutPoint::new(operating_point, widths[0]), "id")
+        .expect("minimum-width current");
+    let maximum_current = model
+        .query_parameter_at(
+            &LutPoint::new(operating_point, widths[widths.len() - 1]),
+            "id",
+        )
+        .expect("maximum-width current");
+    let requested_current = (minimum_current + maximum_current) / 2.0;
+    let gm = Expr::parameter("gm");
+
+    let result = model
+        .size_for_current(
+            &operating_point,
+            requested_current,
+            std::slice::from_ref(&gm),
+        )
+        .expect("inverse current sizing");
+
+    assert_eq!(result.nf, 1);
+    assert_close(result.point.finger_width, (widths[0] + widths[1]) / 2.0);
+    assert_close(result.total_width, result.point.finger_width);
+    assert_close(result.predicted_current, requested_current);
+    assert_close(result.current_error, 0.0);
+    assert_close(
+        result.values[0],
+        model
+            .query_expression_at(&result.point, &gm)
+            .expect("per-finger gm"),
+    );
 }

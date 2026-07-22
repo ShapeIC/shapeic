@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use shapeic_lut::verification::{VerificationConfig, VerificationEngine, VerificationInput};
-use shapeic_lut::{DeviceLut, LookupTable, LutError, MosExpression, OperatingPoint};
+use shapeic_lut::{DeviceLut, Expr, LookupTable, LutError, MosExpression, OperatingPoint};
 
 const IHP_MAX_WIDTH_PER_FINGER: f64 = 10.0e-6;
 
@@ -40,7 +40,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let lengths = [0.4e-6];
     let vgs_values = [0.6];
-    let ids_values = [100e-6, 150e-6, 200e-6, 300e-6, 380e-6, 400e-6, 500e-6, 1000e-6];
+    let ids_values = [
+        100e-6, 150e-6, 200e-6, 300e-6, 380e-6, 400e-6, 500e-6, 1000e-6,
+    ];
 
     let (coupled_points, coupled_ids): (Vec<OperatingPoint>, Vec<f64>) = lengths
         .into_iter()
@@ -68,6 +70,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         "sg13_lv_nmos",
         manifest.join("examples/verification/ihp-sg13g2/nmos.spice"),
         output_root.join("nmos_sweep_wf"),
+        &pdk_root,
+        coupled_points.clone(),
+        coupled_ids.clone(),
+    )?;
+
+    verify_sweep_5d(
+        &manifest.join("lut_generation/generated/ihp_sg13g2_lv_nmos_5d.npz"),
+        "sg13_lv_nmos",
+        manifest.join("examples/verification/ihp-sg13g2/nmos.spice"),
+        output_root.join("nmos_sweep_5d"),
         &pdk_root,
         coupled_points,
         coupled_ids,
@@ -153,6 +165,30 @@ fn verify_sweep_with_wf(
     Ok(())
 }
 
+fn verify_sweep_5d(
+    lut_path: &Path,
+    model_name: &str,
+    template: PathBuf,
+    output_dir: PathBuf,
+    pdk_root: &Path,
+    points: Vec<OperatingPoint>,
+    ids: Vec<f64>,
+) -> Result<(), Box<dyn Error>> {
+    let table = LookupTable::open(lut_path)?;
+    let model = table.model(model_name)?;
+
+    let mut inputs: Vec<VerificationInput> = Vec::new();
+    for (point, id) in points.iter().zip(ids.iter()) {
+        inputs.push(manually_calculated_input_5d(model, point, id)?);
+    }
+
+    let engine = VerificationEngine::new(ihp_config(template, output_dir, pdk_root))?;
+    let report = engine.verify(&inputs)?;
+    println!("{model_name}: {}", report.summary_path.display());
+    print!("{}", report.render_table());
+    Ok(())
+}
+
 fn manually_calculated_input(
     model: &DeviceLut,
     point: OperatingPoint,
@@ -211,21 +247,53 @@ fn manually_calculated_input_v3(
     id: &f64,
 ) -> Result<VerificationInput, LutError> {
     let lut_id = model.query_parameter(point, "id")?;
-    let nf = (id/lut_id).round();
-    println!("{}", id/lut_id);
+    let nf = (id / lut_id).round();
+    println!("{}", id / lut_id);
     println!("{}", nf);
 
-    let width = lut_width*nf;
-    let id_final = lut_id*nf;
+    let width = lut_width * nf;
+    let id_final = lut_id * nf;
     let gds = model.query_parameter(point, "gds")? * nf;
     let gm = model.query_parameter(point, "gm")? * nf;
-    
+
     let gm_id = gm / id_final;
     let jd = id_final / width;
 
     //let nf = minimum_ihp_nf(width);
     Ok(VerificationInput::new(*point, width, nf as u32)
         .reference("id", *id)
+        .reference("gm", gm)
+        .reference("gds", gds)
+        .reference("gm_id", gm_id)
+        .reference("jd", jd))
+}
+
+fn manually_calculated_input_5d(
+    model: &DeviceLut,
+    point: &OperatingPoint,
+    id: &f64,
+) -> Result<VerificationInput, LutError> {
+    let expressions = [Expr::parameter("gds"), Expr::parameter("gm")];
+    let sizing = model.size_for_current(point, *id, &expressions)?;
+    println!(
+        "Target ID={:.6e}, LUT ID={:.6e}, error={:.6e}, Wf={:.6e}, nf={}",
+        sizing.requested_current,
+        sizing.predicted_current,
+        sizing.current_error,
+        sizing.point.finger_width,
+        sizing.nf,
+    );
+
+    let nf = f64::from(sizing.nf);
+    let width = sizing.total_width;
+    let id_final = sizing.predicted_current;
+    let gds = sizing.values[0] * nf;
+    let gm = sizing.values[1] * nf;
+    let gm_id = gm / id_final;
+    let jd = id_final / width;
+
+    Ok(VerificationInput::new(*point, width, sizing.nf)
+        .reference("id", id_final)
         .reference("gm", gm)
         .reference("gds", gds)
         .reference("gm_id", gm_id)

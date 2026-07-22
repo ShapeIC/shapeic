@@ -61,11 +61,11 @@ impl LutArray {
         }
     }
 
-    pub(crate) fn scalar_or_grid_value(&self, index: [usize; 4]) -> Option<f64> {
+    pub(crate) fn scalar_or_grid_value(&self, index: &[usize]) -> Option<f64> {
         if self.shape() == [1] {
             self.get_f64(&[0])
         } else {
-            self.get_f64(&index)
+            self.get_f64(index)
         }
     }
 

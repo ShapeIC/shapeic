@@ -8,6 +8,7 @@ use crate::{Axis, DeviceLut, LutError};
 pub enum Expr {
     Constant(f64),
     Axis(Axis),
+    FingerWidth,
     Parameter(String),
     DeviceParameter(String),
     Neg(Box<Expr>),
@@ -26,6 +27,10 @@ impl Expr {
         Self::Axis(axis)
     }
 
+    pub const fn finger_width() -> Self {
+        Self::FingerWidth
+    }
+
     pub fn parameter(name: impl Into<String>) -> Self {
         Self::Parameter(name.into())
     }
@@ -34,14 +39,11 @@ impl Expr {
         Self::DeviceParameter(name.into())
     }
 
-    pub(crate) fn evaluate_at(
-        &self,
-        model: &DeviceLut,
-        index: [usize; 4],
-    ) -> Result<f64, LutError> {
+    pub(crate) fn evaluate_at(&self, model: &DeviceLut, index: &[usize]) -> Result<f64, LutError> {
         let value = match self {
             Self::Constant(value) => *value,
             Self::Axis(axis) => model.axis(*axis)[index[axis.index()]],
+            Self::FingerWidth => model.finger_width_at(index)?,
             Self::Parameter(name) => {
                 let array = model.array(name)?;
                 array.scalar_or_grid_value(index).ok_or_else(|| {
@@ -83,6 +85,7 @@ impl fmt::Display for Expr {
         match self {
             Self::Constant(value) => write!(formatter, "{value}"),
             Self::Axis(axis) => formatter.write_str(axis.as_str()),
+            Self::FingerWidth => formatter.write_str("finger_width"),
             Self::Parameter(name) => formatter.write_str(name),
             Self::DeviceParameter(name) => write!(formatter, "device.{name}"),
             Self::Neg(expression) => write!(formatter, "(-{expression})"),
@@ -189,6 +192,10 @@ pub(crate) fn standard_expression(
 }
 
 fn width_expression(model: &DeviceLut) -> Result<Expr, LutError> {
+    if model.finger_widths().is_some() {
+        return Ok(Expr::finger_width());
+    }
+
     if let Some(width) = model.device_parameters.get("w") {
         return Ok(Expr::constant(*width));
     }

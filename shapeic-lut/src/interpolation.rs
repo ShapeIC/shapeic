@@ -1,10 +1,20 @@
-use crate::{Axis, DeviceLut, Expr, LutError, OperatingPoint};
+use crate::{Axis, DeviceLut, Expr, LutError, LutPoint, OperatingPoint};
 
 #[derive(Clone, Copy, Debug)]
-struct Bracket {
-    lower: usize,
-    upper: usize,
-    upper_weight: f64,
+pub(crate) struct Bracket {
+    pub(crate) lower: usize,
+    pub(crate) upper: usize,
+    pub(crate) upper_weight: f64,
+}
+
+impl Bracket {
+    pub(crate) const fn exact(index: usize) -> Self {
+        Self {
+            lower: index,
+            upper: index,
+            upper_weight: 0.0,
+        }
+    }
 }
 
 impl DeviceLut {
@@ -14,6 +24,11 @@ impl DeviceLut {
         point: &OperatingPoint,
         parameter: &str,
     ) -> Result<f64, LutError> {
+        if self.finger_widths().is_some() {
+            return Err(LutError::FingerWidthRequired {
+                model: self.name().to_owned(),
+            });
+        }
         self.query_expression(point, &self.parameter_expression(parameter)?)
     }
 
@@ -23,38 +38,40 @@ impl DeviceLut {
         point: &OperatingPoint,
         expression: &Expr,
     ) -> Result<f64, LutError> {
-        let [length, vbs, vgs, vds] = Axis::ALL.map(|axis| self.bracket(axis, point.value(axis)));
-        let brackets = [length?, vbs?, vgs?, vds?];
-
-        let mut result = 0.0;
-        for corner in 0_u8..16 {
-            let mut index = [0; 4];
-            let mut weight = 1.0;
-            for dimension in 0..4 {
-                let upper = corner & (1 << dimension) != 0;
-                let bracket = brackets[dimension];
-                if upper {
-                    index[dimension] = bracket.upper;
-                    weight *= bracket.upper_weight;
-                } else {
-                    index[dimension] = bracket.lower;
-                    weight *= 1.0 - bracket.upper_weight;
-                }
-            }
-
-            if weight != 0.0 {
-                result += weight * expression.evaluate_at(self, index)?;
-            }
+        if self.finger_widths().is_some() {
+            return Err(LutError::FingerWidthRequired {
+                model: self.name().to_owned(),
+            });
         }
+        let brackets = self.operating_point_brackets(point)?;
+        self.interpolate(&brackets, expression)
+    }
 
-        if result.is_finite() {
-            Ok(result)
-        } else {
-            Err(LutError::NonFinite {
-                model: self.name.clone(),
-                context: format!("interpolated expression '{expression}'"),
-            })
-        }
+    /// Interpolate a direct parameter from a five-dimensional Shapeic LUT.
+    pub fn query_parameter_at(&self, point: &LutPoint, parameter: &str) -> Result<f64, LutError> {
+        self.query_expression_at(point, &self.parameter_expression(parameter)?)
+    }
+
+    /// Evaluate an expression on the 32 corners surrounding a five-dimensional point.
+    pub fn query_expression_at(
+        &self,
+        point: &LutPoint,
+        expression: &Expr,
+    ) -> Result<f64, LutError> {
+        let widths = self
+            .finger_widths()
+            .ok_or_else(|| LutError::NoFingerWidthAxis {
+                model: self.name().to_owned(),
+            })?;
+        let [length, vbs, vgs, vds] = self.operating_point_brackets(&point.operating_point)?;
+        let brackets = [
+            length,
+            vbs,
+            vgs,
+            vds,
+            self.bracket_finger_width(widths, point.finger_width)?,
+        ];
+        self.interpolate(&brackets, expression)
     }
 
     /// Evaluate several expressions for several points, returning point-major rows.
@@ -81,6 +98,85 @@ impl DeviceLut {
                     .collect()
             })
             .collect()
+    }
+
+    /// Evaluate several expressions for several five-dimensional points.
+    pub fn query_many_at(
+        &self,
+        points: &[LutPoint],
+        expressions: &[Expr],
+    ) -> Result<Vec<Vec<f64>>, LutError> {
+        points
+            .iter()
+            .enumerate()
+            .map(|(point_index, point)| {
+                expressions
+                    .iter()
+                    .enumerate()
+                    .map(|(expression_index, expression)| {
+                        self.query_expression_at(point, expression)
+                            .map_err(|source| LutError::Batch {
+                                point_index,
+                                expression_index,
+                                source: Box::new(source),
+                            })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn interpolate(
+        &self,
+        brackets: &[Bracket],
+        expression: &Expr,
+    ) -> Result<f64, LutError> {
+        self.interpolate_many(brackets, &[expression])
+            .map(|mut values| values.remove(0))
+    }
+
+    pub(crate) fn interpolate_many(
+        &self,
+        brackets: &[Bracket],
+        expressions: &[&Expr],
+    ) -> Result<Vec<f64>, LutError> {
+        let mut results = vec![0.0; expressions.len()];
+        for corner in 0..(1_usize << brackets.len()) {
+            let mut index = vec![0; brackets.len()];
+            let mut weight = 1.0;
+            for (dimension, bracket) in brackets.iter().copied().enumerate() {
+                if corner & (1 << dimension) != 0 {
+                    index[dimension] = bracket.upper;
+                    weight *= bracket.upper_weight;
+                } else {
+                    index[dimension] = bracket.lower;
+                    weight *= 1.0 - bracket.upper_weight;
+                }
+            }
+            if weight != 0.0 {
+                for (result, expression) in results.iter_mut().zip(expressions) {
+                    *result += weight * expression.evaluate_at(self, &index)?;
+                }
+            }
+        }
+
+        for (result, expression) in results.iter().zip(expressions) {
+            if !result.is_finite() {
+                return Err(LutError::NonFinite {
+                    model: self.name.clone(),
+                    context: format!("interpolated expression '{expression}'"),
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    pub(crate) fn operating_point_brackets(
+        &self,
+        point: &OperatingPoint,
+    ) -> Result<[Bracket; 4], LutError> {
+        let [length, vbs, vgs, vds] = Axis::ALL.map(|axis| self.bracket(axis, point.value(axis)));
+        Ok([length?, vbs?, vgs?, vds?])
     }
 
     fn bracket(&self, axis: Axis, value: f64) -> Result<Bracket, LutError> {
@@ -136,4 +232,58 @@ impl DeviceLut {
             upper_weight,
         })
     }
+
+    pub(crate) fn bracket_finger_width(
+        &self,
+        values: &[f64],
+        value: f64,
+    ) -> Result<Bracket, LutError> {
+        if !value.is_finite() {
+            return Err(LutError::NonFinite {
+                model: self.name.clone(),
+                context: "input coordinate 'finger_width'".to_owned(),
+            });
+        }
+        let minimum = values[0].min(values[values.len() - 1]);
+        let maximum = values[0].max(values[values.len() - 1]);
+        if value < minimum || value > maximum {
+            return Err(LutError::FingerWidthOutOfRange {
+                model: self.name.clone(),
+                value,
+                minimum,
+                maximum,
+            });
+        }
+        bracket_monotonic(values, value)
+    }
+}
+
+fn bracket_monotonic(values: &[f64], value: f64) -> Result<Bracket, LutError> {
+    if values.len() == 1 {
+        return Ok(Bracket {
+            lower: 0,
+            upper: 0,
+            upper_weight: 0.0,
+        });
+    }
+    let ascending = values[0] < values[values.len() - 1];
+    let upper = if ascending {
+        values.partition_point(|candidate| *candidate < value)
+    } else {
+        values.partition_point(|candidate| *candidate > value)
+    };
+    if upper < values.len() && values[upper] == value {
+        return Ok(Bracket {
+            lower: upper,
+            upper,
+            upper_weight: 0.0,
+        });
+    }
+    let lower = upper.saturating_sub(1);
+    let upper = upper.min(values.len() - 1);
+    Ok(Bracket {
+        lower,
+        upper,
+        upper_weight: (value - values[lower]) / (values[upper] - values[lower]),
+    })
 }

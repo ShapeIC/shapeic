@@ -926,7 +926,9 @@ dependencies = [
  "csv",
  "ndarray",
  "ndarray-npy",
+ "serde",
  "serde-pickle",
+ "serde_json",
  "thiserror",
  "zip",
 ]

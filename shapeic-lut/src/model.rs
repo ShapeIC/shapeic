@@ -71,7 +71,23 @@ impl OperatingPoint {
     }
 }
 
-/// File-level metadata stored by the SSTADEx LUT generator.
+/// Five-dimensional coordinates used to query a width-dependent LUT.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LutPoint {
+    pub operating_point: OperatingPoint,
+    pub finger_width: f64,
+}
+
+impl LutPoint {
+    pub const fn new(operating_point: OperatingPoint, finger_width: f64) -> Self {
+        Self {
+            operating_point,
+            finger_width,
+        }
+    }
+}
+
+/// File-level metadata stored by a LUT generator.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LutMetadata {
     pub description: Option<String>,
@@ -132,6 +148,7 @@ impl LookupTable {
 pub struct DeviceLut {
     pub(crate) name: String,
     pub(crate) axes: [Vec<f64>; 4],
+    pub(crate) finger_widths: Option<Vec<f64>>,
     pub(crate) parameters: BTreeMap<String, LutArray>,
     pub(crate) parameter_names: Vec<String>,
     pub(crate) device_parameters: BTreeMap<String, f64>,
@@ -144,6 +161,11 @@ impl DeviceLut {
 
     pub fn axis(&self, axis: Axis) -> &[f64] {
         &self.axes[axis.index()]
+    }
+
+    /// Width-per-finger axis for a five-dimensional Shapeic LUT.
+    pub fn finger_widths(&self) -> Option<&[f64]> {
+        self.finger_widths.as_deref()
     }
 
     pub fn parameter_names(&self) -> &[String] {
@@ -186,5 +208,24 @@ impl DeviceLut {
 
     pub fn standard_expression(&self, expression: MosExpression) -> Result<Expr, LutError> {
         crate::expression::standard_expression(self, expression)
+    }
+
+    pub(crate) fn finger_width_at(&self, index: &[usize]) -> Result<f64, LutError> {
+        if let Some(widths) = &self.finger_widths {
+            let width_index = *index.get(4).ok_or_else(|| {
+                LutError::schema(
+                    format!("model '{}'.finger_width", self.name),
+                    "a five-dimensional expression was evaluated without a width index",
+                )
+            })?;
+            return widths.get(width_index).copied().ok_or_else(|| {
+                LutError::schema(
+                    format!("model '{}'.finger_width", self.name),
+                    format!("index {width_index} is outside shape [{}]", widths.len()),
+                )
+            });
+        }
+
+        self.device_parameter("w")
     }
 }
