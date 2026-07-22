@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
-use symbolica::prelude::{Matrix, parse};
+use symbolica::prelude::Matrix;
+#[cfg(test)]
+use symbolica::prelude::parse;
 use symbolica::domains::atom::AtomField;
 
 use crate::spice_parser::{NodeMap, SpiceError, spice_parser};

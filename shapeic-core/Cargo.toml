@@ -7,3 +7,7 @@ categories.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[dev-dependencies]
+shapeic-lut = { path = "../shapeic-lut" }
+shapeic-mna = { path = "../shapeic-mna" }
+symbolica = "2.1"

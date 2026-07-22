@@ -918,6 +918,11 @@ dependencies = [
 [[package]]
 name = "shapeic-core"
 version = "0.1.0"
+dependencies = [
+ "shapeic-lut",
+ "shapeic-mna",
+ "symbolica",
+]
 
 [[package]]
 name = "shapeic-lut"

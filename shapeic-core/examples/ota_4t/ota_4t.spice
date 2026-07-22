@@ -1,0 +1,19 @@
+* Four-transistor OTA small-signal model.
+* NMOS differential pair
+R_dp_m1 VOUT IBIAS r_gds_xdp
+G_dp_m1 VOUT IBIAS VINP IBIAS g_gm_xdp
+R_dp_m2 N1 IBIAS r_gds_xdp
+G_dp_m2 N1 IBIAS VINN IBIAS g_gm_xdp
+
+* PMOS active-load current mirror; M2 is diode connected.
+R_cm_m1 VOUT VDD r_gds_xcm
+G_cm_m1 VOUT VDD N1 VDD g_gm_xcm
+R_cm_m2 N1 VDD r_gds_xcm
+G_cm_m2 N1 VDD N1 VDD g_gm_xcm
+
+* The ideal tail source and supplies have zero small-signal excitation.
+I_tail IBIAS VSS 0
+V_dd VDD VSS 0
+V_n VINN VSS 0
+V_p VINP VSS 1
+.end
