@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import math
+import os
+import shutil
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+
+SUPPORTED_PARAMETERS = {
+    "weff",
+    "id",
+    "vth",
+    "vdsat",
+    "vdssat",
+    "vsat",
+    "gm",
+    "gmbs",
+    "gds",
+    "cgg",
+    "cgs",
+    "cbg",
+    "cgd",
+    "cdd",
+}
+
+
+@dataclass(frozen=True)
+class LinearRange:
+    start: float
+    stop: float
+    step: float
+    stop_inclusive: bool = True
+
+    def values(self) -> np.ndarray:
+        if not all(math.isfinite(value) for value in (self.start, self.stop, self.step)):
+            raise ValueError("range values must be finite")
+        if self.step == 0 or (self.stop - self.start) * self.step <= 0:
+            raise ValueError("range step must point from start toward stop")
+
+        tolerance = 1.0e-12 * max(abs(self.start), abs(self.stop), abs(self.step), 1.0)
+        values: list[float] = []
+        index = 0
+        while True:
+            value = self.start + index * self.step
+            before_stop = value < self.stop - tolerance if self.step > 0 else value > self.stop + tolerance
+            at_stop = math.isclose(value, self.stop, rel_tol=1.0e-12, abs_tol=tolerance)
+            if not before_stop and not (self.stop_inclusive and at_stop):
+                break
+            values.append(self.stop if at_stop else value)
+            index += 1
+
+        if not values:
+            raise ValueError("range produces no values")
+        if self.stop_inclusive and not math.isclose(
+            values[-1], self.stop, rel_tol=1.0e-12, abs_tol=tolerance
+        ):
+            raise ValueError("inclusive range step does not reach stop exactly")
+        return np.asarray(values, dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class SweepConfig:
+    length: np.ndarray
+    vbs: LinearRange
+    vgs: LinearRange
+    vds: LinearRange
+    finger_width: LinearRange
+
+    def axes(self) -> dict[str, np.ndarray]:
+        return {
+            "length": self.length,
+            "vbs": self.vbs.values(),
+            "vgs": self.vgs.values(),
+            "vds": self.vds.values(),
+            "finger_width": self.finger_width.values(),
+        }
+
+
+@dataclass(frozen=True)
+class SimulatorConfig:
+    binary: str
+    temperature_c: float
+    workers: int
+    model_library: Path
+    library_section: str
+    osdi_paths: tuple[Path, ...]
+    parameters: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DeviceConfig:
+    name: str
+    instance: str
+    hierarchy: str
+    nf: int
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    source_path: Path
+    output_path: Path
+    description: str
+    simulator: SimulatorConfig
+    device: DeviceConfig
+    sweep: SweepConfig
+
+
+def load_config(path: Path) -> GenerationConfig:
+    source_path = path.resolve()
+    with source_path.open("rb") as handle:
+        raw = tomllib.load(handle)
+
+    output = _table(raw, "output")
+    simulator = _table(raw, "simulator")
+    device = _table(raw, "device")
+    sweep = _table(raw, "sweep")
+
+    output_path = _resolve_path(str(output["path"]), source_path.parent)
+    model_library = _resolve_path(str(simulator["model_library"]), source_path.parent)
+    osdi_paths = tuple(
+        _resolve_path(str(value), source_path.parent) for value in simulator.get("osdi_paths", [])
+    )
+    parameters = tuple(str(value).lower() for value in simulator["parameters"])
+    unknown = sorted(set(parameters) - SUPPORTED_PARAMETERS)
+    if unknown:
+        raise ValueError(f"unsupported parameters: {', '.join(unknown)}")
+    if not parameters or len(parameters) != len(set(parameters)):
+        raise ValueError("parameters must be a non-empty list without duplicates")
+
+    lengths = np.asarray(sweep["length"], dtype=np.float64)
+    _validate_axis(lengths, "length")
+    config = GenerationConfig(
+        source_path=source_path,
+        output_path=output_path,
+        description=str(output.get("description", "Shapeic five-dimensional MOS LUT")),
+        simulator=SimulatorConfig(
+            binary=str(simulator.get("binary", "ngspice")),
+            temperature_c=float(simulator.get("temperature_c", 27.0)),
+            workers=int(simulator.get("workers", 1)),
+            model_library=model_library,
+            library_section=str(simulator.get("library_section", "mos_tt")),
+            osdi_paths=osdi_paths,
+            parameters=parameters,
+        ),
+        device=DeviceConfig(
+            name=str(device["name"]),
+            instance=str(device.get("instance", "XM1")),
+            hierarchy=str(device["hierarchy"]),
+            nf=int(device.get("nf", 1)),
+        ),
+        sweep=SweepConfig(
+            length=lengths,
+            vbs=_linear_range(sweep, "vbs"),
+            vgs=_linear_range(sweep, "vgs"),
+            vds=_linear_range(sweep, "vds"),
+            finger_width=_linear_range(sweep, "finger_width"),
+        ),
+    )
+    _validate_config(config)
+    for name, values in config.sweep.axes().items():
+        _validate_axis(values, name)
+    return config
+
+
+def _table(values: dict[str, Any], name: str) -> dict[str, Any]:
+    value = values.get(name)
+    if not isinstance(value, dict):
+        raise ValueError(f"missing [{name}] table")
+    return value
+
+
+def _linear_range(sweep: dict[str, Any], name: str) -> LinearRange:
+    values = _table(sweep, name)
+    return LinearRange(
+        start=float(values["start"]),
+        stop=float(values["stop"]),
+        step=float(values["step"]),
+        stop_inclusive=bool(values.get("stop_inclusive", True)),
+    )
+
+
+def _resolve_path(value: str, base: Path) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if "$" in expanded:
+        raise ValueError(f"path contains an undefined environment variable: {value}")
+    path = Path(expanded)
+    return (base / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def _validate_axis(values: np.ndarray, name: str) -> None:
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError(f"{name} must be a non-empty finite vector")
+    if values.size > 1:
+        differences = np.diff(values)
+        if not (np.all(differences > 0) or np.all(differences < 0)):
+            raise ValueError(f"{name} values must be strictly monotonic")
+
+
+def _validate_config(config: GenerationConfig) -> None:
+    simulator = config.simulator
+    if simulator.workers < 1:
+        raise ValueError("workers must be at least one")
+    if not math.isfinite(simulator.temperature_c):
+        raise ValueError("temperature_c must be finite")
+    if shutil.which(simulator.binary) is None:
+        raise ValueError(f"simulator binary '{simulator.binary}' is not accessible")
+    if not simulator.model_library.is_file():
+        raise FileNotFoundError(f"model library not found: {simulator.model_library}")
+    for path in simulator.osdi_paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"OSDI model not found: {path}")
+    if not config.device.name or not config.device.hierarchy or config.device.nf != 1:
+        raise ValueError("device name and hierarchy are required, and nf must equal one")
+    if config.output_path.suffix != ".npz":
+        raise ValueError("output path must end in .npz")

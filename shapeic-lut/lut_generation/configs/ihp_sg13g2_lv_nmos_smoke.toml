@@ -1,0 +1,44 @@
+[output]
+path = "../generated/ihp_sg13g2_lv_nmos_smoke.npz"
+description = "IHP SG13G2 LV NMOS smoke LUT"
+
+[simulator]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 1
+model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
+library_section = "mos_tt"
+osdi_paths = [
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
+]
+parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgs", "cgd", "cdd"]
+
+[device]
+name = "sg13_lv_nmos"
+instance = "XM1"
+hierarchy = "n.xm1.nsg13_lv_nmos"
+nf = 1
+
+[sweep]
+length = [0.4e-6, 0.8e-6]
+
+[sweep.vgs]
+start = 0.4
+stop = 0.6
+step = 0.2
+
+[sweep.vds]
+start = 0.4
+stop = 0.6
+step = 0.2
+
+[sweep.vbs]
+start = 0.0
+stop = -0.1
+step = -0.1
+
+[sweep.finger_width]
+start = 0.5e-6
+stop = 1.0e-6
+step = 0.5e-6
