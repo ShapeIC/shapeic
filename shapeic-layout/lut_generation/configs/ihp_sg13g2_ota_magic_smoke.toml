@@ -1,0 +1,19 @@
+pdk = "ihp-sg13g2"
+layout_policy = "symmetric-adjacent-with-edge-dummies-v3"
+primitives = ["simplediffpair", "currentmirror"]
+
+[output]
+path = "../generated/ihp_sg13g2_ota_physical_magic_smoke.npz"
+
+[sweep]
+# Exercise the minimum and maximum finger counts with real Magic extraction.
+length = [0.4]
+finger_width = [0.15]
+nf = [1, 20]
+
+[extraction]
+backend = "magic"
+magic_binary = "magic"
+magic_rcfile = "${IHP_PDK_ROOT}/libs.tech/magic/ihp-sg13g2.magicrc"
+work_directory = "../work-magic-smoke"
+keep_work = true

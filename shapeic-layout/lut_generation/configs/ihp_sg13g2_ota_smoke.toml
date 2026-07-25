@@ -1,0 +1,16 @@
+pdk = "ihp-sg13g2"
+layout_policy = "symmetric-adjacent-with-edge-dummies-v3"
+primitives = ["simplediffpair", "currentmirror"]
+
+[output]
+path = "../generated/ihp_sg13g2_ota_physical_smoke.npz"
+
+[sweep]
+length = [0.4, 0.8]
+finger_width = [0.15, 10.0]
+nf = [1, 2, 20]
+
+[extraction]
+backend = "synthetic"
+work_directory = "../work-smoke"
+keep_work = true

@@ -1,0 +1,19 @@
+pdk = "ihp-sg13g2"
+layout_policy = "symmetric-adjacent-with-edge-dummies-v3"
+primitives = ["simplediffpair", "currentmirror"]
+
+[output]
+path = "../generated/ihp_sg13g2_ota_physical.npz"
+
+[sweep]
+# Values are expressed in micrometers. The archive stores SI units.
+length = [0.4, 0.8, 1.6, 3.2, 6.4]
+finger_width = [0.15, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+nf = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+[extraction]
+backend = "magic"
+magic_binary = "magic"
+magic_rcfile = "${IHP_PDK_ROOT}/libs.tech/magic/ihp-sg13g2.magicrc"
+work_directory = "../work"
+keep_work = false

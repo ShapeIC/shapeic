@@ -1,0 +1,5 @@
+-r requirements.txt
+# ihp-gdsfactory is installed separately with --no-deps; see README.md.
+gdsfactory~=9.44.0
+sax~=0.17.0
+scikit-rf>=1.0.0

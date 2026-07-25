@@ -1,0 +1,6 @@
+numpy>=2.0
+
+# Required only by the real IHP layout backend:
+# gdsfactory
+# ihp-gdsfactory
+
