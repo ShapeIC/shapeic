@@ -536,9 +536,15 @@ mod tests {
         ));
         fs::create_dir(&root).expect("temp directory");
         let path = root.join("results.tsv");
-        fs::write(&path, "scale id gm\n0 1e-3 2e-3\n").expect("fixture");
+        fs::write(
+            &path,
+            "scale id gm cgg cgd\n0 1e-3 2e-3 4.5e-15 -2.25e-16\n",
+        )
+        .expect("fixture");
         let values = parse_wrdata(&path).expect("parse");
         assert_eq!(values["id"], 1.0e-3);
+        assert_eq!(values["cgg"], 4.5e-15);
+        assert_eq!(values["cgd"], -2.25e-16);
 
         fs::write(&path, "scale id\n0 1\n1 2\n").expect("fixture");
         assert!(parse_wrdata(&path).is_err());

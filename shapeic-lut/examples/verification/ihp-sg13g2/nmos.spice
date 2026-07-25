@@ -13,14 +13,54 @@ pre_osdi {{psp_nqs_osdi}}
 save i(vds)
 save @n.xm1.nsg13_lv_nmos[gm]
 save @n.xm1.nsg13_lv_nmos[gds]
+save @n.xm1.nsg13_lv_nmos[cgg]
+save @n.xm1.nsg13_lv_nmos[cgd]
+save @n.xm1.nsg13_lv_nmos[cgs]
+save @n.xm1.nsg13_lv_nmos[cgb]
+save @n.xm1.nsg13_lv_nmos[cdg]
+save @n.xm1.nsg13_lv_nmos[cdd]
+save @n.xm1.nsg13_lv_nmos[cds]
+save @n.xm1.nsg13_lv_nmos[cdb]
+save @n.xm1.nsg13_lv_nmos[csg]
+save @n.xm1.nsg13_lv_nmos[csd]
+save @n.xm1.nsg13_lv_nmos[css]
+save @n.xm1.nsg13_lv_nmos[csb]
+save @n.xm1.nsg13_lv_nmos[cbg]
+save @n.xm1.nsg13_lv_nmos[cbd]
+save @n.xm1.nsg13_lv_nmos[cbs]
+save @n.xm1.nsg13_lv_nmos[cbb]
+save @n.xm1.nsg13_lv_nmos[cgsol]
+save @n.xm1.nsg13_lv_nmos[cgdol]
+save @n.xm1.nsg13_lv_nmos[cjs]
+save @n.xm1.nsg13_lv_nmos[cjd]
 op
 let id = abs(i(vds))
 let gm = @n.xm1.nsg13_lv_nmos[gm]
 let gds = @n.xm1.nsg13_lv_nmos[gds]
 let gm_id = gm / id
 let jd = id / {{width}}
+let cgg = @n.xm1.nsg13_lv_nmos[cgg]
+let cgd = @n.xm1.nsg13_lv_nmos[cgd]
+let cgs = @n.xm1.nsg13_lv_nmos[cgs]
+let cgb = @n.xm1.nsg13_lv_nmos[cgb]
+let cdg = @n.xm1.nsg13_lv_nmos[cdg]
+let cdd = @n.xm1.nsg13_lv_nmos[cdd]
+let cds = @n.xm1.nsg13_lv_nmos[cds]
+let cdb = @n.xm1.nsg13_lv_nmos[cdb]
+let csg = @n.xm1.nsg13_lv_nmos[csg]
+let csd = @n.xm1.nsg13_lv_nmos[csd]
+let css = @n.xm1.nsg13_lv_nmos[css]
+let csb = @n.xm1.nsg13_lv_nmos[csb]
+let cbg = @n.xm1.nsg13_lv_nmos[cbg]
+let cbd = @n.xm1.nsg13_lv_nmos[cbd]
+let cbs = @n.xm1.nsg13_lv_nmos[cbs]
+let cbb = @n.xm1.nsg13_lv_nmos[cbb]
+let cgsol = @n.xm1.nsg13_lv_nmos[cgsol]
+let cgdol = @n.xm1.nsg13_lv_nmos[cgdol]
+let cjs = @n.xm1.nsg13_lv_nmos[cjs]
+let cjd = @n.xm1.nsg13_lv_nmos[cjd]
 set wr_vecnames
 set wr_singlescale
-wrdata {{results_path}} id gm gds gm_id jd
+wrdata {{results_path}} id gm gds gm_id jd cgg cgd cgs cgb cdg cdd cds cdb csg csd css csb cbg cbd cbs cbb cgsol cgdol cjs cjd
 .endc
 .end

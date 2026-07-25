@@ -47,5 +47,8 @@ pub mod verification;
 pub use array::{DType, LutArray};
 pub use error::LutError;
 pub use expression::{Expr, MosExpression};
-pub use model::{Axis, DeviceLut, LookupTable, LutMetadata, LutPoint, OperatingPoint};
+pub use model::{
+    Axis, DeviceLut, LookupTable, LutMetadata, LutPoint, MosCapacitanceMatrix,
+    MosExtrinsicCapacitances, OperatingPoint,
+};
 pub use sizing::CurrentSizingResult;

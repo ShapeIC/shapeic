@@ -1,4 +1,7 @@
-use crate::{Axis, DeviceLut, Expr, LutError, LutPoint, OperatingPoint};
+use crate::{
+    Axis, DeviceLut, Expr, LutError, LutPoint, MosCapacitanceMatrix, MosExtrinsicCapacitances,
+    OperatingPoint,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Bracket {
@@ -18,6 +21,70 @@ impl Bracket {
 }
 
 impl DeviceLut {
+    /// Interpolate all sixteen intrinsic MOS capacitance coefficients in one query.
+    pub fn query_capacitance_matrix(
+        &self,
+        point: &OperatingPoint,
+    ) -> Result<MosCapacitanceMatrix, LutError> {
+        if self.finger_widths().is_some() {
+            return Err(LutError::FingerWidthRequired {
+                model: self.name().to_owned(),
+            });
+        }
+        let brackets = self.operating_point_brackets(point)?;
+        self.interpolate_capacitance_matrix(&brackets)
+    }
+
+    /// Interpolate all sixteen intrinsic MOS capacitance coefficients in one 5-D query.
+    pub fn query_capacitance_matrix_at(
+        &self,
+        point: &LutPoint,
+    ) -> Result<MosCapacitanceMatrix, LutError> {
+        let widths = self
+            .finger_widths()
+            .ok_or_else(|| LutError::NoFingerWidthAxis {
+                model: self.name().to_owned(),
+            })?;
+        let operating = self.operating_point_brackets(&point.operating_point)?;
+        let brackets = [
+            operating[0],
+            operating[1],
+            operating[2],
+            operating[3],
+            self.bracket_finger_width(widths, point.finger_width)?,
+        ];
+        self.interpolate_capacitance_matrix(&brackets)
+    }
+
+    /// Interpolate the four nf anchors and evaluate total extrinsic capacitances.
+    pub fn query_extrinsic_capacitances_at(
+        &self,
+        point: &LutPoint,
+        nf: u32,
+    ) -> Result<MosExtrinsicCapacitances, LutError> {
+        let widths = self
+            .finger_widths()
+            .ok_or_else(|| LutError::NoFingerWidthAxis {
+                model: self.name().to_owned(),
+            })?;
+        let operating = self.operating_point_brackets(&point.operating_point)?;
+        let brackets = [
+            operating[0],
+            operating[1],
+            operating[2],
+            operating[3],
+            self.bracket_finger_width(widths, point.finger_width)?,
+        ];
+        let expressions = self
+            .extrinsic_capacitance_sample_expressions()?
+            .ok_or_else(|| LutError::ExtrinsicCapacitanceSamplesUnavailable {
+                model: self.name().to_owned(),
+            })?;
+        let references = expressions.iter().collect::<Vec<_>>();
+        let values = self.interpolate_many(&brackets, &references)?;
+        MosExtrinsicCapacitances::from_nf_samples(nf, &values)
+    }
+
     /// Interpolate a direct LUT parameter at a physical operating point.
     pub fn query_parameter(
         &self,
@@ -169,6 +236,19 @@ impl DeviceLut {
             }
         }
         Ok(results)
+    }
+
+    fn interpolate_capacitance_matrix(
+        &self,
+        brackets: &[Bracket],
+    ) -> Result<MosCapacitanceMatrix, LutError> {
+        let expressions = MosCapacitanceMatrix::PARAMETERS
+            .map(|name| self.parameter_expression(name))
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let references = expressions.iter().collect::<Vec<_>>();
+        let values = self.interpolate_many(brackets, &references)?;
+        MosCapacitanceMatrix::from_flat(&values)
     }
 
     pub(crate) fn operating_point_brackets(

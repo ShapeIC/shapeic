@@ -68,6 +68,20 @@ pub enum LutError {
     #[error("non-finite {context} in model '{model}'")]
     NonFinite { model: String, context: String },
 
+    #[error("invalid intrinsic MOS capacitance matrix: {reason}")]
+    InvalidCapacitanceMatrix { reason: String },
+
+    #[error("invalid extrinsic MOS capacitances: {reason}")]
+    InvalidExtrinsicCapacitances { reason: String },
+
+    #[error("model '{model}' does not contain finger-count capacitance samples")]
+    ExtrinsicCapacitanceSamplesUnavailable { model: String },
+
+    #[error(
+        "model '{model}' contains an incomplete set of finger-count capacitance samples; missing {missing:?}"
+    )]
+    IncompleteExtrinsicCapacitanceSamples { model: String, missing: Vec<String> },
+
     #[error(
         "requested drain current must be finite and positive for model '{model}', found {value}"
     )]

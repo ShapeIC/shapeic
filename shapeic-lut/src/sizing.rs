@@ -1,5 +1,5 @@
 use crate::interpolation::Bracket;
-use crate::{DeviceLut, Expr, LutError, LutPoint, OperatingPoint};
+use crate::{DeviceLut, Expr, LutError, LutPoint, MosExtrinsicCapacitances, OperatingPoint};
 
 /// Result of sizing a width-dependent LUT device for a requested drain current.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +20,8 @@ pub struct CurrentSizingResult {
     pub current_error: f64,
     /// Per-finger values corresponding positionally to the requested expressions.
     pub values: Vec<f64>,
+    /// Total extrinsic capacitances evaluated for `nf`, when sampled anchors are available.
+    pub extrinsic_capacitances: Option<MosExtrinsicCapacitances>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,13 +76,22 @@ impl DeviceLut {
         let point = LutPoint::new(*operating_point, candidate.finger_width);
         let width_bracket = self.bracket_finger_width(widths, candidate.finger_width)?;
         let final_brackets = with_width_bracket(operating_brackets, width_bracket);
-        let mut requested_expressions = Vec::with_capacity(expressions.len() + 1);
+        let extrinsic_expressions = self.extrinsic_capacitance_sample_expressions()?;
+        let extrinsic_count = extrinsic_expressions.as_ref().map_or(0, Vec::len);
+        let mut requested_expressions = Vec::with_capacity(expressions.len() + extrinsic_count + 1);
         requested_expressions.push(&id_expression);
         requested_expressions.extend(expressions.iter());
+        if let Some(sampled) = &extrinsic_expressions {
+            requested_expressions.extend(sampled);
+        }
         let mut interpolated = self.interpolate_many(&final_brackets, &requested_expressions)?;
         let finger_current = interpolated.remove(0);
         let nf = f64::from(candidate.nf);
         let predicted_current = finger_current * nf;
+        let sampled_values = interpolated.split_off(expressions.len());
+        let extrinsic_capacitances = extrinsic_expressions
+            .map(|_| MosExtrinsicCapacitances::from_nf_samples(candidate.nf, &sampled_values))
+            .transpose()?;
 
         Ok(CurrentSizingResult {
             point,
@@ -91,6 +102,7 @@ impl DeviceLut {
             predicted_current,
             current_error: predicted_current - requested_current,
             values: interpolated,
+            extrinsic_capacitances,
         })
     }
 }

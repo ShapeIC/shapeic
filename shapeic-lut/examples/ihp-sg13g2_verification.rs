@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use shapeic_lut::verification::{VerificationConfig, VerificationEngine, VerificationInput};
-use shapeic_lut::{DeviceLut, Expr, LookupTable, LutError, MosExpression, OperatingPoint};
+use shapeic_lut::{
+    DeviceLut, Expr, LookupTable, LutError, MosCapacitanceMatrix, MosExpression,
+    MosExtrinsicCapacitances, OperatingPoint,
+};
 
 const IHP_MAX_WIDTH_PER_FINGER: f64 = 10.0e-6;
 
@@ -39,9 +42,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     let lengths = [0.4e-6];
-    let vgs_values = [0.6];
+    let vgs_values = [0.25];
     let ids_values = [
-        100e-6, 150e-6, 200e-6, 300e-6, 380e-6, 400e-6, 500e-6, 1000e-6,
+        10e-6, 150e-6, 200e-6, 300e-6, 380e-6, 400e-6, 500e-6, 1000e-6,
     ];
 
     let (coupled_points, coupled_ids): (Vec<OperatingPoint>, Vec<f64>) = lengths
@@ -50,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             vgs_values.into_iter().flat_map(move |vgs| {
                 ids_values
                     .into_iter()
-                    .map(move |ids| (OperatingPoint::new(length, 0.0, vgs, 0.6), ids))
+                    .map(move |ids| (OperatingPoint::new(length, 0.0, vgs, 0.35), ids))
             })
         })
         .unzip();
@@ -273,7 +276,11 @@ fn manually_calculated_input_5d(
     point: &OperatingPoint,
     id: &f64,
 ) -> Result<VerificationInput, LutError> {
-    let expressions = [Expr::parameter("gds"), Expr::parameter("gm")];
+    let expressions = ["gds", "gm"]
+        .into_iter()
+        .chain(MosCapacitanceMatrix::PARAMETERS)
+        .map(Expr::parameter)
+        .collect::<Vec<_>>();
     let sizing = model.size_for_current(point, *id, &expressions)?;
     println!(
         "Target ID={:.6e}, LUT ID={:.6e}, error={:.6e}, Wf={:.6e}, nf={}",
@@ -292,12 +299,33 @@ fn manually_calculated_input_5d(
     let gm_id = gm / id_final;
     let jd = id_final / width;
 
-    Ok(VerificationInput::new(*point, width, sizing.nf)
+    let mut input = VerificationInput::new(*point, width, sizing.nf)
         .reference("id", id_final)
         .reference("gm", gm)
         .reference("gds", gds)
         .reference("gm_id", gm_id)
-        .reference("jd", jd))
+        .reference("jd", jd);
+    for (parameter, value) in MosCapacitanceMatrix::PARAMETERS
+        .into_iter()
+        .zip(&sizing.values[2..])
+    {
+        input = input.reference(parameter, value * nf);
+    }
+    let extrinsic = sizing.extrinsic_capacitances.ok_or_else(|| {
+        LutError::ExtrinsicCapacitanceSamplesUnavailable {
+            model: model.name().to_owned(),
+        }
+    })?;
+    for (parameter, value) in MosExtrinsicCapacitances::PARAMETERS.into_iter().zip([
+        extrinsic.cgsol,
+        extrinsic.cgdol,
+        extrinsic.cjs,
+        extrinsic.cjd,
+    ]) {
+        input = input.reference(parameter, value);
+    }
+
+    Ok(input)
 }
 
 fn ihp_config(template: PathBuf, output_dir: PathBuf, pdk_root: &Path) -> VerificationConfig {
