@@ -1,0 +1,43 @@
+* Shapeic four-transistor OTA full-layout PEX verification.
+.lib '{{model_library}}' mos_tt
+.include "{{pex_path}}"
+
+VDD VDD 0 DC={{vdd_dc}}
+VINP VINP 0 DC={{vg_dc}} AC=1
+VINN VINN 0 DC={{vg_dc}} AC=0
+ITAIL IBIAS 0 DC={{tail_current}}
+
+* Fix the output bias at DC while leaving VOUT practically open in AC.
+VOUT_BIAS VOUT_BIAS 0 DC={{vout_dc}} AC=0
+LBIAS VOUT_BIAS VOUT {{output_bias_inductance}}
+
+XOTA VOUT VINP VINN IBIAS VDD 0 {{pex_subcircuit}}
+
+.options temp=27 tnom=27
+.control
+pre_osdi {{psp_osdi}}
+pre_osdi {{psp_nqs_osdi}}
+save v(VOUT) v(IBIAS)
+op
+print v(VOUT) v(IBIAS)
+
+ac dec {{ac_points_per_decade}} {{ac_min_hz}} {{ac_max_hz}}
+let response_real = real(v(VOUT))
+let response_imag = imag(v(VOUT))
+let gain_db = vdb(VOUT)
+let phase_deg = 180 / pi * cph(v(VOUT))
+meas ac dc_gain_db find gain_db at={{ac_min_hz}}
+let gain_3db = dc_gain_db - 3
+meas ac bandwidth_3db_hz when gain_db=gain_3db fall=1
+{{optional_ac_measurements}}
+
+option numdgt=15
+set wr_vecnames
+set wr_singlescale
+wrdata ngspice_ac.tsv response_real response_imag gain_db phase_deg
+
+compose result_index values 0
+setscale result_index
+wrdata {{results_path}} dc_gain_db bandwidth_3db_hz{{optional_result_vectors}}
+.endc
+.end
