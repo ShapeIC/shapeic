@@ -3,6 +3,7 @@ resolver = "2"
 
 members = [
     "shapeic-core",
+    "shapeic-layout",
     "shapeic-mna",
     "shapeic-lut"
 ]
