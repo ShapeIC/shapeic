@@ -12,13 +12,14 @@ osdi_paths = [
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
 ]
-parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgs", "cgd", "cdd"]
+parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgd", "cgs", "cgb", "cdg", "cdd", "cds", "cdb", "csg", "csd", "css", "csb", "cbg", "cbd", "cbs", "cbb", "cgsol", "cgdol", "cjs", "cjd"]
 
 [device]
 name = "sg13_lv_nmos"
 instance = "XM1"
 hierarchy = "n.xm1.nsg13_lv_nmos"
 nf = 1
+capacitance_nf_samples = [1, 2, 3, 4]
 
 [sweep]
 length = [0.4e-6, 0.8e-6]

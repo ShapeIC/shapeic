@@ -22,11 +22,33 @@ SUPPORTED_PARAMETERS = {
     "gmbs",
     "gds",
     "cgg",
-    "cgs",
-    "cbg",
     "cgd",
+    "cgs",
+    "cgb",
+    "cdg",
     "cdd",
+    "cds",
+    "cdb",
+    "csg",
+    "csd",
+    "css",
+    "csb",
+    "cbg",
+    "cbd",
+    "cbs",
+    "cbb",
+    "cgsol",
+    "cgdol",
+    "cjs",
+    "cjd",
 }
+
+EXTRINSIC_CAPACITANCE_PARAMETERS = ("cgsol", "cgdol", "cjs", "cjd")
+EXTRINSIC_CAPACITANCE_NF_SAMPLES = (1, 2, 3, 4)
+
+
+def sampled_parameter_name(parameter: str, nf: int) -> str:
+    return parameter if nf == 1 else f"{parameter}_nf{nf}"
 
 
 @dataclass(frozen=True)
@@ -98,6 +120,7 @@ class DeviceConfig:
     instance: str
     hierarchy: str
     nf: int
+    capacitance_nf_samples: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +131,17 @@ class GenerationConfig:
     simulator: SimulatorConfig
     device: DeviceConfig
     sweep: SweepConfig
+
+    def output_parameters(self) -> tuple[str, ...]:
+        parameters = list(self.simulator.parameters)
+        for nf in self.device.capacitance_nf_samples:
+            if nf == self.device.nf:
+                continue
+            parameters.extend(
+                sampled_parameter_name(parameter, nf)
+                for parameter in EXTRINSIC_CAPACITANCE_PARAMETERS
+            )
+        return tuple(parameters)
 
 
 def load_config(path: Path) -> GenerationConfig:
@@ -152,6 +186,7 @@ def load_config(path: Path) -> GenerationConfig:
             instance=str(device.get("instance", "XM1")),
             hierarchy=str(device["hierarchy"]),
             nf=int(device.get("nf", 1)),
+            capacitance_nf_samples=_capacitance_nf_samples(device),
         ),
         sweep=SweepConfig(
             length=lengths,
@@ -182,6 +217,13 @@ def _linear_range(sweep: dict[str, Any], name: str) -> LinearRange:
         step=float(values["step"]),
         stop_inclusive=bool(values.get("stop_inclusive", True)),
     )
+
+
+def _capacitance_nf_samples(device: dict[str, Any]) -> tuple[int, ...]:
+    values = device.get("capacitance_nf_samples", [])
+    if not isinstance(values, list) or any(type(value) is not int for value in values):
+        raise ValueError("capacitance_nf_samples must be a list of integers")
+    return tuple(values)
 
 
 def _resolve_path(value: str, base: Path) -> Path:
@@ -216,5 +258,18 @@ def _validate_config(config: GenerationConfig) -> None:
             raise FileNotFoundError(f"OSDI model not found: {path}")
     if not config.device.name or not config.device.hierarchy or config.device.nf != 1:
         raise ValueError("device name and hierarchy are required, and nf must equal one")
+    samples = config.device.capacitance_nf_samples
+    if samples:
+        if samples != EXTRINSIC_CAPACITANCE_NF_SAMPLES:
+            raise ValueError(
+                "capacitance_nf_samples must equal [1, 2, 3, 4] in format version 2"
+            )
+        missing = sorted(
+            set(EXTRINSIC_CAPACITANCE_PARAMETERS) - set(simulator.parameters)
+        )
+        if missing:
+            raise ValueError(
+                "capacitance_nf_samples requires parameters: " + ", ".join(missing)
+            )
     if config.output_path.suffix != ".npz":
         raise ValueError("output path must end in .npz")

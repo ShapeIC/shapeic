@@ -5,20 +5,21 @@ description = "IHP SG13G2 LV PMOS five-dimensional LUT"
 [simulator]
 binary = "ngspice"
 temperature_c = 27.0
-workers = 1
+workers = 4
 model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
 library_section = "mos_tt"
 osdi_paths = [
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
 ]
-parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgs", "cgd", "cdd"]
+parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgd", "cgs", "cgb", "cdg", "cdd", "cds", "cdb", "csg", "csd", "css", "csb", "cbg", "cbd", "cbs", "cbb", "cgsol", "cgdol", "cjs", "cjd"]
 
 [device]
 name = "sg13_lv_pmos"
 instance = "XM1"
 hierarchy = "n.xm1.nsg13_lv_pmos"
 nf = 1
+capacitance_nf_samples = [1, 2, 3, 4]
 
 [sweep]
 length = [0.4e-6, 0.8e-6, 1.6e-6, 3.2e-6, 6.4e-6]

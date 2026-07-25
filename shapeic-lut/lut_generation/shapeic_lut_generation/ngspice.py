@@ -6,7 +6,11 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import GenerationConfig
+from .config import (
+    EXTRINSIC_CAPACITANCE_PARAMETERS,
+    GenerationConfig,
+    sampled_parameter_name,
+)
 
 
 def simulate_block(
@@ -17,47 +21,85 @@ def simulate_block(
 ) -> dict[str, np.ndarray]:
     with tempfile.TemporaryDirectory(prefix="shapeic-ngspice-") as temporary:
         root = Path(temporary)
-        input_path = root / "input.spice"
-        raw_path = root / "output.raw"
-        log_path = root / "ngspice.log"
-        input_path.write_text(
-            _netlist(config, length, vbs, finger_width, raw_path), encoding="ascii"
+        outputs = _simulate_nf_block(
+            config,
+            length,
+            vbs,
+            finger_width,
+            config.device.nf,
+            config.simulator.parameters,
+            root,
         )
-        result = subprocess.run(
-            [config.simulator.binary, "-b", "-o", str(log_path), str(input_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode != 0 or not raw_path.is_file():
-            log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-            raise RuntimeError(
-                f"ngspice failed for L={length}, Vbs={vbs}, Wf={finger_width}\n{log}"
+        for nf in config.device.capacitance_nf_samples:
+            if nf == config.device.nf:
+                continue
+            sampled = _simulate_nf_block(
+                config,
+                length,
+                vbs,
+                finger_width,
+                nf,
+                EXTRINSIC_CAPACITANCE_PARAMETERS,
+                root,
             )
-
-        data = _parse_raw(raw_path)
-        expected_shape = (
-            config.sweep.vgs.values().size,
-            config.sweep.vds.values().size,
-        )
-        outputs: dict[str, np.ndarray] = {}
-        for parameter in config.simulator.parameters:
-            column = _raw_column(parameter)
-            if column not in (data.dtype.names or ()):
-                raise RuntimeError(
-                    f"ngspice output does not contain '{column}'; "
-                    f"available columns: {data.dtype.names}"
-                )
-            values = np.asarray(data[column])
-            if np.iscomplexobj(values):
-                if not np.allclose(values.imag, 0.0):
-                    raise RuntimeError(f"parameter '{parameter}' contains complex values")
-                values = values.real
-            values = values.reshape(expected_shape).astype(np.float32)
-            if not np.isfinite(values).all():
-                raise RuntimeError(f"parameter '{parameter}' contains non-finite values")
-            outputs[parameter] = values
+            outputs.update(
+                (sampled_parameter_name(parameter, nf), values)
+                for parameter, values in sampled.items()
+            )
         return outputs
+
+
+def _simulate_nf_block(
+    config: GenerationConfig,
+    length: float,
+    vbs: float,
+    finger_width: float,
+    nf: int,
+    parameters: tuple[str, ...],
+    root: Path,
+) -> dict[str, np.ndarray]:
+    input_path = root / f"input_nf{nf}.spice"
+    raw_path = root / f"output_nf{nf}.raw"
+    log_path = root / f"ngspice_nf{nf}.log"
+    input_path.write_text(
+        _netlist(config, length, vbs, finger_width, nf, parameters, raw_path),
+        encoding="ascii",
+    )
+    result = subprocess.run(
+        [config.simulator.binary, "-b", "-o", str(log_path), str(input_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0 or not raw_path.is_file():
+        log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        raise RuntimeError(
+            f"ngspice failed for L={length}, Vbs={vbs}, Wf={finger_width}, nf={nf}\n{log}"
+        )
+
+    data = _parse_raw(raw_path)
+    expected_shape = (
+        config.sweep.vgs.values().size,
+        config.sweep.vds.values().size,
+    )
+    outputs: dict[str, np.ndarray] = {}
+    for parameter in parameters:
+        column = _raw_column(parameter)
+        if column not in (data.dtype.names or ()):
+            raise RuntimeError(
+                f"ngspice output does not contain '{column}'; "
+                f"available columns: {data.dtype.names}"
+            )
+        values = np.asarray(data[column])
+        if np.iscomplexobj(values):
+            if not np.allclose(values.imag, 0.0):
+                raise RuntimeError(f"parameter '{parameter}' contains complex values")
+            values = values.real
+        values = values.reshape(expected_shape).astype(np.float32)
+        if not np.isfinite(values).all():
+            raise RuntimeError(f"parameter '{parameter}' contains non-finite values")
+        outputs[parameter] = values
+    return outputs
 
 
 def _raw_column(parameter: str) -> str:
@@ -74,6 +116,8 @@ def _netlist(
     length: float,
     vbs: float,
     finger_width: float,
+    nf: int,
+    parameters: tuple[str, ...],
     raw_path: Path,
 ) -> str:
     simulator = config.simulator
@@ -81,10 +125,14 @@ def _netlist(
     vgs = config.sweep.vgs
     vds = config.sweep.vds
     osdi = "\n".join(f"pre_osdi '{path}'" for path in simulator.osdi_paths)
-    saved = ["save i(vds)"]
-    expressions = ["let shapeic_id = abs(i(vds))"]
-    output_names = ["shapeic_id"]
-    for parameter in simulator.parameters:
+    saved: list[str] = []
+    expressions: list[str] = []
+    output_names: list[str] = []
+    if "id" in parameters:
+        saved.append("save i(vds)")
+        expressions.append("let shapeic_id = abs(i(vds))")
+        output_names.append("shapeic_id")
+    for parameter in parameters:
         if parameter == "id":
             continue
         reference = f"@{device.hierarchy}[{parameter}]"
@@ -92,6 +140,7 @@ def _netlist(
         expressions.append(f"let shapeic_{parameter} = {reference}")
         output_names.append(f"shapeic_{parameter}")
 
+    total_width = finger_width * nf
     lines = [
         "* Shapeic five-dimensional LUT generation",
         f".lib '{simulator.model_library}' {simulator.library_section}",
@@ -100,7 +149,7 @@ def _netlist(
         "VDS ND 0 DC=0",
         (
             f"{device.instance} ND NG 0 NB {device.name} "
-            f"l={length:.17g} w={finger_width:.17g} ng={device.nf}"
+            f"l={length:.17g} w={total_width:.17g} ng={nf}"
         ),
         f".options temp={simulator.temperature_c:.17g} tnom={simulator.temperature_c:.17g}",
         ".control",

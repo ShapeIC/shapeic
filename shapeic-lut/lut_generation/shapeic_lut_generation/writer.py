@@ -30,7 +30,7 @@ class LutStorage:
         for name, values in self.axes.items():
             np.save(self.axis_root / f"{name}.npy", values.astype(np.float64))
         self.parameters: dict[str, np.memmap] = {}
-        for name in config.simulator.parameters:
+        for name in config.output_parameters():
             array = np.lib.format.open_memmap(
                 self.parameter_root / f"{name}.npy",
                 mode="w+",
@@ -83,7 +83,7 @@ class LutStorage:
                         self.axis_root / f"{name}.npy",
                         arcname=f"models/0/axes/{name}.npy",
                     )
-                for name in self.config.simulator.parameters:
+                for name in self.config.output_parameters():
                     archive.write(
                         self.parameter_root / f"{name}.npy",
                         arcname=f"models/0/parameters/{name}.npy",
@@ -110,7 +110,7 @@ class LutStorage:
                     ],
                     "parameters": [
                         {"name": name, "path": f"models/0/parameters/{name}.npy"}
-                        for name in self.config.simulator.parameters
+                        for name in self.config.output_parameters()
                     ],
                     "device_parameters": {"nf": float(device.nf)},
                 }
