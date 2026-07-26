@@ -16,17 +16,28 @@ cargo run --release -p shapeic-core --example ota_4t -- \
   NMOS.npz PMOS.npz PHYSICAL.npz
 ```
 
-Both AC analyses sweep from 1 Hz to 100 GHz at 20 points per decade. The
+Both AC analyses search from 1 Hz to 100 GHz using four coarse points per
+decade and refine each downward crossing to 0.5% relative frequency tolerance.
+In prune mode, a candidate stops after its first failed AC target. The
 electrical baseline evaluates the symbolic MNA coefficients and numerically
-solves `A(jw)x=z(jw)` by complex LU at every frequency after stamping the
-intrinsic MOS matrix plus `cgsol`, `cgdol`, `cjs`, and `cjd`. The layout-aware
-path starts from the base MNA, stamps the physical `G+sC` matrices followed by
-the same complete compact-model capacitances, and obtains a symbolic transfer
-function with the direct MNA solver before evaluating the sweep. The terminal
-prints aligned electrical and layout-aware tables with DC gain, -3 dB
-bandwidth, unity-gain frequency, and phase margin. Because both paths share the
-same compact-model base, the difference table isolates the added physical
-matrix.
+solves `A(jw)x=z(jw)` by complex LU at every requested frequency after stamping
+the intrinsic MOS matrix plus `cgsol`, `cgdol`, `cjs`, and `cjd`. The
+layout-aware path starts from the base MNA, stamps the physical `G+sC` matrices
+followed by the same complete compact-model capacitances, and obtains a
+symbolic transfer function with the direct MNA solver before evaluating the
+adaptive frequencies. The terminal prints aligned electrical and layout-aware
+tables with DC gain, -3 dB bandwidth, unity-gain frequency, phase margin, and
+the number of evaluated frequencies. Because both paths share the same
+compact-model base, the difference table isolates the added physical matrix.
+
+The separate electrical and physical verification examples retain their dense
+20-points-per-decade sweeps. The adaptive electrical verification runs one
+point through dense Shapeic, adaptive Shapeic, and NGSpice:
+
+```sh
+cargo run --release -p shapeic-core \
+  --example ota_4t_electrical_adaptive_verification -- NMOS.npz PMOS.npz
+```
 
 The NMOS source is connected to `IBIAS`, while its bulk and the PCell substrate
 tap are connected to `VSS`. Therefore each differential-pair LUT query uses

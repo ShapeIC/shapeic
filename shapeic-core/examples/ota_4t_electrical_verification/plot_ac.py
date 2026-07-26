@@ -132,7 +132,12 @@ def _frequency_label(value: float | None) -> str:
 
 
 def plot_comparison(
-    shapeic: Sweep, ngspice: Sweep, output: Path, show: bool, title: str
+    shapeic: Sweep,
+    ngspice: Sweep,
+    output: Path,
+    show: bool,
+    title: str,
+    adaptive: Sweep | None = None,
 ) -> None:
     try:
         import matplotlib
@@ -148,19 +153,27 @@ def plot_comparison(
     figure, (gain_axis, phase_axis) = plt.subplots(
         2, 1, figsize=(10.0, 7.2), sharex=True
     )
-    curves = (
-        ("Shapeic MNA", shapeic, "#1565c0", "-"),
-        ("NGSpice", ngspice, "#c62828", "--"),
-    )
-    for name, sweep, color, linestyle in curves:
+    curves = [("Shapeic dense MNA", shapeic, "#1565c0", "-", None)]
+    if adaptive is not None:
+        curves.append(("Shapeic adaptive MNA", adaptive, "#2e7d32", ":", "o"))
+    curves.append(("NGSpice", ngspice, "#c62828", "--", None))
+    maximum_frequency = max(shapeic.frequency_hz[-1], ngspice.frequency_hz[-1])
+    for name, sweep, color, linestyle, marker in curves:
         bandwidth = downward_crossing(
             sweep.frequency_hz, sweep.gain_db, sweep.gain_db[0] - 3.0
         )
         unity = downward_crossing(sweep.frequency_hz, sweep.gain_db, 0.0)
+        if sweep.frequency_hz[-1] >= 0.999 * maximum_frequency:
+            endpoint = f"end={sweep.gain_db[-1]:.2f} dB"
+        else:
+            endpoint = (
+                f"last={sweep.gain_db[-1]:.2f} dB"
+                f"@{_frequency_label(sweep.frequency_hz[-1])}"
+            )
         label = (
             f"{name}: f3dB={_frequency_label(bandwidth)}, "
             f"UGF={_frequency_label(unity)}, "
-            f"end={sweep.gain_db[-1]:.2f} dB"
+            f"{endpoint}"
         )
         gain_axis.semilogx(
             sweep.frequency_hz,
@@ -168,6 +181,8 @@ def plot_comparison(
             color=color,
             linestyle=linestyle,
             linewidth=1.8,
+            marker=marker,
+            markersize=2.8 if marker else None,
             label=label,
         )
         phase_axis.semilogx(
@@ -176,6 +191,8 @@ def plot_comparison(
             color=color,
             linestyle=linestyle,
             linewidth=1.8,
+            marker=marker,
+            markersize=2.8 if marker else None,
             label=name,
         )
         if bandwidth is not None:
@@ -232,6 +249,10 @@ def main() -> None:
         help="Shapeic CSV filename inside ARTIFACT_DIR",
     )
     parser.add_argument(
+        "--adaptive-file",
+        help="optional adaptive Shapeic CSV filename inside ARTIFACT_DIR",
+    )
+    parser.add_argument(
         "--title",
         default="4T OTA electrical AC comparison",
         help="plot title",
@@ -242,8 +263,20 @@ def main() -> None:
 
     try:
         shapeic = read_shapeic(artifact_dir / arguments.shapeic_file)
+        adaptive = (
+            read_shapeic(artifact_dir / arguments.adaptive_file)
+            if arguments.adaptive_file
+            else None
+        )
         ngspice = read_ngspice(artifact_dir / "ngspice_ac.tsv")
-        plot_comparison(shapeic, ngspice, output, arguments.show, arguments.title)
+        plot_comparison(
+            shapeic,
+            ngspice,
+            output,
+            arguments.show,
+            arguments.title,
+            adaptive,
+        )
     except (OSError, RuntimeError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")
     print(output)

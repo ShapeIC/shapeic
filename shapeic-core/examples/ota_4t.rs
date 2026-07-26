@@ -10,7 +10,8 @@ use nalgebra::{DMatrix, DVector};
 use ndarray::Array2;
 use num_complex::Complex64;
 use shapeic_core::analysis::{
-    AcMetrics, AnalysisMode, AnalysisTargets, TargetAssessment, TargetFailure, TargetMetric,
+    AcCompletion, AcMetrics, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
+    AnalysisTargets, TargetAssessment, TargetFailure, TargetMetric, analyze_adaptive_ac,
 };
 use shapeic_layout::{LayoutError, PhysicalLookupTable, PhysicalPoint, PortAdmittance};
 use shapeic_lut::{
@@ -36,7 +37,11 @@ const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
 const AC_MIN_HZ: f64 = 1.0;
 const AC_MAX_HZ: f64 = 100.0e9;
+#[cfg(test)]
 const AC_POINTS_PER_DECADE: usize = 20;
+const AC_COARSE_POINTS_PER_DECADE: usize = 4;
+const AC_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
+const AC_MAX_REFINEMENT_STEPS: usize = 32;
 // Keep symbolic capacitance coefficients near unity without changing sC.
 const AC_S_NORMALIZATION: f64 = 1.0e12;
 const DC_GAIN_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm", "r_gds_xcm"];
@@ -84,8 +89,8 @@ struct SweepResult {
     current_mirror: SizingSummary,
     gain: f64,
     dc_targets: TargetAssessment,
-    electrical_ac: StageEvaluation<AcMetrics>,
-    physical: Option<StageEvaluation<AcMetrics>>,
+    electrical_ac: StageEvaluation<AdaptiveAcOutcome>,
+    physical: Option<StageEvaluation<AdaptiveAcOutcome>>,
 }
 
 enum StageEvaluation<T> {
@@ -125,8 +130,12 @@ struct TimingSummary {
     lut_sizing: Duration,
     numeric_mna: Duration,
     electrical_ac_evaluation: Duration,
+    electrical_ac_candidates: usize,
+    electrical_frequency_evaluations: usize,
     physical_lut_load: Option<Duration>,
     physical_evaluation: Option<Duration>,
+    physical_ac_candidates: Option<usize>,
+    physical_frequency_evaluations: Option<usize>,
     total: Duration,
 }
 
@@ -234,7 +243,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut numeric_mna = Duration::ZERO;
     let mut electrical_ac_evaluation = Duration::ZERO;
+    let mut electrical_ac_candidates = 0;
+    let mut electrical_frequency_evaluations = 0;
     let mut physical_evaluation = physical_table.as_ref().map(|_| Duration::ZERO);
+    let mut physical_ac_candidates = physical_table.as_ref().map(|_| 0);
+    let mut physical_frequency_evaluations = physical_table.as_ref().map(|_| 0);
     for diff_point in &diff_pairs {
         for (mirror_length, current_mirror) in &current_mirrors {
             let stage_start = Instant::now();
@@ -245,7 +258,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let electrical_ac = if ANALYSIS_MODE.should_continue(&dc_targets) {
                 let stage_start = Instant::now();
-                let metrics =
+                let outcome =
                     evaluate_electrical_ac(&base_system, &diff_point.block, current_mirror)
                         .map_err(|error| {
                             io::Error::other(format!(
@@ -261,9 +274,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             ))
                         })?;
                 electrical_ac_evaluation += stage_start.elapsed();
+                electrical_ac_candidates += 1;
+                electrical_frequency_evaluations += outcome.frequency_evaluations;
                 StageEvaluation::Evaluated {
-                    targets: ANALYSIS_TARGETS.assess_frequency_metrics(&metrics),
-                    value: metrics,
+                    targets: outcome.targets.clone(),
+                    value: outcome,
                 }
             } else {
                 StageEvaluation::Skipped {
@@ -296,10 +311,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                         *duration += stage_start.elapsed();
                     }
                     Some(match evaluation {
-                        Ok(metrics) => StageEvaluation::Evaluated {
-                            targets: ANALYSIS_TARGETS.assess_all(&metrics),
-                            value: metrics,
-                        },
+                        Ok(outcome) => {
+                            if let Some(count) = physical_ac_candidates.as_mut() {
+                                *count += 1;
+                            }
+                            if let Some(count) = physical_frequency_evaluations.as_mut() {
+                                *count += outcome.frequency_evaluations;
+                            }
+                            StageEvaluation::Evaluated {
+                                targets: outcome.targets.clone(),
+                                value: outcome,
+                            }
+                        }
                         Err(LayoutAwareError::Excluded(reason)) => {
                             StageEvaluation::Excluded { reason }
                         }
@@ -346,8 +369,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         lut_sizing,
         numeric_mna,
         electrical_ac_evaluation,
+        electrical_ac_candidates,
+        electrical_frequency_evaluations,
         physical_lut_load,
         physical_evaluation,
+        physical_ac_candidates,
+        physical_frequency_evaluations,
         total: total_start.elapsed(),
     };
     let summary = evaluation_summary(&results, physical_table.is_some());
@@ -544,7 +571,7 @@ fn evaluate_electrical_ac(
     base_system: &MnaResult,
     diff_pair: &SizedBlock,
     current_mirror: &SizedBlock,
-) -> Result<AcMetrics, io::Error> {
+) -> Result<AdaptiveAcOutcome, io::Error> {
     let mut matrix = base_system.a.clone();
     stamp_compact_model_devices(
         &mut matrix,
@@ -559,7 +586,7 @@ fn evaluate_electrical_ac(
         .chain(&current_mirror.parameters)
         .cloned()
         .collect::<Vec<_>>();
-    evaluate_numeric_ac_metrics(&matrix, base_system, &parameters)
+    evaluate_numeric_ac_metrics(&matrix, base_system, &parameters, adaptive_policy(false))
 }
 
 fn evaluate_layout_aware(
@@ -567,7 +594,7 @@ fn evaluate_layout_aware(
     table: &PhysicalLookupTable,
     diff_pair: &SizedBlock,
     current_mirror: &SizedBlock,
-) -> Result<AcMetrics, LayoutAwareError> {
+) -> Result<AdaptiveAcOutcome, LayoutAwareError> {
     let diff_physical = query_physical(table, "simplediffpair", diff_pair.sizing)?;
     let mirror_physical = query_physical(table, "currentmirror", current_mirror.sizing)?;
 
@@ -598,8 +625,34 @@ fn evaluate_layout_aware(
         .chain(&current_mirror.parameters)
         .cloned()
         .collect::<Vec<_>>();
-    evaluate_ac_metrics(&expression, &parameters, 1.0)
+    evaluate_ac_metrics(&expression, &parameters, 1.0, adaptive_policy(true))
         .map_err(|error| LayoutAwareError::Fatal(Box::new(error)))
+}
+
+fn adaptive_config(retain_samples: bool) -> AdaptiveAcConfig {
+    AdaptiveAcConfig {
+        min_frequency_hz: AC_MIN_HZ,
+        max_frequency_hz: AC_MAX_HZ,
+        coarse_points_per_decade: AC_COARSE_POINTS_PER_DECADE,
+        crossing_relative_tolerance: AC_CROSSING_RELATIVE_TOLERANCE,
+        max_refinement_steps: AC_MAX_REFINEMENT_STEPS,
+        retain_samples,
+    }
+}
+
+fn adaptive_policy(include_dc_target: bool) -> AdaptiveAcPolicy {
+    let targets = if include_dc_target {
+        ANALYSIS_TARGETS
+    } else {
+        AnalysisTargets {
+            min_dc_gain_db: None,
+            ..ANALYSIS_TARGETS
+        }
+    };
+    AdaptiveAcPolicy {
+        mode: ANALYSIS_MODE,
+        targets,
+    }
 }
 
 fn diff_pair_mos_connections<'a>(gate: &'a str, drain: &'a str) -> [(&'static str, &'a str); 4] {
@@ -787,7 +840,8 @@ fn evaluate_numeric_ac_metrics(
     matrix: &Matrix<AtomField>,
     system: &MnaResult,
     parameters: &[(String, f64)],
-) -> Result<AcMetrics, io::Error> {
+    policy: AdaptiveAcPolicy,
+) -> Result<AdaptiveAcOutcome, io::Error> {
     let rows = matrix.nrows();
     let columns = matrix.ncols();
     if rows != columns || system.z.nrows() != matrix.nrows() || system.z.ncols() != 1 {
@@ -843,21 +897,18 @@ fn evaluate_numeric_ac_metrics(
         solve_numeric_mna(&outputs, matrix_len, rows, output_row, frequency_hz)
     };
 
-    let frequencies = ac_frequencies();
-    let responses = frequencies
-        .iter()
-        .map(|frequency| {
-            evaluate(*frequency)?.ok_or_else(|| {
-                io::Error::other(format!("numeric OTA MNA is singular at {frequency:.6e} Hz"))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let dc_response = evaluate(0.0)?.unwrap_or(responses[0]);
-    Ok(ac_metrics_from_responses(
-        &frequencies,
-        &responses,
-        dc_response,
-    ))
+    analyze_adaptive_ac(
+        adaptive_config(false),
+        policy,
+        |frequency| match evaluate(frequency)? {
+            Some(response) => Ok(Complex64::new(-response.re, -response.im)),
+            None if frequency == 0.0 => Ok(Complex64::new(f64::NAN, f64::NAN)),
+            None => Err(io::Error::other(format!(
+                "numeric OTA MNA is singular at {frequency:.6e} Hz"
+            ))),
+        },
+    )
+    .map_err(|error| io::Error::other(format!("adaptive numeric AC analysis failed: {error}")))
 }
 
 fn solve_numeric_mna(
@@ -919,7 +970,8 @@ fn evaluate_ac_metrics(
     expression: &Atom,
     parameters: &[(String, f64)],
     s_normalization: f64,
-) -> Result<AcMetrics, io::Error> {
+    policy: AdaptiveAcPolicy,
+) -> Result<AdaptiveAcOutcome, io::Error> {
     let symbols = expression
         .get_all_symbols(false)
         .into_iter()
@@ -937,26 +989,11 @@ fn evaluate_ac_metrics(
         Ok(evaluator.evaluate_single(&values))
     };
 
-    let frequencies = ac_frequencies();
-    let responses = frequencies
-        .iter()
-        .map(|frequency| {
-            let response = evaluate(*frequency)?;
-            if !is_finite_response(response) {
-                return Err(io::Error::other(format!(
-                    "OTA AC response is not finite at {frequency:.6e} Hz"
-                )));
-            }
-            Ok(response)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let exact_dc = evaluate(0.0)?;
-    let dc_response = select_dc_response(exact_dc, responses[0]);
-    Ok(ac_metrics_from_responses(
-        &frequencies,
-        &responses,
-        dc_response,
-    ))
+    analyze_adaptive_ac(adaptive_config(false), policy, |frequency| {
+        let response = evaluate(frequency)?;
+        Ok::<_, io::Error>(Complex64::new(-response.re, -response.im))
+    })
+    .map_err(|error| io::Error::other(format!("adaptive symbolic AC analysis failed: {error}")))
 }
 
 fn ac_evaluator_inputs(
@@ -982,6 +1019,7 @@ fn ac_evaluator_inputs(
         .collect()
 }
 
+#[cfg(test)]
 fn ac_metrics_from_responses(
     frequencies: &[f64],
     amplifier_responses: &[Complex<f64>],
@@ -1022,6 +1060,7 @@ fn ac_metrics_from_responses(
     }
 }
 
+#[cfg(test)]
 fn loop_response(amplifier_response: Complex<f64>) -> Complex<f64> {
     -amplifier_response
 }
@@ -1033,10 +1072,12 @@ fn laplace_frequency(frequency_hz: f64, normalization: f64) -> Complex<f64> {
     )
 }
 
+#[cfg(test)]
 fn is_finite_response(value: Complex<f64>) -> bool {
     value.re.is_finite() && value.im.is_finite()
 }
 
+#[cfg(test)]
 fn select_dc_response(exact_dc: Complex<f64>, low_frequency: Complex<f64>) -> Complex<f64> {
     if is_finite_response(exact_dc) {
         exact_dc
@@ -1045,6 +1086,7 @@ fn select_dc_response(exact_dc: Complex<f64>, low_frequency: Complex<f64>) -> Co
     }
 }
 
+#[cfg(test)]
 fn ac_frequencies() -> Vec<f64> {
     let decades = (AC_MAX_HZ / AC_MIN_HZ).log10();
     let count = (decades * AC_POINTS_PER_DECADE as f64).round() as usize + 1;
@@ -1053,10 +1095,12 @@ fn ac_frequencies() -> Vec<f64> {
         .collect()
 }
 
+#[cfg(test)]
 fn magnitude_db(value: Complex<f64>) -> f64 {
     10.0 * value.norm_squared().log10()
 }
 
+#[cfg(test)]
 fn unwrap_phases(responses: &[Complex<f64>]) -> Vec<f64> {
     let mut phases = Vec::with_capacity(responses.len());
     for response in responses {
@@ -1077,6 +1121,7 @@ fn unwrap_phases(responses: &[Complex<f64>]) -> Vec<f64> {
     phases
 }
 
+#[cfg(test)]
 fn crossing_frequency(frequencies: &[f64], values: &[f64], target: f64) -> Option<(f64, usize)> {
     values.windows(2).enumerate().find_map(|(index, pair)| {
         if pair[0] >= target && pair[1] <= target && pair[0] != pair[1] {
@@ -1090,6 +1135,7 @@ fn crossing_frequency(frequencies: &[f64], values: &[f64], target: f64) -> Optio
     })
 }
 
+#[cfg(test)]
 fn interpolate_at_log_frequency(
     lower_frequency: f64,
     upper_frequency: f64,
@@ -1352,10 +1398,15 @@ fn print_ac_table_header(title: &str) {
     );
 }
 
-fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<AcMetrics>) {
+fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<AdaptiveAcOutcome>) {
     match evaluation {
         StageEvaluation::Evaluated { value, targets } => {
-            print_ac_metrics_row(result, *value, &format_target_assessment(targets));
+            print_ac_metrics_row(
+                result,
+                value.metrics,
+                value.completion,
+                &format_target_assessment(targets),
+            );
         }
         StageEvaluation::Skipped { reason } => {
             print_empty_ac_row(result, &format!("skipped: {}", reason.label()));
@@ -1366,7 +1417,12 @@ fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<Ac
     }
 }
 
-fn print_ac_metrics_row(result: &SweepResult, metrics: AcMetrics, status: &str) {
+fn print_ac_metrics_row(
+    result: &SweepResult,
+    metrics: AcMetrics,
+    completion: AcCompletion,
+    status: &str,
+) {
     println!(
         "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11.3} | {:>11} | {:>11} | {:>9} | {status}",
         result.diff_length * 1.0e6,
@@ -1377,9 +1433,24 @@ fn print_ac_metrics_row(result: &SweepResult, metrics: AcMetrics, status: &str) 
         result.current_mirror.finger_width * 1.0e6,
         result.current_mirror.nf,
         metrics.dc_gain_db,
-        format_frequency(metrics.bandwidth_3db_hz),
-        format_frequency(metrics.unity_gain_hz),
-        format_optional(metrics.phase_margin_deg),
+        format_adaptive_metric(
+            metrics.bandwidth_3db_hz,
+            completion,
+            TargetMetric::Bandwidth3DbHz,
+            format_frequency,
+        ),
+        format_adaptive_metric(
+            metrics.unity_gain_hz,
+            completion,
+            TargetMetric::UnityGainHz,
+            format_frequency,
+        ),
+        format_adaptive_metric(
+            metrics.phase_margin_deg,
+            completion,
+            TargetMetric::PhaseMarginDeg,
+            format_optional,
+        ),
     );
 }
 
@@ -1434,18 +1505,21 @@ fn print_ac_delta_table(results: &[SweepResult]) {
                     targets,
                 },
             ) => (
-                format!("{:.3}", physical.dc_gain_db - electrical.dc_gain_db),
+                format!(
+                    "{:.3}",
+                    physical.metrics.dc_gain_db - electrical.metrics.dc_gain_db
+                ),
                 format_optional(relative_change_percent(
-                    electrical.bandwidth_3db_hz,
-                    physical.bandwidth_3db_hz,
+                    electrical.metrics.bandwidth_3db_hz,
+                    physical.metrics.bandwidth_3db_hz,
                 )),
                 format_optional(relative_change_percent(
-                    electrical.unity_gain_hz,
-                    physical.unity_gain_hz,
+                    electrical.metrics.unity_gain_hz,
+                    physical.metrics.unity_gain_hz,
                 )),
                 format_optional(option_difference(
-                    electrical.phase_margin_deg,
-                    physical.phase_margin_deg,
+                    electrical.metrics.phase_margin_deg,
+                    physical.metrics.phase_margin_deg,
                 )),
                 format_target_assessment(targets),
             ),
@@ -1547,6 +1621,19 @@ fn format_optional(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_owned(), |value| format!("{value:.3}"))
 }
 
+fn format_adaptive_metric(
+    value: Option<f64>,
+    completion: AcCompletion,
+    metric: TargetMetric,
+    formatter: fn(Option<f64>) -> String,
+) -> String {
+    if completion.metric_evaluated(metric) {
+        formatter(value)
+    } else {
+        "not eval".to_owned()
+    }
+}
+
 fn print_timing_table(timings: &TimingSummary) {
     println!();
     println!("{:<28} | {:>12}", "Stage", "Time [ms]");
@@ -1584,6 +1671,32 @@ fn print_timing_table(timings: &TimingSummary) {
         "Total computation",
         timings.total.as_secs_f64() * 1.0e3
     );
+    println!();
+    println!(
+        "{:<28} | {:>12} | {:>12}",
+        "AC stage", "Samples", "Avg/candidate"
+    );
+    println!("-----------------------------+--------------+-------------");
+    print_frequency_evaluations(
+        "Electrical adaptive AC",
+        timings.electrical_frequency_evaluations,
+        timings.electrical_ac_candidates,
+    );
+    if let (Some(samples), Some(candidates)) = (
+        timings.physical_frequency_evaluations,
+        timings.physical_ac_candidates,
+    ) {
+        print_frequency_evaluations("Physical adaptive AC", samples, candidates);
+    }
+}
+
+fn print_frequency_evaluations(stage: &str, samples: usize, candidates: usize) {
+    let average = if candidates == 0 {
+        "-".to_owned()
+    } else {
+        format!("{:.2}", samples as f64 / candidates as f64)
+    };
+    println!("{stage:<28} | {samples:>12} | {average:>12}");
 }
 
 #[cfg(test)]

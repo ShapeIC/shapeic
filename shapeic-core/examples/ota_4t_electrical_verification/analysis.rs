@@ -7,6 +7,10 @@ use std::path::Path;
 use nalgebra::{DMatrix, DVector};
 use ndarray::Array2;
 use num_complex::Complex64;
+pub use shapeic_core::analysis::AcMetrics;
+use shapeic_core::analysis::{
+    AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, analyze_adaptive_ac,
+};
 use shapeic_layout::{PhysicalLookupTable, PhysicalPoint, PortAdmittance};
 use shapeic_lut::{
     CurrentSizingResult, DeviceLut, Expr, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
@@ -14,11 +18,14 @@ use shapeic_lut::{
 };
 use shapeic_mna::mna::{MnaResult, mna, stamp_port_admittance};
 use symbolica::domains::float::Complex;
-use symbolica::prelude::{Atom, AtomCore, Matrix};
+use symbolica::prelude::{Atom, AtomCore, ExpressionEvaluator, Matrix};
 
 pub const AC_MIN_HZ: f64 = 1.0;
 pub const AC_MAX_HZ: f64 = 100.0e9;
 pub const AC_POINTS_PER_DECADE: usize = 20;
+pub const ADAPTIVE_COARSE_POINTS_PER_DECADE: usize = 4;
+pub const ADAPTIVE_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
+pub const ADAPTIVE_MAX_REFINEMENT_STEPS: usize = 32;
 
 const AC_S_NORMALIZATION: f64 = 1.0e12;
 
@@ -46,14 +53,6 @@ impl SizingSummary {
     pub fn relative_error_percent(self) -> f64 {
         100.0 * self.current_error / self.requested_current
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct AcMetrics {
-    pub dc_gain_db: f64,
-    pub bandwidth_3db_hz: Option<f64>,
-    pub unity_gain_hz: Option<f64>,
-    pub phase_margin_deg: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +100,17 @@ pub struct ElectricalAnalysis {
 }
 
 #[derive(Clone, Debug)]
+pub struct ElectricalAdaptiveComparison {
+    pub diff_pair: SizingSummary,
+    pub current_mirror: SizingSummary,
+    pub dense_metrics: AcMetrics,
+    pub dense_sweep: AcSweep,
+    pub adaptive_metrics: AcMetrics,
+    pub adaptive_sweep: AcSweep,
+    pub adaptive_frequency_evaluations: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct PhysicalAnalysis {
     pub diff_pair: SizingSummary,
     pub current_mirror: SizingSummary,
@@ -136,6 +146,46 @@ pub fn analyze(
         current_mirror: current_mirror.sizing,
         metrics: ac.metrics,
         ac_sweep: ac.sweep,
+    })
+}
+
+pub fn analyze_adaptive_comparison(
+    nmos: &DeviceLut,
+    pmos: &DeviceLut,
+    diff_point: OperatingPoint,
+    mirror_point: OperatingPoint,
+    branch_current: f64,
+    spice_dir: &Path,
+    mna_output_dir: &Path,
+) -> Result<ElectricalAdaptiveComparison, Box<dyn Error>> {
+    validate_capacitance_parameters(nmos)?;
+    validate_capacitance_parameters(pmos)?;
+
+    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
+    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let system = mna(spice_dir, mna_output_dir, "ota_4t")
+        .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
+    let mut matrix = system.a.clone();
+    stamp_device_capacitances(&mut matrix, &system, &diff_pair, &current_mirror, "IBIAS")?;
+    let parameters = diff_pair
+        .parameters
+        .iter()
+        .chain(&current_mirror.parameters)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut evaluator = NumericAcEvaluator::new(&matrix, &system, &parameters)?;
+    let dense = evaluate_dense_ac(&mut evaluator)?;
+    let adaptive = evaluate_adaptive_ac(&mut evaluator, true)?;
+    let adaptive_sweep = adaptive_sweep(&adaptive);
+
+    Ok(ElectricalAdaptiveComparison {
+        diff_pair: diff_pair.sizing,
+        current_mirror: current_mirror.sizing,
+        dense_metrics: dense.metrics,
+        dense_sweep: dense.sweep,
+        adaptive_metrics: adaptive.metrics,
+        adaptive_sweep,
+        adaptive_frequency_evaluations: adaptive.frequency_evaluations,
     })
 }
 
@@ -450,72 +500,153 @@ fn evaluate_numeric_ac(
     system: &MnaResult,
     parameters: &[(String, f64)],
 ) -> Result<EvaluatedAc, io::Error> {
-    let rows = matrix.nrows();
-    let columns = matrix.ncols();
-    if rows != columns || system.z.nrows() != rows || system.z.ncols() != 1 {
-        return Err(io::Error::other(
-            "numeric AC analysis requires a square MNA and one matching RHS column",
-        ));
+    let mut evaluator = NumericAcEvaluator::new(matrix, system, parameters)?;
+    evaluate_dense_ac(&mut evaluator)
+}
+
+struct NumericAcEvaluator {
+    symbols: Vec<Atom>,
+    evaluator: ExpressionEvaluator<Complex<f64>>,
+    parameter_map: BTreeMap<String, f64>,
+    outputs: Vec<Complex<f64>>,
+    matrix_len: usize,
+    rows: usize,
+    output_row: usize,
+}
+
+impl NumericAcEvaluator {
+    fn new(
+        matrix: &Matrix<symbolica::domains::atom::AtomField>,
+        system: &MnaResult,
+        parameters: &[(String, f64)],
+    ) -> Result<Self, io::Error> {
+        let rows = matrix.nrows();
+        let columns = matrix.ncols();
+        if rows != columns || system.z.nrows() != rows || system.z.ncols() != 1 {
+            return Err(io::Error::other(
+                "numeric AC analysis requires a square MNA and one matching RHS column",
+            ));
+        }
+
+        let matrix_len = rows * columns;
+        let mut expressions = Vec::with_capacity(matrix_len + rows);
+        for row in 0..rows {
+            let row = u32::try_from(row)
+                .map_err(|_| io::Error::other("OTA MNA row index exceeds u32"))?;
+            for column in 0..columns {
+                let column = u32::try_from(column)
+                    .map_err(|_| io::Error::other("OTA MNA column index exceeds u32"))?;
+                expressions.push(matrix[(row, column)].clone());
+            }
+        }
+        for row in 0..rows {
+            let row = u32::try_from(row)
+                .map_err(|_| io::Error::other("OTA MNA row index exceeds u32"))?;
+            expressions.push(system.z[(row, 0)].clone());
+        }
+
+        let mut symbol_map = BTreeMap::new();
+        for expression in &expressions {
+            for symbol in expression.get_all_symbols(false) {
+                let symbol = Atom::from(symbol);
+                symbol_map.entry(symbol.to_string()).or_insert(symbol);
+            }
+        }
+        let symbols = symbol_map.into_values().collect::<Vec<_>>();
+        let evaluator = Atom::evaluator_multiple(&expressions, &symbols)
+            .build()
+            .map_err(|error| {
+                io::Error::other(format!("could not build numeric MNA evaluator: {error}"))
+            })?
+            .map_coeff(&|coefficient| {
+                Complex::new(coefficient.re.to_f64(), coefficient.im.to_f64())
+            });
+        Ok(Self {
+            symbols,
+            evaluator,
+            parameter_map: parameters.iter().cloned().collect(),
+            outputs: vec![Complex::new(0.0, 0.0); expressions.len()],
+            matrix_len,
+            rows,
+            output_row: ota_output_row(system)?,
+        })
     }
 
-    let matrix_len = rows * columns;
-    let mut expressions = Vec::with_capacity(matrix_len + rows);
-    for row in 0..rows {
-        let row =
-            u32::try_from(row).map_err(|_| io::Error::other("OTA MNA row index exceeds u32"))?;
-        for column in 0..columns {
-            let column = u32::try_from(column)
-                .map_err(|_| io::Error::other("OTA MNA column index exceeds u32"))?;
-            expressions.push(matrix[(row, column)].clone());
-        }
-    }
-    for row in 0..rows {
-        let row =
-            u32::try_from(row).map_err(|_| io::Error::other("OTA MNA row index exceeds u32"))?;
-        expressions.push(system.z[(row, 0)].clone());
+    fn evaluate(&mut self, frequency_hz: f64) -> Result<Complex<f64>, io::Error> {
+        self.evaluate_optional(frequency_hz)?.ok_or_else(|| {
+            io::Error::other(format!(
+                "numeric OTA MNA is singular at {frequency_hz:.6e} Hz"
+            ))
+        })
     }
 
-    let mut symbol_map = BTreeMap::new();
-    for expression in &expressions {
-        for symbol in expression.get_all_symbols(false) {
-            let symbol = Atom::from(symbol);
-            symbol_map.entry(symbol.to_string()).or_insert(symbol);
-        }
-    }
-    let symbols = symbol_map.into_values().collect::<Vec<_>>();
-    let evaluator = Atom::evaluator_multiple(&expressions, &symbols)
-        .build()
-        .map_err(|error| {
-            io::Error::other(format!("could not build numeric MNA evaluator: {error}"))
-        })?;
-    let mut evaluator = evaluator
-        .map_coeff(&|coefficient| Complex::new(coefficient.re.to_f64(), coefficient.im.to_f64()));
-    let parameter_map = parameters.iter().cloned().collect::<BTreeMap<_, _>>();
-    let output_row = ota_output_row(system)?;
-    let mut outputs = vec![Complex::new(0.0, 0.0); expressions.len()];
-    let mut evaluate = |frequency_hz: f64| -> Result<Option<Complex<f64>>, io::Error> {
-        let values = evaluator_inputs(&symbols, &parameter_map, frequency_hz)?;
-        evaluator
-            .try_evaluate(&values, &mut outputs)
+    fn evaluate_optional(&mut self, frequency_hz: f64) -> Result<Option<Complex<f64>>, io::Error> {
+        let values = evaluator_inputs(&self.symbols, &self.parameter_map, frequency_hz)?;
+        self.evaluator
+            .try_evaluate(&values, &mut self.outputs)
             .map_err(|error| {
                 io::Error::other(format!(
                     "could not evaluate numeric MNA at {frequency_hz:.6e} Hz: {error}"
                 ))
             })?;
-        solve_numeric_mna(&outputs, matrix_len, rows, output_row, frequency_hz)
-    };
+        solve_numeric_mna(
+            &self.outputs,
+            self.matrix_len,
+            self.rows,
+            self.output_row,
+            frequency_hz,
+        )
+    }
+}
 
+fn evaluate_dense_ac(evaluator: &mut NumericAcEvaluator) -> Result<EvaluatedAc, io::Error> {
     let frequencies = ac_frequencies();
     let responses = frequencies
         .iter()
-        .map(|frequency| {
-            evaluate(*frequency)?.ok_or_else(|| {
-                io::Error::other(format!("numeric OTA MNA is singular at {frequency:.6e} Hz"))
-            })
-        })
+        .map(|frequency| evaluator.evaluate(*frequency))
         .collect::<Result<Vec<_>, _>>()?;
-    let dc_response = evaluate(0.0)?.unwrap_or(responses[0]);
+    let dc_response = evaluator.evaluate_optional(0.0)?.unwrap_or(responses[0]);
     Ok(ac_from_responses(&frequencies, &responses, dc_response))
+}
+
+fn evaluate_adaptive_ac(
+    evaluator: &mut NumericAcEvaluator,
+    retain_samples: bool,
+) -> Result<AdaptiveAcOutcome, io::Error> {
+    let config = AdaptiveAcConfig {
+        min_frequency_hz: AC_MIN_HZ,
+        max_frequency_hz: AC_MAX_HZ,
+        coarse_points_per_decade: ADAPTIVE_COARSE_POINTS_PER_DECADE,
+        crossing_relative_tolerance: ADAPTIVE_CROSSING_RELATIVE_TOLERANCE,
+        max_refinement_steps: ADAPTIVE_MAX_REFINEMENT_STEPS,
+        retain_samples,
+    };
+    analyze_adaptive_ac(
+        config,
+        AdaptiveAcPolicy::COMPLETE,
+        |frequency| match evaluator.evaluate_optional(frequency)? {
+            Some(response) => Ok(Complex64::new(-response.re, -response.im)),
+            None if frequency == 0.0 => Ok(Complex64::new(f64::NAN, f64::NAN)),
+            None => Err(io::Error::other(format!(
+                "numeric OTA MNA is singular at {frequency:.6e} Hz"
+            ))),
+        },
+    )
+    .map_err(|error| io::Error::other(format!("adaptive electrical AC failed: {error}")))
+}
+
+fn adaptive_sweep(outcome: &AdaptiveAcOutcome) -> AcSweep {
+    let samples = outcome
+        .samples
+        .iter()
+        .map(|sample| AcSample {
+            frequency_hz: sample.frequency_hz,
+            response: Complex::new(sample.response.re, sample.response.im),
+            gain_db: sample.gain_db,
+            phase_deg: sample.phase_deg,
+        })
+        .collect();
+    AcSweep { samples }
 }
 
 fn evaluator_inputs(
