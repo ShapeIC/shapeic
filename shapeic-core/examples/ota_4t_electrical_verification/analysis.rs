@@ -616,21 +616,26 @@ fn ac_frequencies() -> Vec<f64> {
 
 fn ac_from_responses(
     frequencies: &[f64],
-    responses: &[Complex<f64>],
-    dc_response: Complex<f64>,
+    amplifier_responses: &[Complex<f64>],
+    amplifier_dc_response: Complex<f64>,
 ) -> EvaluatedAc {
-    debug_assert_eq!(frequencies.len(), responses.len());
-    let dc_gain_db = magnitude_db(dc_response);
-    let magnitudes = responses
+    debug_assert_eq!(frequencies.len(), amplifier_responses.len());
+    let loop_responses = amplifier_responses
+        .iter()
+        .copied()
+        .map(loop_response)
+        .collect::<Vec<_>>();
+    let dc_gain_db = magnitude_db(loop_response(amplifier_dc_response));
+    let magnitudes = loop_responses
         .iter()
         .copied()
         .map(magnitude_db)
         .collect::<Vec<_>>();
-    let phases = unwrap_phases(responses);
+    let phases = unwrap_phases(&loop_responses);
     let samples = frequencies
         .iter()
         .copied()
-        .zip(responses.iter().copied())
+        .zip(loop_responses.iter().copied())
         .zip(magnitudes.iter().copied())
         .zip(phases.iter().copied())
         .map(
@@ -667,6 +672,10 @@ fn ac_from_responses(
         },
         sweep: AcSweep { samples },
     }
+}
+
+fn loop_response(amplifier_response: Complex<f64>) -> Complex<f64> {
+    -amplifier_response
 }
 
 fn magnitude_db(value: Complex<f64>) -> f64 {
@@ -803,21 +812,23 @@ mod tests {
             .map(|frequency| {
                 let ratio = frequency / pole_hz;
                 Complex::new(
-                    10.0 / (1.0 + ratio * ratio),
-                    -10.0 * ratio / (1.0 + ratio * ratio),
+                    -10.0 / (1.0 + ratio * ratio),
+                    10.0 * ratio / (1.0 + ratio * ratio),
                 )
             })
             .collect::<Vec<_>>();
-        let ac = ac_from_responses(&frequencies, &responses, Complex::new(10.0, 0.0));
+        let ac = ac_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
         let metrics = ac.metrics;
 
         assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
         assert!((metrics.bandwidth_3db_hz.unwrap() / pole_hz - 1.0).abs() < 0.01);
         assert!(metrics.unity_gain_hz.is_some());
-        assert!(metrics.phase_margin_deg.is_some());
+        let phase_margin = metrics.phase_margin_deg.unwrap();
+        assert!(phase_margin > 90.0 && phase_margin < 100.0);
         assert_eq!(ac.sweep.samples.len(), frequencies.len());
         assert_eq!(ac.sweep.samples[0].frequency_hz, frequencies[0]);
         assert!((ac.sweep.samples[0].gain_db - magnitude_db(responses[0])).abs() < 1.0e-12);
+        assert_eq!(ac.sweep.samples[0].response, loop_response(responses[0]));
     }
 
     #[test]
@@ -848,23 +859,25 @@ mod tests {
             .split(',')
             .map(|value| value.parse::<f64>().expect("numeric CSV value"))
             .collect::<Vec<_>>();
+        let loop_responses = responses.map(loop_response);
         assert_eq!(first[0], frequencies[0]);
-        assert_eq!(first[1], responses[0].re);
-        assert_eq!(first[2], responses[0].im);
-        assert!((first[3] - magnitude_db(responses[0])).abs() < 1.0e-12);
-        assert!((first[4] - unwrap_phases(&responses)[0]).abs() < 1.0e-12);
+        assert_eq!(first[1], loop_responses[0].re);
+        assert_eq!(first[2], loop_responses[0].im);
+        assert!((first[3] - magnitude_db(loop_responses[0])).abs() < 1.0e-12);
+        assert!((first[4] - unwrap_phases(&loop_responses)[0]).abs() < 1.0e-12);
     }
 
     #[test]
-    fn negative_transfer_phase_uses_the_shapeic_branch() {
+    fn inverting_amplifier_response_becomes_zero_referenced_loop_phase() {
         let responses = [
             Complex::new(-1.0, 0.0),
             Complex::new(-1.0, 0.1),
             Complex::new(0.0, 1.0),
         ];
-        let phases = unwrap_phases(&responses);
-        assert!((phases[0] + 180.0).abs() < 1.0e-12);
-        assert!(phases[1] < -180.0);
-        assert!((phases[2] + 270.0).abs() < 1.0e-12);
+        let loop_responses = responses.map(loop_response);
+        let phases = unwrap_phases(&loop_responses);
+        assert!(phases[0].abs() < 1.0e-12);
+        assert!(phases[1] < 0.0);
+        assert!((phases[2] + 90.0).abs() < 1.0e-12);
     }
 }

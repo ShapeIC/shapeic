@@ -194,7 +194,7 @@ def plot_comparison(
     gain_axis.grid(True, which="both", linewidth=0.5, alpha=0.35)
 
     phase_axis.set_xlabel("Frequency [Hz]")
-    phase_axis.set_ylabel("Phase [deg]")
+    phase_axis.set_ylabel("Loop phase [deg]")
     phase_axis.legend(loc="best", fontsize=9)
     phase_axis.grid(True, which="both", linewidth=0.5, alpha=0.35)
 

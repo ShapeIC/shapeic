@@ -562,6 +562,14 @@ mod tests {
             capacitor_count: 1,
         };
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let template = fs::read_to_string(
+            manifest.join("examples/ota_4t_physical_verification/ihp_sg13g2_pex.spice"),
+        )
+        .expect("physical verification template");
+        assert!(template.contains("let loop_response = -v(VOUT)"));
+        assert!(template.contains("let phase_deg = 180 / pi * cph(loop_response)"));
+        assert!(optional_ac_measurements(true).contains("180 + phase_at_unity"));
+
         let config = verification_config(manifest, Path::new("unused-output"), &pex, false);
         VerificationEngine::new(config).expect("valid physical verification template");
         let config = verification_config(manifest, Path::new("unused-output"), &pex, true);

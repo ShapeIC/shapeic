@@ -359,6 +359,14 @@ mod tests {
     #[test]
     fn verification_template_is_fully_bound() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let template = fs::read_to_string(
+            manifest.join("examples/ota_4t_electrical_verification/ihp_sg13g2.spice"),
+        )
+        .expect("verification template");
+        assert!(template.contains("let loop_response = -v(VOUT)"));
+        assert!(template.contains("let phase_deg = 180 / pi * cph(loop_response)"));
+        assert!(optional_ac_measurements(true).contains("180 + phase_at_unity"));
+
         let mirror = SizingSummary {
             length: MIRROR_LENGTH,
             finger_width: 1.0e-6,

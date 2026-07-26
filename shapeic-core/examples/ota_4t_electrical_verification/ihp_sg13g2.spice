@@ -24,11 +24,11 @@ op
 print v(VOUT) v(IBIAS) v(N1)
 
 ac dec {{ac_points_per_decade}} {{ac_min_hz}} {{ac_max_hz}}
-let response_real = real(v(VOUT))
-let response_imag = imag(v(VOUT))
-let gain_db = vdb(VOUT)
-* cph follows the same continuous negative phase branch used by Shapeic.
-let phase_deg = 180 / pi * cph(v(VOUT))
+let loop_response = -v(VOUT)
+let response_real = real(loop_response)
+let response_imag = imag(loop_response)
+let gain_db = vdb(loop_response)
+let phase_deg = 180 / pi * cph(loop_response)
 meas ac dc_gain_db find gain_db at={{ac_min_hz}}
 let gain_3db = dc_gain_db - 3
 meas ac bandwidth_3db_hz when gain_db=gain_3db fall=1

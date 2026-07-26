@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use nalgebra::{DMatrix, DVector};
 use ndarray::Array2;
 use num_complex::Complex64;
+use shapeic_core::analysis::{
+    AcMetrics, AnalysisMode, AnalysisTargets, TargetAssessment, TargetFailure, TargetMetric,
+};
 use shapeic_layout::{LayoutError, PhysicalLookupTable, PhysicalPoint, PortAdmittance};
 use shapeic_lut::{
     Axis, DeviceLut, Expr, LookupTable, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
@@ -27,7 +30,7 @@ const VDD_DC: f64 = 1.5;
 const VG_DC: f64 = 0.9;
 const SOURCE_VOLTAGE_START: f64 = 0.65;
 const SOURCE_VOLTAGE_STOP: f64 = 0.8;
-const SOURCE_VOLTAGE_POINTS: usize = 5000;
+const SOURCE_VOLTAGE_POINTS: usize = 1000;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
@@ -37,6 +40,13 @@ const AC_POINTS_PER_DECADE: usize = 20;
 // Keep symbolic capacitance coefficients near unity without changing sC.
 const AC_S_NORMALIZATION: f64 = 1.0e12;
 const DC_GAIN_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm", "r_gds_xcm"];
+const ANALYSIS_MODE: AnalysisMode = AnalysisMode::Prune;
+const ANALYSIS_TARGETS: AnalysisTargets = AnalysisTargets {
+    min_dc_gain_db: Some(27.0),
+    min_bandwidth_3db_hz: Some(100.0e4),
+    min_unity_gain_hz: Some(1.0e7),
+    min_phase_margin_deg: Some(45.0),
+};
 
 type SmallSignalParameters = Vec<(String, f64)>;
 
@@ -73,21 +83,30 @@ struct SweepResult {
     diff_pair: SizingSummary,
     current_mirror: SizingSummary,
     gain: f64,
-    electrical_ac: AcMetrics,
-    physical: Option<PhysicalResult>,
+    dc_targets: TargetAssessment,
+    electrical_ac: StageEvaluation<AcMetrics>,
+    physical: Option<StageEvaluation<AcMetrics>>,
 }
 
-struct PhysicalResult {
-    metrics: Option<AcMetrics>,
-    excluded_reason: Option<String>,
+enum StageEvaluation<T> {
+    Evaluated { value: T, targets: TargetAssessment },
+    Skipped { reason: SkipReason },
+    Excluded { reason: String },
 }
 
-#[derive(Clone, Copy)]
-struct AcMetrics {
-    dc_gain_db: f64,
-    bandwidth_3db_hz: Option<f64>,
-    unity_gain_hz: Option<f64>,
-    phase_margin_deg: Option<f64>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkipReason {
+    DcTargets,
+    ElectricalTargets,
+}
+
+impl SkipReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::DcTargets => "DC target",
+            Self::ElectricalTargets => "electrical targets",
+        }
+    }
 }
 
 struct DiffSweepPoint {
@@ -111,8 +130,26 @@ struct TimingSummary {
     total: Duration,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StageCounts {
+    evaluated: usize,
+    passed: usize,
+    target_failed: usize,
+    skipped: usize,
+    excluded: usize,
+}
+
+struct EvaluationSummary {
+    total: usize,
+    dc_passed: usize,
+    dc_failed: usize,
+    electrical: StageCounts,
+    physical: Option<StageCounts>,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let total_start = Instant::now();
+    ANALYSIS_TARGETS.validate()?;
     let (nmos_path, pmos_path, physical_path) = lut_paths()?;
 
     let stage_start = Instant::now();
@@ -204,56 +241,84 @@ fn main() -> Result<(), Box<dyn Error>> {
             let gain =
                 evaluate_ota_gain(&mut dc_gain_evaluator, &diff_point.block, current_mirror)?;
             numeric_mna += stage_start.elapsed();
+            let dc_targets = ANALYSIS_TARGETS.assess_dc_gain(gain_db(gain));
 
-            let stage_start = Instant::now();
-            let electrical_ac =
-                evaluate_electrical_ac(&base_system, &diff_point.block, current_mirror).map_err(
-                    |error| {
-                        io::Error::other(format!(
-                            "electrical AC evaluation failed for Ldp={:.6e}, Lcm={:.6e}, \
-                             VS={:.6e}, Wf_dp={:.6e}, nf_dp={}, Wf_cm={:.6e}, nf_cm={}: {error}",
-                            diff_point.length,
-                            mirror_length,
-                            diff_point.source_voltage,
-                            diff_point.block.sizing.finger_width,
-                            diff_point.block.sizing.nf,
-                            current_mirror.sizing.finger_width,
-                            current_mirror.sizing.nf,
-                        ))
-                    },
-                )?;
-            electrical_ac_evaluation += stage_start.elapsed();
+            let electrical_ac = if ANALYSIS_MODE.should_continue(&dc_targets) {
+                let stage_start = Instant::now();
+                let metrics =
+                    evaluate_electrical_ac(&base_system, &diff_point.block, current_mirror)
+                        .map_err(|error| {
+                            io::Error::other(format!(
+                                "electrical AC evaluation failed for Ldp={:.6e}, Lcm={:.6e}, \
+                                 VS={:.6e}, Wf_dp={:.6e}, nf_dp={}, Wf_cm={:.6e}, nf_cm={}: {error}",
+                                diff_point.length,
+                                mirror_length,
+                                diff_point.source_voltage,
+                                diff_point.block.sizing.finger_width,
+                                diff_point.block.sizing.nf,
+                                current_mirror.sizing.finger_width,
+                                current_mirror.sizing.nf,
+                            ))
+                        })?;
+                electrical_ac_evaluation += stage_start.elapsed();
+                StageEvaluation::Evaluated {
+                    targets: ANALYSIS_TARGETS.assess_frequency_metrics(&metrics),
+                    value: metrics,
+                }
+            } else {
+                StageEvaluation::Skipped {
+                    reason: SkipReason::DcTargets,
+                }
+            };
 
             let physical = if let Some(table) = &physical_table {
-                let stage_start = Instant::now();
-                let evaluation =
-                    evaluate_layout_aware(&base_system, table, &diff_point.block, current_mirror);
-                if let Some(duration) = physical_evaluation.as_mut() {
-                    *duration += stage_start.elapsed();
-                }
-                Some(match evaluation {
-                    Ok(metrics) => PhysicalResult {
-                        metrics: Some(metrics),
-                        excluded_reason: None,
-                    },
-                    Err(LayoutAwareError::Excluded(reason)) => PhysicalResult {
-                        metrics: None,
-                        excluded_reason: Some(reason),
-                    },
-                    Err(LayoutAwareError::Fatal(error)) => {
-                        return Err(io::Error::other(format!(
-                        "layout-aware evaluation failed for Ldp={:.6e}, Lcm={:.6e}, VS={:.6e}, Wf_dp={:.6e}, nf_dp={}, Wf_cm={:.6e}, nf_cm={}: {error}",
-                        diff_point.length,
-                        mirror_length,
-                        diff_point.source_voltage,
-                        diff_point.block.sizing.finger_width,
-                        diff_point.block.sizing.nf,
-                        current_mirror.sizing.finger_width,
-                        current_mirror.sizing.nf,
-                    ))
-                    .into());
+                let skip_reason = match &electrical_ac {
+                    StageEvaluation::Evaluated { targets, .. }
+                        if !ANALYSIS_MODE.should_continue(targets) =>
+                    {
+                        Some(SkipReason::ElectricalTargets)
                     }
-                })
+                    StageEvaluation::Skipped { reason } => Some(*reason),
+                    StageEvaluation::Excluded { .. } => Some(SkipReason::ElectricalTargets),
+                    StageEvaluation::Evaluated { .. } => None,
+                };
+                if let Some(reason) = skip_reason {
+                    Some(StageEvaluation::Skipped { reason })
+                } else {
+                    let stage_start = Instant::now();
+                    let evaluation = evaluate_layout_aware(
+                        &base_system,
+                        table,
+                        &diff_point.block,
+                        current_mirror,
+                    );
+                    if let Some(duration) = physical_evaluation.as_mut() {
+                        *duration += stage_start.elapsed();
+                    }
+                    Some(match evaluation {
+                        Ok(metrics) => StageEvaluation::Evaluated {
+                            targets: ANALYSIS_TARGETS.assess_all(&metrics),
+                            value: metrics,
+                        },
+                        Err(LayoutAwareError::Excluded(reason)) => {
+                            StageEvaluation::Excluded { reason }
+                        }
+                        Err(LayoutAwareError::Fatal(error)) => {
+                            return Err(io::Error::other(format!(
+                                "layout-aware evaluation failed for Ldp={:.6e}, Lcm={:.6e}, \
+                                 VS={:.6e}, Wf_dp={:.6e}, nf_dp={}, Wf_cm={:.6e}, nf_cm={}: {error}",
+                                diff_point.length,
+                                mirror_length,
+                                diff_point.source_voltage,
+                                diff_point.block.sizing.finger_width,
+                                diff_point.block.sizing.nf,
+                                current_mirror.sizing.finger_width,
+                                current_mirror.sizing.nf,
+                            ))
+                            .into());
+                        }
+                    })
+                }
             } else {
                 None
             };
@@ -267,6 +332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 diff_pair: diff_point.block.sizing,
                 current_mirror: current_mirror.sizing,
                 gain,
+                dc_targets,
                 electrical_ac,
                 physical,
             });
@@ -284,7 +350,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         physical_evaluation,
         total: total_start.elapsed(),
     };
+    let summary = evaluation_summary(&results, physical_table.is_some());
 
+    print_target_configuration();
+    print_evaluation_summary(&summary);
     print_gain_table(&results);
     print_electrical_ac_table(&results);
     if physical_table.is_some() {
@@ -915,16 +984,21 @@ fn ac_evaluator_inputs(
 
 fn ac_metrics_from_responses(
     frequencies: &[f64],
-    responses: &[Complex<f64>],
-    dc_response: Complex<f64>,
+    amplifier_responses: &[Complex<f64>],
+    amplifier_dc_response: Complex<f64>,
 ) -> AcMetrics {
-    let dc_gain_db = magnitude_db(dc_response);
-    let magnitudes = responses
+    let loop_responses = amplifier_responses
+        .iter()
+        .copied()
+        .map(loop_response)
+        .collect::<Vec<_>>();
+    let dc_gain_db = magnitude_db(loop_response(amplifier_dc_response));
+    let magnitudes = loop_responses
         .iter()
         .copied()
         .map(magnitude_db)
         .collect::<Vec<_>>();
-    let phases = unwrap_phases(responses);
+    let phases = unwrap_phases(&loop_responses);
     let bandwidth_3db_hz = crossing_frequency(frequencies, &magnitudes, dc_gain_db - 3.0)
         .map(|(frequency, _)| frequency);
     let unity = crossing_frequency(frequencies, &magnitudes, 0.0);
@@ -946,6 +1020,10 @@ fn ac_metrics_from_responses(
         unity_gain_hz,
         phase_margin_deg,
     }
+}
+
+fn loop_response(amplifier_response: Complex<f64>) -> Complex<f64> {
+    -amplifier_response
 }
 
 fn laplace_frequency(frequency_hz: f64, normalization: f64) -> Complex<f64> {
@@ -1100,10 +1178,95 @@ fn gain_db(gain: f64) -> f64 {
     20.0 * gain.abs().log10()
 }
 
+fn evaluation_summary(results: &[SweepResult], physical_enabled: bool) -> EvaluationSummary {
+    let dc_passed = results
+        .iter()
+        .filter(|result| result.dc_targets.passed())
+        .count();
+    EvaluationSummary {
+        total: results.len(),
+        dc_passed,
+        dc_failed: results.len() - dc_passed,
+        electrical: count_stage(results.iter().map(|result| &result.electrical_ac)),
+        physical: physical_enabled
+            .then(|| count_stage(results.iter().filter_map(|result| result.physical.as_ref()))),
+    }
+}
+
+fn count_stage<'a, T: 'a>(
+    evaluations: impl IntoIterator<Item = &'a StageEvaluation<T>>,
+) -> StageCounts {
+    let mut counts = StageCounts::default();
+    for evaluation in evaluations {
+        match evaluation {
+            StageEvaluation::Evaluated { targets, .. } => {
+                counts.evaluated += 1;
+                if targets.passed() {
+                    counts.passed += 1;
+                } else {
+                    counts.target_failed += 1;
+                }
+            }
+            StageEvaluation::Skipped { .. } => counts.skipped += 1,
+            StageEvaluation::Excluded { .. } => counts.excluded += 1,
+        }
+    }
+    counts
+}
+
+fn print_target_configuration() {
+    println!("Analysis targets");
+    println!("  mode       = {}", analysis_mode_label(ANALYSIS_MODE));
+    for (label, target) in [
+        ("GainDC", ANALYSIS_TARGETS.min_dc_gain_db),
+        ("f3dB", ANALYSIS_TARGETS.min_bandwidth_3db_hz),
+        ("UGF", ANALYSIS_TARGETS.min_unity_gain_hz),
+        ("PM", ANALYSIS_TARGETS.min_phase_margin_deg),
+    ] {
+        println!(
+            "  {label:<10} = {}",
+            target.map_or_else(|| "disabled".to_owned(), |value| format!("{value:.6e}"))
+        );
+    }
+}
+
+fn analysis_mode_label(mode: AnalysisMode) -> &'static str {
+    match mode {
+        AnalysisMode::Prune => "prune",
+        AnalysisMode::FullInsight => "full-insight",
+    }
+}
+
+fn print_evaluation_summary(summary: &EvaluationSummary) {
+    println!();
+    println!("Candidate flow");
+    println!(
+        "{:<12} | {:>10} | {:>10} | {:>11} | {:>10} | {:>10}",
+        "Stage", "Evaluated", "Passed", "Target fail", "Skipped", "Excluded"
+    );
+    println!("-------------+------------+------------+-------------+------------+-----------");
+    println!(
+        "{:<12} | {:>10} | {:>10} | {:>11} | {:>10} | {:>10}",
+        "DC gain", summary.total, summary.dc_passed, summary.dc_failed, 0, 0
+    );
+    print_stage_counts("Electrical", summary.electrical);
+    if let Some(physical) = summary.physical {
+        print_stage_counts("Physical", physical);
+    }
+}
+
+fn print_stage_counts(stage: &str, counts: StageCounts) {
+    println!(
+        "{stage:<12} | {:>10} | {:>10} | {:>11} | {:>10} | {:>10}",
+        counts.evaluated, counts.passed, counts.target_failed, counts.skipped, counts.excluded,
+    );
+}
+
 fn print_gain_table(results: &[SweepResult]) {
+    println!();
     println!("Electrical sizing and DC gain");
     println!(
-        "{:>9} | {:>9} | {:>7} | {:>9} | {:>9} | {:>10} | {:>10} | {:>5} | {:>10} | {:>10} | {:>10} | {:>5} | {:>10} | {:>10} | {:>16} | {:>11}",
+        "{:>9} | {:>9} | {:>7} | {:>9} | {:>9} | {:>10} | {:>10} | {:>5} | {:>10} | {:>10} | {:>10} | {:>5} | {:>10} | {:>10} | {:>16} | {:>11} | status",
         "L_dp[um]",
         "L_cm[um]",
         "VS[V]",
@@ -1122,11 +1285,11 @@ fn print_gain_table(results: &[SweepResult]) {
         "Gain[dB]",
     );
     println!(
-        "----------+-----------+---------+-----------+-----------+------------+------------+-------+------------+------------+------------+-------+------------+------------+------------------+------------"
+        "----------+-----------+---------+-----------+-----------+------------+------------+-------+------------+------------+------------+-------+------------+------------+------------------+-------------+------------------------------"
     );
     for result in results {
         println!(
-            "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>9.3} | {:>10.6} | {:>10.6} | {:>5} | {:>10.6} | {:>10.6} | {:>10.6} | {:>5} | {:>10.6} | {:>10.6} | {:>16.6e} | {:>11.3}",
+            "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>9.3} | {:>10.6} | {:>10.6} | {:>5} | {:>10.6} | {:>10.6} | {:>10.6} | {:>5} | {:>10.6} | {:>10.6} | {:>16.6e} | {:>11.3} | {}",
             result.diff_length * 1.0e6,
             result.mirror_length * 1.0e6,
             result.source_voltage,
@@ -1143,6 +1306,7 @@ fn print_gain_table(results: &[SweepResult]) {
             result.current_mirror.relative_error_percent(),
             result.gain,
             gain_db(result.gain),
+            format_target_assessment(&result.dc_targets),
         );
     }
 }
@@ -1150,7 +1314,7 @@ fn print_gain_table(results: &[SweepResult]) {
 fn print_electrical_ac_table(results: &[SweepResult]) {
     print_ac_table_header("Electrical AC (intrinsic + compact-model extrinsic capacitances)");
     for result in results {
-        print_ac_metrics_row(result, result.electrical_ac, "evaluated");
+        print_ac_evaluation_row(result, &result.electrical_ac);
     }
 }
 
@@ -1162,28 +1326,7 @@ fn print_physical_table(results: &[SweepResult]) {
         let Some(physical) = &result.physical else {
             continue;
         };
-        if let Some(metrics) = physical.metrics {
-            print_ac_metrics_row(result, metrics, "evaluated");
-        } else {
-            println!(
-                "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11} | {:>11} | {:>11} | {:>9} | excluded: {}",
-                result.diff_length * 1.0e6,
-                result.mirror_length * 1.0e6,
-                result.source_voltage,
-                result.diff_pair.finger_width * 1.0e6,
-                result.diff_pair.nf,
-                result.current_mirror.finger_width * 1.0e6,
-                result.current_mirror.nf,
-                "-",
-                "-",
-                "-",
-                "-",
-                physical
-                    .excluded_reason
-                    .as_deref()
-                    .unwrap_or("unknown reason"),
-            );
-        }
+        print_ac_evaluation_row(result, physical);
     }
 }
 
@@ -1209,6 +1352,20 @@ fn print_ac_table_header(title: &str) {
     );
 }
 
+fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<AcMetrics>) {
+    match evaluation {
+        StageEvaluation::Evaluated { value, targets } => {
+            print_ac_metrics_row(result, *value, &format_target_assessment(targets));
+        }
+        StageEvaluation::Skipped { reason } => {
+            print_empty_ac_row(result, &format!("skipped: {}", reason.label()));
+        }
+        StageEvaluation::Excluded { reason } => {
+            print_empty_ac_row(result, &format!("excluded: {reason}"));
+        }
+    }
+}
+
 fn print_ac_metrics_row(result: &SweepResult, metrics: AcMetrics, status: &str) {
     println!(
         "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11.3} | {:>11} | {:>11} | {:>9} | {status}",
@@ -1223,6 +1380,23 @@ fn print_ac_metrics_row(result: &SweepResult, metrics: AcMetrics, status: &str) 
         format_frequency(metrics.bandwidth_3db_hz),
         format_frequency(metrics.unity_gain_hz),
         format_optional(metrics.phase_margin_deg),
+    );
+}
+
+fn print_empty_ac_row(result: &SweepResult, status: &str) {
+    println!(
+        "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11} | {:>11} | {:>11} | {:>9} | {status}",
+        result.diff_length * 1.0e6,
+        result.mirror_length * 1.0e6,
+        result.source_voltage,
+        result.diff_pair.finger_width * 1.0e6,
+        result.diff_pair.nf,
+        result.current_mirror.finger_width * 1.0e6,
+        result.current_mirror.nf,
+        "-",
+        "-",
+        "-",
+        "-",
     );
 }
 
@@ -1250,40 +1424,59 @@ fn print_ac_delta_table(results: &[SweepResult]) {
         let Some(physical) = &result.physical else {
             continue;
         };
-        let (gain, bandwidth, unity, phase, status) = if let Some(metrics) = physical.metrics {
+        let (gain, bandwidth, unity, phase, status) = match (&result.electrical_ac, physical) {
             (
-                format!(
-                    "{:.3}",
-                    metrics.dc_gain_db - result.electrical_ac.dc_gain_db
-                ),
+                StageEvaluation::Evaluated {
+                    value: electrical, ..
+                },
+                StageEvaluation::Evaluated {
+                    value: physical,
+                    targets,
+                },
+            ) => (
+                format!("{:.3}", physical.dc_gain_db - electrical.dc_gain_db),
                 format_optional(relative_change_percent(
-                    result.electrical_ac.bandwidth_3db_hz,
-                    metrics.bandwidth_3db_hz,
+                    electrical.bandwidth_3db_hz,
+                    physical.bandwidth_3db_hz,
                 )),
                 format_optional(relative_change_percent(
-                    result.electrical_ac.unity_gain_hz,
-                    metrics.unity_gain_hz,
+                    electrical.unity_gain_hz,
+                    physical.unity_gain_hz,
                 )),
                 format_optional(option_difference(
-                    result.electrical_ac.phase_margin_deg,
-                    metrics.phase_margin_deg,
+                    electrical.phase_margin_deg,
+                    physical.phase_margin_deg,
                 )),
-                "evaluated".to_owned(),
-            )
-        } else {
-            (
+                format_target_assessment(targets),
+            ),
+            (_, StageEvaluation::Skipped { reason }) => (
                 "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
-                format!(
-                    "excluded: {}",
-                    physical
-                        .excluded_reason
-                        .as_deref()
-                        .unwrap_or("unknown reason")
-                ),
-            )
+                format!("skipped: {}", reason.label()),
+            ),
+            (_, StageEvaluation::Excluded { reason }) => (
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                format!("excluded: {reason}"),
+            ),
+            (StageEvaluation::Skipped { reason }, _) => (
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                format!("skipped: {}", reason.label()),
+            ),
+            (StageEvaluation::Excluded { reason }, _) => (
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                format!("excluded: {reason}"),
+            ),
         };
         println!(
             "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11} | {:>11} | {:>11} | {:>10} | {status}",
@@ -1299,6 +1492,38 @@ fn print_ac_delta_table(results: &[SweepResult]) {
             unity,
             phase,
         );
+    }
+}
+
+fn format_target_assessment(assessment: &TargetAssessment) -> String {
+    if assessment.passed() {
+        return "pass".to_owned();
+    }
+    let failures = assessment
+        .failures()
+        .iter()
+        .map(format_target_failure)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("fail: {failures}")
+}
+
+fn format_target_failure(failure: &TargetFailure) -> String {
+    let label = failure.metric.label();
+    let Some(actual) = failure.actual else {
+        return format!("{label} unavailable");
+    };
+    format!(
+        "{label}={}<{}",
+        format_metric_value(failure.metric, actual),
+        format_metric_value(failure.metric, failure.minimum),
+    )
+}
+
+fn format_metric_value(metric: TargetMetric, value: f64) -> String {
+    match metric {
+        TargetMetric::Bandwidth3DbHz | TargetMetric::UnityGainHz => format!("{value:.3e}"),
+        TargetMetric::DcGainDb | TargetMetric::PhaseMarginDeg => format!("{value:.3}"),
     }
 }
 
@@ -1364,13 +1589,15 @@ fn print_timing_table(timings: &TimingSummary) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AC_MAX_HZ, AC_MIN_HZ, AC_POINTS_PER_DECADE, AC_S_NORMALIZATION, SOURCE_VOLTAGE_POINTS,
-        SOURCE_VOLTAGE_START, SOURCE_VOLTAGE_STOP, VG_DC, VOUT_DC, ac_frequencies,
-        ac_metrics_from_responses, combined_capacitance_matrix, crossing_frequency,
-        diff_pair_mos_connections, diff_pair_physical_connections, gain_db, laplace_frequency,
+        AC_MAX_HZ, AC_MIN_HZ, AC_POINTS_PER_DECADE, AC_S_NORMALIZATION, ANALYSIS_TARGETS,
+        AcMetrics, SOURCE_VOLTAGE_POINTS, SOURCE_VOLTAGE_START, SOURCE_VOLTAGE_STOP, SkipReason,
+        StageCounts, StageEvaluation, VG_DC, VOUT_DC, ac_frequencies, ac_metrics_from_responses,
+        combined_capacitance_matrix, count_stage, crossing_frequency, diff_pair_mos_connections,
+        diff_pair_physical_connections, format_target_assessment, gain_db, laplace_frequency,
         linspace, missing_intrinsic_capacitance_parameters, normalize_voltage, option_difference,
         relative_change_percent, select_dc_response, solve_numeric_mna,
     };
+    use shapeic_core::analysis::AnalysisTargets;
     use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
     use symbolica::domains::float::Complex;
 
@@ -1579,15 +1806,72 @@ mod tests {
             .iter()
             .map(|frequency| {
                 let ratio = frequency / pole_hz;
-                Complex::new(1.0 / (1.0 + ratio * ratio), -ratio / (1.0 + ratio * ratio))
+                Complex::new(
+                    -10.0 / (1.0 + ratio * ratio),
+                    10.0 * ratio / (1.0 + ratio * ratio),
+                )
             })
             .collect::<Vec<_>>();
-        let metrics = ac_metrics_from_responses(&frequencies, &responses, Complex::new(1.0, 0.0));
+        let metrics = ac_metrics_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
 
-        assert!(metrics.dc_gain_db.abs() < 1.0e-12);
+        assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
         let bandwidth = metrics.bandwidth_3db_hz.unwrap();
         assert!((bandwidth / pole_hz - 1.0).abs() < 0.01);
-        assert_eq!(metrics.unity_gain_hz, None);
-        assert_eq!(metrics.phase_margin_deg, None);
+        assert!(metrics.unity_gain_hz.is_some());
+        let phase_margin = metrics.phase_margin_deg.unwrap();
+        assert!(phase_margin > 90.0 && phase_margin < 100.0);
+    }
+
+    #[test]
+    fn stage_counts_distinguish_failures_skips_and_exclusions() {
+        let evaluations = [
+            StageEvaluation::Evaluated {
+                value: (),
+                targets: AnalysisTargets::NONE.assess_dc_gain(0.0),
+            },
+            StageEvaluation::Evaluated {
+                value: (),
+                targets: ANALYSIS_TARGETS.assess_dc_gain(10.0),
+            },
+            StageEvaluation::Skipped {
+                reason: SkipReason::DcTargets,
+            },
+            StageEvaluation::Excluded {
+                reason: "outside LUT".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            count_stage(&evaluations),
+            StageCounts {
+                evaluated: 2,
+                passed: 1,
+                target_failed: 1,
+                skipped: 1,
+                excluded: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn target_status_reports_actual_and_unavailable_values() {
+        let gain_target = ANALYSIS_TARGETS
+            .min_dc_gain_db
+            .expect("example configures a DC gain target");
+        assert_eq!(
+            format_target_assessment(&ANALYSIS_TARGETS.assess_dc_gain(19.0)),
+            format!("fail: GainDC=19.000<{gain_target:.3}")
+        );
+
+        let metrics = AcMetrics {
+            dc_gain_db: 20.0,
+            bandwidth_3db_hz: Some(100.0e6),
+            unity_gain_hz: None,
+            phase_margin_deg: Some(45.0),
+        };
+        assert_eq!(
+            format_target_assessment(&ANALYSIS_TARGETS.assess_frequency_metrics(&metrics)),
+            "fail: UGF unavailable"
+        );
     }
 }
