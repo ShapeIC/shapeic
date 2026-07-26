@@ -21,7 +21,7 @@ impl Bracket {
 }
 
 impl DeviceLut {
-    /// Interpolate all sixteen intrinsic MOS capacitance coefficients in one query.
+    /// Interpolate the independent intrinsic coefficients and reconstruct the full matrix.
     pub fn query_capacitance_matrix(
         &self,
         point: &OperatingPoint,
@@ -35,7 +35,7 @@ impl DeviceLut {
         self.interpolate_capacitance_matrix(&brackets)
     }
 
-    /// Interpolate all sixteen intrinsic MOS capacitance coefficients in one 5-D query.
+    /// Interpolate the independent intrinsic coefficients and reconstruct the full 5-D matrix.
     pub fn query_capacitance_matrix_at(
         &self,
         point: &LutPoint,
@@ -85,7 +85,7 @@ impl DeviceLut {
         MosExtrinsicCapacitances::from_nf_samples(nf, &values)
     }
 
-    /// Interpolate a direct LUT parameter at a physical operating point.
+    /// Interpolate a stored or reconstructed parameter at a physical operating point.
     pub fn query_parameter(
         &self,
         point: &OperatingPoint,
@@ -114,7 +114,7 @@ impl DeviceLut {
         self.interpolate(&brackets, expression)
     }
 
-    /// Interpolate a direct parameter from a five-dimensional Shapeic LUT.
+    /// Interpolate a stored or reconstructed parameter from a five-dimensional Shapeic LUT.
     pub fn query_parameter_at(&self, point: &LutPoint, parameter: &str) -> Result<f64, LutError> {
         self.query_expression_at(point, &self.parameter_expression(parameter)?)
     }
@@ -242,7 +242,7 @@ impl DeviceLut {
         &self,
         brackets: &[Bracket],
     ) -> Result<MosCapacitanceMatrix, LutError> {
-        let expressions = MosCapacitanceMatrix::PARAMETERS
+        let expressions = MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
             .map(|name| self.parameter_expression(name))
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

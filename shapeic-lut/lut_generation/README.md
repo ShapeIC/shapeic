@@ -30,12 +30,12 @@ Generation refuses to replace an existing output unless `--force` is supplied.
 file is moved into place only after all blocks have been simulated and checked
 for missing or non-finite values.
 
-The checked IHP configurations save the complete intrinsic charge-derivative
-matrix in terminal order `G,D,S,B`. This is required by the layout-aware OTA
-example; the matrix is interpolated together with `gm` and `gds` in the final
-inverse-sizing query rather than through sixteen independent queries.
-The archive keeps ngspice's raw mutual-term convention; the Rust reader applies
-the nodal signs and validates charge conservation after interpolation.
+The checked IHP configurations save nine independent intrinsic
+charge-derivative coefficients: `cgg,cgd,cgs`, `cdg,cdd,cds`, and
+`csg,csd,css`. They are interpolated together with `gm` and `gds` in the final
+inverse-sizing query. Rust reconstructs the seven bulk-related coefficients
+from charge conservation, applies ngspice's mutual-term sign convention, and
+validates the resulting complete 4x4 nodal matrix.
 
 The four extrinsic capacitances `cgsol`, `cgdol`, `cjs`, and `cjd` are sampled
 at `nf = [1, 2, 3, 4]`. For each sample, the netlist uses `w = finger_width * nf`

@@ -278,7 +278,7 @@ fn manually_calculated_input_5d(
 ) -> Result<VerificationInput, LutError> {
     let expressions = ["gds", "gm"]
         .into_iter()
-        .chain(MosCapacitanceMatrix::PARAMETERS)
+        .chain(MosCapacitanceMatrix::INDEPENDENT_PARAMETERS)
         .map(Expr::parameter)
         .collect::<Vec<_>>();
     let sizing = model.size_for_current(point, *id, &expressions)?;
@@ -305,11 +305,13 @@ fn manually_calculated_input_5d(
         .reference("gds", gds)
         .reference("gm_id", gm_id)
         .reference("jd", jd);
+    let intrinsic =
+        MosCapacitanceMatrix::from_flat(&sizing.values[2..])?.scaled(f64::from(sizing.nf));
     for (parameter, value) in MosCapacitanceMatrix::PARAMETERS
         .into_iter()
-        .zip(&sizing.values[2..])
+        .zip(intrinsic.to_ngspice_parameters())
     {
-        input = input.reference(parameter, value * nf);
+        input = input.reference(parameter, value);
     }
     let extrinsic = sizing.extrinsic_capacitances.ok_or_else(|| {
         LutError::ExtrinsicCapacitanceSamplesUnavailable {

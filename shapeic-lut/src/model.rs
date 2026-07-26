@@ -90,10 +90,47 @@ pub struct MosCapacitanceMatrix {
 
 impl MosCapacitanceMatrix {
     pub const TERMINALS: [&'static str; 4] = ["G", "D", "S", "B"];
+    /// Independent charge-derivative coefficients stored by reduced LUTs.
+    pub const INDEPENDENT_PARAMETERS: [&'static str; 9] = [
+        "cgg", "cgd", "cgs", "cdg", "cdd", "cds", "csg", "csd", "css",
+    ];
+    /// Complete logical set of ngspice charge-derivative coefficients.
     pub const PARAMETERS: [&'static str; 16] = [
         "cgg", "cgd", "cgs", "cgb", "cdg", "cdd", "cds", "cdb", "csg", "csd", "css", "csb", "cbg",
         "cbd", "cbs", "cbb",
     ];
+
+    /// Reconstruct the complete nodal matrix from nine independent coefficients.
+    ///
+    /// The input follows [`Self::INDEPENDENT_PARAMETERS`] in raw ngspice sign
+    /// convention. The seven bulk-related coefficients follow from row and
+    /// column charge conservation.
+    pub fn from_independent_ngspice_parameters(values: &[f64]) -> Result<Self, LutError> {
+        if values.len() != 9 {
+            return Err(LutError::InvalidCapacitanceMatrix {
+                reason: format!("expected 9 independent values, found {}", values.len()),
+            });
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(LutError::InvalidCapacitanceMatrix {
+                reason: "all coefficients must be finite".to_owned(),
+            });
+        }
+
+        let [cgg, cgd, cgs, cdg, cdd, cds, csg, csd, css] =
+            <[f64; 9]>::try_from(values).expect("length checked above");
+        let cgb = cgg - cgd - cgs;
+        let cdb = cdd - cdg - cds;
+        let csb = css - csg - csd;
+        let cbg = cgg - cdg - csg;
+        let cbd = cdd - cgd - csd;
+        let cbs = css - cgs - cds;
+        let cbb = cbg + cbd + cbs;
+
+        Self::from_ngspice_parameters(&[
+            cgg, cgd, cgs, cgb, cdg, cdd, cds, cdb, csg, csd, css, csb, cbg, cbd, cbs, cbb,
+        ])
+    }
 
     /// Convert the sixteen raw ngspice coefficients into a nodal matrix.
     ///
@@ -122,12 +159,28 @@ impl MosCapacitanceMatrix {
         Ok(matrix)
     }
 
-    /// Alias for [`Self::from_ngspice_parameters`].
+    /// Convert either the nine independent or all sixteen raw coefficients.
     ///
-    /// The flat values must follow [`Self::PARAMETERS`] and use the raw
-    /// ngspice convention, not an already signed nodal-matrix convention.
+    /// Values must follow [`Self::INDEPENDENT_PARAMETERS`] or
+    /// [`Self::PARAMETERS`] and use the raw ngspice convention.
     pub fn from_flat(values: &[f64]) -> Result<Self, LutError> {
-        Self::from_ngspice_parameters(values)
+        match values.len() {
+            9 => Self::from_independent_ngspice_parameters(values),
+            16 => Self::from_ngspice_parameters(values),
+            length => Err(LutError::InvalidCapacitanceMatrix {
+                reason: format!("expected 9 or 16 values, found {length}"),
+            }),
+        }
+    }
+
+    /// Return all sixteen coefficients in raw ngspice sign convention.
+    pub fn to_ngspice_parameters(self) -> [f64; 16] {
+        std::array::from_fn(|index| {
+            let row = index / 4;
+            let column = index % 4;
+            let value = self.values[row][column];
+            if row == column { value } else { -value }
+        })
     }
 
     pub fn scaled(self, factor: f64) -> Self {
@@ -346,8 +399,37 @@ impl DeviceLut {
     }
 
     pub fn parameter_expression(&self, name: &str) -> Result<Expr, LutError> {
-        self.array(name)?;
-        Ok(Expr::parameter(name))
+        if self.parameters.contains_key(name) {
+            return Ok(Expr::parameter(name));
+        }
+
+        let parameter = |name: &str| -> Result<Expr, LutError> {
+            self.array(name)?;
+            Ok(Expr::parameter(name))
+        };
+        let expression = match name {
+            "cgb" => parameter("cgg")? - parameter("cgd")? - parameter("cgs")?,
+            "cdb" => parameter("cdd")? - parameter("cdg")? - parameter("cds")?,
+            "csb" => parameter("css")? - parameter("csg")? - parameter("csd")?,
+            "cbg" => parameter("cgg")? - parameter("cdg")? - parameter("csg")?,
+            "cbd" => parameter("cdd")? - parameter("cgd")? - parameter("csd")?,
+            "cbs" => parameter("css")? - parameter("cgs")? - parameter("cds")?,
+            "cbb" => {
+                parameter("cgg")? - parameter("cdg")? - parameter("csg")? + parameter("cdd")?
+                    - parameter("cgd")?
+                    - parameter("csd")?
+                    + parameter("css")?
+                    - parameter("cgs")?
+                    - parameter("cds")?
+            }
+            _ => {
+                return Err(LutError::UnknownParameter {
+                    model: self.name.clone(),
+                    parameter: name.to_owned(),
+                });
+            }
+        };
+        Ok(expression)
     }
 
     pub fn standard_expression(&self, expression: MosExpression) -> Result<Expr, LutError> {

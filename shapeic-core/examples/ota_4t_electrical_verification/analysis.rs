@@ -206,7 +206,7 @@ fn size_block(
 fn sizing_expressions() -> Vec<Expr> {
     let mut expressions = vec![Expr::parameter("gm"), Expr::parameter("gds")];
     expressions.extend(
-        MosCapacitanceMatrix::PARAMETERS
+        MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
             .into_iter()
             .map(Expr::parameter),
     );
@@ -226,7 +226,7 @@ fn sizing_summary(sizing: &CurrentSizingResult) -> SizingSummary {
 }
 
 fn validate_capacitance_parameters(model: &DeviceLut) -> Result<(), io::Error> {
-    let missing = MosCapacitanceMatrix::PARAMETERS
+    let missing = MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
         .into_iter()
         .filter(|required| {
             !model

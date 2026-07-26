@@ -45,13 +45,18 @@ impl Expr {
             Self::Axis(axis) => model.axis(*axis)[index[axis.index()]],
             Self::FingerWidth => model.finger_width_at(index)?,
             Self::Parameter(name) => {
-                let array = model.array(name)?;
-                array.scalar_or_grid_value(index).ok_or_else(|| {
-                    LutError::schema(
-                        format!("model '{}'.parameter '{name}'", model.name()),
-                        format!("index {index:?} is outside shape {:?}", array.shape()),
-                    )
-                })?
+                if let Some(array) = model.parameters.get(name) {
+                    array.scalar_or_grid_value(index).ok_or_else(|| {
+                        LutError::schema(
+                            format!("model '{}'.parameter '{name}'", model.name()),
+                            format!("index {index:?} is outside shape {:?}", array.shape()),
+                        )
+                    })?
+                } else {
+                    model
+                        .parameter_expression(name)?
+                        .evaluate_at(model, index)?
+                }
             }
             Self::DeviceParameter(name) => model.device_parameter(name)?,
             Self::Neg(expression) => -expression.evaluate_at(model, index)?,

@@ -12,7 +12,7 @@ osdi_paths = [
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
   "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
 ]
-parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgd", "cgs", "cgb", "cdg", "cdd", "cds", "cdb", "csg", "csd", "css", "csb", "cbg", "cbd", "cbs", "cbb", "cgsol", "cgdol", "cjs", "cjd"]
+parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgd", "cgs", "cdg", "cdd", "cds", "csg", "csd", "css", "cgsol", "cgdol", "cjs", "cjd"]
 
 [device]
 name = "sg13_lv_pmos"

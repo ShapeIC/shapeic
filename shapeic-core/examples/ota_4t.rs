@@ -26,7 +26,7 @@ const VDD_DC: f64 = 1.5;
 const VG_DC: f64 = 0.9;
 const SOURCE_VOLTAGE_START: f64 = 0.65;
 const SOURCE_VOLTAGE_STOP: f64 = 0.8;
-const SOURCE_VOLTAGE_POINTS: usize = 5;
+const SOURCE_VOLTAGE_POINTS: usize = 10;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
@@ -342,7 +342,7 @@ fn current_mirror(
 fn sizing_expressions() -> Vec<Expr> {
     let mut expressions = vec![Expr::parameter("gm"), Expr::parameter("gds")];
     expressions.extend(
-        MosCapacitanceMatrix::PARAMETERS
+        MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
             .into_iter()
             .map(Expr::parameter),
     );
@@ -373,8 +373,9 @@ fn validate_intrinsic_capacitance_parameters(model: &DeviceLut) -> Result<(), io
         return Ok(());
     }
     Err(io::Error::other(format!(
-        "OTA AC analysis requires the complete intrinsic capacitance matrix for model '{}'; \
-         missing parameters: {}. Regenerate the electrical LUT with the updated configuration",
+        "OTA AC analysis requires the nine independent intrinsic capacitance coefficients for \
+         model '{}'; missing parameters: {}. Regenerate the electrical LUT with the updated \
+         configuration",
         model.name(),
         missing.join(", "),
     )))
@@ -392,7 +393,7 @@ fn validate_physical_layout_policy(table: &PhysicalLookupTable) -> Result<(), io
 }
 
 fn missing_intrinsic_capacitance_parameters(parameter_names: &[String]) -> Vec<&'static str> {
-    MosCapacitanceMatrix::PARAMETERS
+    MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
         .into_iter()
         .filter(|required| !parameter_names.iter().any(|name| name == required))
         .collect()
@@ -1402,16 +1403,16 @@ mod tests {
 
     #[test]
     fn reports_missing_intrinsic_capacitance_parameters() {
-        let mut parameters = MosCapacitanceMatrix::PARAMETERS
+        let mut parameters = MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert!(missing_intrinsic_capacitance_parameters(&parameters).is_empty());
 
-        parameters.retain(|parameter| parameter != "cgd" && parameter != "cbb");
+        parameters.retain(|parameter| parameter != "cgd" && parameter != "css");
         assert_eq!(
             missing_intrinsic_capacitance_parameters(&parameters),
-            vec!["cgd", "cbb"]
+            vec!["cgd", "css"]
         );
     }
 
