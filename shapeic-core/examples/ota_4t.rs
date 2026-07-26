@@ -14,6 +14,7 @@ use shapeic_lut::{
     Axis, DeviceLut, Expr, LookupTable, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
     OperatingPoint,
 };
+use shapeic_mna::evaluation::PreparedRealEvaluator;
 use shapeic_mna::mna::{MnaResult, mna, mna_solve, stamp_port_admittance};
 use symbolica::domains::atom::AtomField;
 use symbolica::domains::float::Complex;
@@ -26,7 +27,7 @@ const VDD_DC: f64 = 1.5;
 const VG_DC: f64 = 0.9;
 const SOURCE_VOLTAGE_START: f64 = 0.65;
 const SOURCE_VOLTAGE_STOP: f64 = 0.8;
-const SOURCE_VOLTAGE_POINTS: usize = 10;
+const SOURCE_VOLTAGE_POINTS: usize = 5000;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
@@ -35,6 +36,7 @@ const AC_MAX_HZ: f64 = 100.0e9;
 const AC_POINTS_PER_DECADE: usize = 20;
 // Keep symbolic capacitance coefficients near unity without changing sC.
 const AC_S_NORMALIZATION: f64 = 1.0e12;
+const DC_GAIN_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm", "r_gds_xcm"];
 
 type SmallSignalParameters = Vec<(String, f64)>;
 
@@ -100,6 +102,7 @@ struct TimingSummary {
     nmos_lut_load: Duration,
     pmos_lut_load: Duration,
     symbolic_mna: Duration,
+    dc_evaluator_preparation: Duration,
     lut_sizing: Duration,
     numeric_mna: Duration,
     electrical_ac_evaluation: Duration,
@@ -137,6 +140,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let base_system = ota_mna()?;
     let gain_expression = ota_transfer_expression(&base_system, &base_system.a)?;
     let symbolic_mna = stage_start.elapsed();
+    let stage_start = Instant::now();
+    let mut dc_gain_evaluator =
+        PreparedRealEvaluator::new(&gain_expression, &DC_GAIN_PARAMETER_ORDER).map_err(
+            |error| io::Error::other(format!("could not prepare OTA DC gain evaluator: {error}")),
+        )?;
+    let dc_evaluator_preparation = stage_start.elapsed();
     let source_voltages = linspace(
         SOURCE_VOLTAGE_START,
         SOURCE_VOLTAGE_STOP,
@@ -191,15 +200,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut physical_evaluation = physical_table.as_ref().map(|_| Duration::ZERO);
     for diff_point in &diff_pairs {
         for (mirror_length, current_mirror) in &current_mirrors {
-            let parameters = diff_point
-                .block
-                .parameters
-                .iter()
-                .chain(&current_mirror.parameters)
-                .cloned()
-                .collect::<Vec<_>>();
             let stage_start = Instant::now();
-            let gain = evaluate_ota_gain(&gain_expression, &parameters)?;
+            let gain =
+                evaluate_ota_gain(&mut dc_gain_evaluator, &diff_point.block, current_mirror)?;
             numeric_mna += stage_start.elapsed();
 
             let stage_start = Instant::now();
@@ -273,6 +276,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         nmos_lut_load,
         pmos_lut_load,
         symbolic_mna,
+        dc_evaluator_preparation,
         lut_sizing,
         numeric_mna,
         electrical_ac_evaluation,
@@ -1021,30 +1025,26 @@ fn interpolate_at_log_frequency(
 }
 
 fn evaluate_ota_gain(
-    gain_expression: &Atom,
-    parameters: &[(String, f64)],
+    evaluator: &mut PreparedRealEvaluator,
+    diff_pair: &SizedBlock,
+    current_mirror: &SizedBlock,
 ) -> Result<f64, io::Error> {
-    let symbols = gain_expression
-        .get_all_symbols(false)
-        .into_iter()
-        .map(Atom::from)
-        .collect::<Vec<_>>();
-    let values = symbols
-        .iter()
-        .map(|symbol| {
-            let name = symbol.to_string();
-            parameters
-                .iter()
-                .find_map(|(parameter, value)| (parameter == &name).then_some(*value))
-                .ok_or_else(|| io::Error::other(format!("no value for MNA parameter '{name}'")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let evaluator = gain_expression
-        .evaluator(&symbols)
-        .build()
+    let parameter = |block: &SizedBlock, name: &str| {
+        block
+            .parameters
+            .iter()
+            .find_map(|(parameter, value)| (parameter == name).then_some(*value))
+            .ok_or_else(|| io::Error::other(format!("no value for MNA parameter '{name}'")))
+    };
+    let values = [
+        parameter(diff_pair, DC_GAIN_PARAMETER_ORDER[0])?,
+        parameter(diff_pair, DC_GAIN_PARAMETER_ORDER[1])?,
+        parameter(current_mirror, DC_GAIN_PARAMETER_ORDER[2])?,
+        parameter(current_mirror, DC_GAIN_PARAMETER_ORDER[3])?,
+    ];
+    let gain = evaluator
+        .evaluate(&values)
         .map_err(|error| io::Error::other(format!("could not evaluate OTA gain: {error}")))?;
-    let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
-    let gain = evaluator.evaluate_single(&values);
     if !gain.is_finite() {
         return Err(io::Error::other("OTA gain is not finite"));
     }
@@ -1330,6 +1330,7 @@ fn print_timing_table(timings: &TimingSummary) {
         ("NMOS LUT load", timings.nmos_lut_load),
         ("PMOS LUT load", timings.pmos_lut_load),
         ("Symbolic MNA build + solve", timings.symbolic_mna),
+        ("DC evaluator preparation", timings.dc_evaluator_preparation),
         ("LUT sizing + interpolation", timings.lut_sizing),
         ("DC MNA evaluation", timings.numeric_mna),
         (
