@@ -52,7 +52,7 @@ Networks containing only capacitors are reduced directly in `C`; mixed RC
 networks retain the first-order reduction around `s=0`.
 
 Before the complete 880-extraction run (440 points for each primitive),
-validate the real backend at `nf=1` and `nf=20` for each primitive:
+validate the real backend at `nf=1` and `nf=50` for each primitive:
 
 ```sh
 python3 generate.py configs/ihp_sg13g2_ota_magic_smoke.toml --force

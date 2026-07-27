@@ -8,7 +8,7 @@ path = "../generated/ihp_sg13g2_ota_physical_smoke.npz"
 [sweep]
 length = [0.4, 0.8]
 finger_width = [0.15, 10.0]
-nf = [1, 2, 20]
+nf = [1, 2, 50]
 
 [extraction]
 backend = "synthetic"

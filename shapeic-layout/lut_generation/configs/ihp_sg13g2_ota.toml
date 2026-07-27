@@ -9,7 +9,7 @@ path = "../generated/ihp_sg13g2_ota_physical.npz"
 # Values are expressed in micrometers. The archive stores SI units.
 length = [0.4, 0.8, 1.6, 3.2, 6.4]
 finger_width = [0.15, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
-nf = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+nf = [1, 2, 4, 8, 12, 16, 20, 25, 30, 40, 50]
 
 [extraction]
 backend = "magic"

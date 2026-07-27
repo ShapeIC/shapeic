@@ -15,6 +15,7 @@ PORTS = {
     "simplediffpair": ("DP", "DN", "GP", "GN", "S", "B"),
     "currentmirror": ("DOUT", "DREF", "S", "B"),
 }
+MAX_FINGER_COUNT = 50
 
 
 @dataclass(frozen=True)
@@ -117,8 +118,10 @@ def _validate(config: GenerationConfig) -> None:
             raise ValueError(f"{name} must be strictly increasing")
     if np.any(config.lengths <= 0) or np.any(config.finger_widths <= 0):
         raise ValueError("length and finger_width must be positive")
-    if np.any(config.finger_counts < 1) or np.any(config.finger_counts > 20):
-        raise ValueError("nf samples must be in [1, 20]")
+    if np.any(config.finger_counts < 1) or np.any(
+        config.finger_counts > MAX_FINGER_COUNT
+    ):
+        raise ValueError(f"nf samples must be in [1, {MAX_FINGER_COUNT}]")
     if np.any(np.mod(config.finger_counts, 1.0) != 0.0):
         raise ValueError("nf samples must be integers")
     if not all(math.isfinite(float(value)) for value in config.finger_counts):

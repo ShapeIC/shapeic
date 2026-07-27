@@ -9,7 +9,7 @@ path = "../generated/ihp_sg13g2_ota_physical_magic_smoke.npz"
 # Exercise the minimum and maximum finger counts with real Magic extraction.
 length = [0.4]
 finger_width = [0.15]
-nf = [1, 20]
+nf = [1, 50]
 
 [extraction]
 backend = "magic"
