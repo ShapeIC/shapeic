@@ -1112,7 +1112,9 @@ dependencies = [
 name = "shapeic-mna"
 version = "0.1.0"
 dependencies = [
+ "nalgebra",
  "ndarray",
+ "num-complex",
  "symbolica",
 ]
 

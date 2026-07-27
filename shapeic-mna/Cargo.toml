@@ -8,5 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 ndarray = "0.17"
+num-complex = "0.4"
 symbolica = "2.1"

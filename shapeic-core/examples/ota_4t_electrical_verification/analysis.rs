@@ -17,6 +17,7 @@ use shapeic_lut::{
     OperatingPoint,
 };
 use shapeic_mna::mna::{MnaResult, mna, stamp_port_admittance};
+use shapeic_mna::numeric::{NumericMnaSystem, PreparedNumericMna};
 use symbolica::domains::float::Complex;
 use symbolica::prelude::{Atom, AtomCore, ExpressionEvaluator, Matrix};
 
@@ -28,6 +29,7 @@ pub const ADAPTIVE_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
 pub const ADAPTIVE_MAX_REFINEMENT_STEPS: usize = 32;
 
 const AC_S_NORMALIZATION: f64 = 1.0e12;
+const MNA_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm", "r_gds_xcm"];
 
 type SmallSignalParameters = Vec<(String, f64)>;
 
@@ -165,17 +167,9 @@ pub fn analyze_adaptive_comparison(
     let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
     let system = mna(spice_dir, mna_output_dir, "ota_4t")
         .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
-    let mut matrix = system.a.clone();
-    stamp_device_capacitances(&mut matrix, &system, &diff_pair, &current_mirror, "IBIAS")?;
-    let parameters = diff_pair
-        .parameters
-        .iter()
-        .chain(&current_mirror.parameters)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut evaluator = NumericAcEvaluator::new(&matrix, &system, &parameters)?;
-    let dense = evaluate_dense_ac(&mut evaluator)?;
-    let adaptive = evaluate_adaptive_ac(&mut evaluator, true)?;
+    let numeric = electrical_numeric_mna(&system, &diff_pair, &current_mirror, "IBIAS")?;
+    let dense = evaluate_dense_numeric_ac(&numeric)?;
+    let adaptive = evaluate_adaptive_numeric_ac(&numeric, true)?;
     let adaptive_sweep = adaptive_sweep(&adaptive);
 
     Ok(ElectricalAdaptiveComparison {
@@ -302,21 +296,29 @@ fn evaluate_electrical_ac(
     current_mirror: &SizedBlock,
     diff_bulk_node: &str,
 ) -> Result<EvaluatedAc, io::Error> {
-    let mut matrix = system.a.clone();
-    stamp_device_capacitances(
-        &mut matrix,
-        system,
-        diff_pair,
-        current_mirror,
-        diff_bulk_node,
-    )?;
-    let parameters = diff_pair
-        .parameters
-        .iter()
-        .chain(&current_mirror.parameters)
-        .cloned()
-        .collect::<Vec<_>>();
-    evaluate_numeric_ac(&matrix, system, &parameters)
+    let numeric = electrical_numeric_mna(system, diff_pair, current_mirror, diff_bulk_node)?;
+    evaluate_dense_numeric_ac(&numeric)
+}
+
+fn electrical_numeric_mna(
+    system: &MnaResult,
+    diff_pair: &SizedBlock,
+    current_mirror: &SizedBlock,
+    diff_bulk_node: &str,
+) -> Result<NumericMnaSystem, io::Error> {
+    let mut prepared = PreparedNumericMna::new(system, &MNA_PARAMETER_ORDER).map_err(|error| {
+        io::Error::other(format!(
+            "could not prepare numerical electrical MNA: {error}"
+        ))
+    })?;
+    let values = ota_parameter_values(diff_pair, current_mirror)?;
+    let mut numeric = prepared.instantiate(&values).map_err(|error| {
+        io::Error::other(format!(
+            "could not instantiate numerical electrical MNA: {error}"
+        ))
+    })?;
+    stamp_numeric_device_capacitances(&mut numeric, diff_pair, current_mirror, diff_bulk_node)?;
+    Ok(numeric)
 }
 
 fn evaluate_physical_ac(
@@ -354,6 +356,25 @@ fn evaluate_physical_ac(
         .cloned()
         .collect::<Vec<_>>();
     evaluate_numeric_ac(&matrix, system, &parameters)
+}
+
+fn ota_parameter_values(
+    diff_pair: &SizedBlock,
+    current_mirror: &SizedBlock,
+) -> Result<[f64; 4], io::Error> {
+    let parameter = |block: &SizedBlock, name: &str| {
+        block
+            .parameters
+            .iter()
+            .find_map(|(parameter, value)| (parameter == name).then_some(*value))
+            .ok_or_else(|| io::Error::other(format!("no value for MNA parameter '{name}'")))
+    };
+    Ok([
+        parameter(diff_pair, MNA_PARAMETER_ORDER[0])?,
+        parameter(diff_pair, MNA_PARAMETER_ORDER[1])?,
+        parameter(current_mirror, MNA_PARAMETER_ORDER[2])?,
+        parameter(current_mirror, MNA_PARAMETER_ORDER[3])?,
+    ])
 }
 
 fn query_physical(
@@ -406,6 +427,38 @@ fn stamp_device_capacitances(
     )?;
     stamp_device_capacitance(
         matrix,
+        system,
+        current_mirror.intrinsic_capacitance,
+        current_mirror.extrinsic_capacitance,
+        [("G", "N1"), ("D", "N1"), ("S", "VDD"), ("B", "VDD")],
+    )
+}
+
+fn stamp_numeric_device_capacitances(
+    system: &mut NumericMnaSystem,
+    diff_pair: &SizedBlock,
+    current_mirror: &SizedBlock,
+    diff_bulk_node: &str,
+) -> Result<(), io::Error> {
+    stamp_numeric_device_capacitance(
+        system,
+        diff_pair.intrinsic_capacitance,
+        diff_pair.extrinsic_capacitance,
+        diff_pair_connections("VINP", "VOUT", diff_bulk_node),
+    )?;
+    stamp_numeric_device_capacitance(
+        system,
+        diff_pair.intrinsic_capacitance,
+        diff_pair.extrinsic_capacitance,
+        diff_pair_connections("VINN", "N1", diff_bulk_node),
+    )?;
+    stamp_numeric_device_capacitance(
+        system,
+        current_mirror.intrinsic_capacitance,
+        current_mirror.extrinsic_capacitance,
+        [("G", "N1"), ("D", "VOUT"), ("S", "VDD"), ("B", "VDD")],
+    )?;
+    stamp_numeric_device_capacitance(
         system,
         current_mirror.intrinsic_capacitance,
         current_mirror.extrinsic_capacitance,
@@ -471,6 +524,32 @@ fn stamp_device_capacitance<const N: usize>(
     .map_err(|error| io::Error::other(format!("could not stamp MOS capacitance: {error:?}")))
 }
 
+fn stamp_numeric_device_capacitance<const N: usize>(
+    system: &mut NumericMnaSystem,
+    intrinsic: MosCapacitanceMatrix,
+    extrinsic: MosExtrinsicCapacitances,
+    connections: [(&str, &str); N],
+) -> Result<(), io::Error> {
+    let flat = combined_capacitance_matrix(intrinsic, extrinsic)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let capacitance = Array2::from_shape_vec((4, 4), flat).expect("fixed 4x4 capacitance matrix");
+    let conductance = Array2::<f64>::zeros((4, 4));
+    let ports = MosCapacitanceMatrix::TERMINALS.map(str::to_owned).to_vec();
+    let connections = connections
+        .into_iter()
+        .map(|(port, node)| (port.to_owned(), node.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    system
+        .stamp_port_admittance(&ports, &connections, conductance.view(), capacitance.view())
+        .map_err(|error| {
+            io::Error::other(format!(
+                "could not stamp numerical MOS capacitance: {error}"
+            ))
+        })
+}
+
 fn combined_capacitance_matrix(
     intrinsic: MosCapacitanceMatrix,
     extrinsic: MosExtrinsicCapacitances,
@@ -493,6 +572,53 @@ fn add_passive_capacitance(
     matrix[negative][negative] += capacitance;
     matrix[positive][negative] -= capacitance;
     matrix[negative][positive] -= capacitance;
+}
+
+fn evaluate_dense_numeric_ac(system: &NumericMnaSystem) -> Result<EvaluatedAc, io::Error> {
+    let frequencies = ac_frequencies();
+    let responses = frequencies
+        .iter()
+        .map(|frequency| {
+            system
+                .solve_node(*frequency, "VOUT")
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .map(|response| Complex::new(response.re, response.im))
+                .ok_or_else(|| {
+                    io::Error::other(format!("numeric OTA MNA is singular at {frequency:.6e} Hz"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let dc_response = system
+        .solve_node(0.0, "VOUT")
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .map(|response| Complex::new(response.re, response.im))
+        .unwrap_or(responses[0]);
+    Ok(ac_from_responses(&frequencies, &responses, dc_response))
+}
+
+fn evaluate_adaptive_numeric_ac(
+    system: &NumericMnaSystem,
+    retain_samples: bool,
+) -> Result<AdaptiveAcOutcome, io::Error> {
+    let config = AdaptiveAcConfig {
+        min_frequency_hz: AC_MIN_HZ,
+        max_frequency_hz: AC_MAX_HZ,
+        coarse_points_per_decade: ADAPTIVE_COARSE_POINTS_PER_DECADE,
+        crossing_relative_tolerance: ADAPTIVE_CROSSING_RELATIVE_TOLERANCE,
+        max_refinement_steps: ADAPTIVE_MAX_REFINEMENT_STEPS,
+        retain_samples,
+    };
+    analyze_adaptive_ac(config, AdaptiveAcPolicy::COMPLETE, |frequency| match system
+        .solve_node(frequency, "VOUT")
+        .map_err(|error| io::Error::other(error.to_string()))?
+    {
+        Some(response) => Ok(-response),
+        None if frequency == 0.0 => Ok(Complex64::new(f64::NAN, f64::NAN)),
+        None => Err(io::Error::other(format!(
+            "numeric OTA MNA is singular at {frequency:.6e} Hz"
+        ))),
+    })
+    .map_err(|error| io::Error::other(format!("adaptive electrical AC failed: {error}")))
 }
 
 fn evaluate_numeric_ac(
@@ -607,32 +733,6 @@ fn evaluate_dense_ac(evaluator: &mut NumericAcEvaluator) -> Result<EvaluatedAc, 
         .collect::<Result<Vec<_>, _>>()?;
     let dc_response = evaluator.evaluate_optional(0.0)?.unwrap_or(responses[0]);
     Ok(ac_from_responses(&frequencies, &responses, dc_response))
-}
-
-fn evaluate_adaptive_ac(
-    evaluator: &mut NumericAcEvaluator,
-    retain_samples: bool,
-) -> Result<AdaptiveAcOutcome, io::Error> {
-    let config = AdaptiveAcConfig {
-        min_frequency_hz: AC_MIN_HZ,
-        max_frequency_hz: AC_MAX_HZ,
-        coarse_points_per_decade: ADAPTIVE_COARSE_POINTS_PER_DECADE,
-        crossing_relative_tolerance: ADAPTIVE_CROSSING_RELATIVE_TOLERANCE,
-        max_refinement_steps: ADAPTIVE_MAX_REFINEMENT_STEPS,
-        retain_samples,
-    };
-    analyze_adaptive_ac(
-        config,
-        AdaptiveAcPolicy::COMPLETE,
-        |frequency| match evaluator.evaluate_optional(frequency)? {
-            Some(response) => Ok(Complex64::new(-response.re, -response.im)),
-            None if frequency == 0.0 => Ok(Complex64::new(f64::NAN, f64::NAN)),
-            None => Err(io::Error::other(format!(
-                "numeric OTA MNA is singular at {frequency:.6e} Hz"
-            ))),
-        },
-    )
-    .map_err(|error| io::Error::other(format!("adaptive electrical AC failed: {error}")))
 }
 
 fn adaptive_sweep(outcome: &AdaptiveAcOutcome) -> AcSweep {
