@@ -1,46 +1,82 @@
+//! Modified nodal analysis construction, solution, and physical-model stamping.
+//!
+//! This module provides the high-level MNA interface used by ShapeIC.
+//! It converts SPICE netlists into symbolic MNA systems, solves assembled
+//! systems, maps symbolic voltage variables back to circuit node names,
+//! and stamps physical multiport admittance models into existing MNA matrices.
 use ndarray::ArrayView2;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::collections::HashMap;
 use symbolica::domains::atom::AtomField;
 use symbolica::prelude::{Matrix, parse};
 
-use crate::spice_parser::{NodeMap, SpiceError, spice_parser};
+use crate::spice2cir::{NodeMap, SpiceError, spice2cir};
 use crate::symmna::{SmnaError, Vector, smna};
 
+/// Symbolic MNA system generated from a SPICE netlist.
+///
+/// The system follows the form
+///
+/// ```text
+/// A x = z
+/// ```
+///
+/// and additionally preserves the mapping between the original SPICE
+/// node names and their numeric MNA representation.
 #[derive(Debug)]
 pub struct MnaResult {
+    /// Human-readable report describing the generated MNA system.
     pub report: String,
+
+    /// Symbolic MNA system matrix.
     pub a: Matrix<AtomField>,
+
+    /// Ordered vector of MNA unknowns.
     pub x: Vector,
+
+    /// Right-hand-side excitation vector.
     pub z: Matrix<AtomField>,
+
+    /// Mapping between original SPICE node names and numeric node identifiers.
     pub nodes: NodeMap,
 }
 
 impl MnaResult {
+    /// Returns the SPICE node name corresponding to an MNA voltage variable.
+    ///
+    /// For example, if `v3` corresponds to the SPICE node `vout`,
+    /// this method returns `Some("vout")`.
     pub fn node_name_for_variable(&self, variable: &str) -> Option<&str> {
         let node_number = variable.strip_prefix('v')?.parse::<usize>().ok()?;
 
         self.nodes
-            .nodes
+            .nodes()
             .iter()
-            .find_map(|(name, number)| (*number == node_number).then_some(name.as_str()))
+            .find_map(|(name, number)| {
+                (*number == node_number).then_some(name.as_str())
+            })
     }
-
+    /// Returns the MNA voltage variable associated with a SPICE node name.
+    ///
+    /// Ground nodes return `None` because ground is omitted from the
+    /// reduced MNA voltage vector.
     pub fn variable_for_node_name(&self, node_name: &str) -> Option<String> {
-        let node_number = self.nodes.nodes.get(node_name)?;
+        let node_number = self.nodes.get(node_name)?;
 
-        if *node_number == 0 {
+        if node_number == 0 {
             None
         } else {
             Some(format!("v{node_number}"))
         }
     }
 
+    /// Returns all non-ground node variables ordered by numeric node identifier.
     pub fn node_variables(&self) -> Vec<NodeVariable> {
         let mut variables = self
             .nodes
-            .nodes
+            .nodes()
             .iter()
             .filter_map(|(node_name, node_number)| {
                 if *node_number == 0 {
@@ -60,29 +96,73 @@ impl MnaResult {
     }
 }
 
+/// Association between an MNA voltage variable and its original SPICE node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeVariable {
+    /// Symbolic MNA voltage variable, such as `v1` or `v3`.
     pub variable: String,
+
+    /// Original SPICE node name.
     pub node_name: String,
+
+    /// Numeric node identifier assigned during SPICE preprocessing.
     pub node_number: usize,
 }
 
+/// Solution of an assembled MNA system.
 #[derive(Debug)]
 pub struct MnaSolveResult {
+    /// Ordered MNA variables corresponding to the solution entries.
     pub variables: Vector,
+
+    /// Symbolic solution vector.
     pub solution: Matrix<AtomField>,
 }
 
+/// Errors that may occur while building, modifying, or solving an MNA system.
 #[derive(Debug)]
 pub enum MnaError {
-    Io(std::io::Error),
-    SpiceConversion(SpiceError),
-    SymMna(SmnaError),
-    PythonSolve(String),
-    MissingNode(String),
-    DimensionMismatch { message: String },
-    SolveFailed { message: String },
-    InvalidPortAdmittance { message: String },
+    /// An I/O operation failed.
+    Io(
+        /// Underlying I/O error.
+        std::io::Error,
+    ),
+
+    /// SPICE preprocessing failed.
+    SpiceConversion(
+        /// Underlying SPICE conversion error.
+        SpiceError,
+    ),
+
+    /// Symbolic MNA generation failed.
+    SymMna(
+        /// Underlying symbolic MNA error.
+        SmnaError,
+    ),
+
+    /// A referenced circuit node could not be found.
+    MissingNode {
+        /// Name of the missing node.
+        node: String,
+    },
+
+    /// Matrix or vector dimensions are incompatible.
+    DimensionMismatch {
+        /// Description of the dimension mismatch.
+        message: String,
+    },
+
+    /// The symbolic linear system could not be solved.
+    SolveFailed {
+        /// Description of the solver failure.
+        message: String,
+    },
+
+    /// A physical multiport admittance model is invalid.
+    InvalidPortAdmittance {
+        /// Description of the invalid admittance model.
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for MnaError {
@@ -91,9 +171,22 @@ impl From<std::io::Error> for MnaError {
     }
 }
 
+/// Builds a symbolic MNA system from a SPICE netlist.
+///
+/// The netlist `<design_name>.spice` is read from `spice_dir`,
+/// converted to the numeric-node `.cir` representation, and passed
+/// to the symbolic MNA generator.
+///
+/// The generated `.cir` file is written to `output_dir`.
+///
+/// # Errors
+///
+/// Returns [`MnaError::SpiceConversion`] if the SPICE netlist cannot be
+/// converted, [`MnaError::Io`] if the converted netlist cannot be read,
+/// or [`MnaError::SymMna`] if symbolic MNA generation fails.
 pub fn mna(spice_dir: &Path, output_dir: &Path, design_name: &str) -> Result<MnaResult, MnaError> {
     let nodes =
-        spice_parser(spice_dir, output_dir, design_name).map_err(MnaError::SpiceConversion)?;
+        spice2cir(spice_dir, output_dir, design_name).map_err(MnaError::SpiceConversion)?;
     let input_path = output_dir.join(format!("{design_name}.cir"));
     let content = fs::read_to_string(input_path)?;
 
@@ -108,6 +201,22 @@ pub fn mna(spice_dir: &Path, output_dir: &Path, design_name: &str) -> Result<Mna
     })
 }
 
+/// Solves an assembled symbolic MNA system.
+///
+/// Solves
+///
+/// ```text
+/// A x = z
+/// ```
+///
+/// using Symbolica's symbolic linear solver.
+///
+/// # Errors
+///
+/// Returns [`MnaError::DimensionMismatch`] if `A` is not square, if `z`
+/// is not a column vector, or if their row counts differ.
+///
+/// Returns [`MnaError::SolveFailed`] if the symbolic system cannot be solved.
 pub fn mna_solve(
     a: &Matrix<AtomField>,
     x: &Vector,
@@ -124,7 +233,7 @@ pub fn mna_solve(
 
     if z.ncols() != 1 {
         return Err(MnaError::DimensionMismatch {
-            message: format!("z must be a column matrix, but i has {} columns", z.ncols()),
+            message: format!("z must be a column matrix, but it has {} columns", z.ncols()),
         });
     }
 
@@ -145,10 +254,30 @@ pub fn mna_solve(
     })
 }
 
-/// Stamp a complete physical port model as `G + sC` into an existing MNA matrix.
+/// Stamps a physical multiport admittance model into an existing MNA matrix.
 ///
-/// `connections` maps each name in `port_order` to a circuit node name. A node
-/// mapped to the netlist ground is omitted in the usual reduced MNA form.
+/// The physical model is represented as
+///
+/// ```text
+/// Y(s) = G + sC
+/// ```
+///
+/// where `G` and `C` are square port-admittance matrices.
+///
+/// `port_order` defines the row and column order of the physical matrices,
+/// while `connections` maps each physical port to a circuit node name.
+///
+/// Ports connected to the netlist ground are omitted according to the
+/// reduced MNA formulation.
+///
+/// # Errors
+///
+/// Returns [`MnaError::InvalidPortAdmittance`] if the conductance and
+/// capacitance matrices do not match the number of ports, if a physical
+/// port has no circuit connection, or if a matrix coefficient is not finite.
+///
+/// Returns [`MnaError::MissingNode`] if a circuit node referenced by
+/// `connections` is not present in the [`NodeMap`].
 pub fn stamp_port_admittance(
     a: &mut Matrix<AtomField>,
     nodes: &NodeMap,
@@ -177,10 +306,10 @@ pub fn stamp_port_admittance(
                 message: format!("physical port '{port}' has no circuit-node connection"),
             })?;
         let node_number = nodes
-            .nodes
             .get(node_name)
-            .copied()
-            .ok_or_else(|| MnaError::MissingNode(node_name.clone()))?;
+            .ok_or_else(|| MnaError::MissingNode {
+                node: node_name.clone(),
+            })?;
         matrix_indices.push(if node_number == 0 {
             None
         } else {
@@ -242,9 +371,10 @@ fn stamps_a_complete_port_admittance_with_ground_reduction() {
     use ndarray::array;
 
     let mut a = Matrix::new(1, 1, AtomField::new());
-    let nodes = NodeMap {
-        nodes: HashMap::from([("P".to_owned(), 1), ("VSS".to_owned(), 0)]),
-    };
+    let nodes = NodeMap::from_map(HashMap::from([
+        ("P".to_owned(), 1),
+        ("VSS".to_owned(), 0),
+    ]));
     let ports = vec!["P".to_owned(), "N".to_owned()];
     let connections = BTreeMap::from([
         ("P".to_owned(), "P".to_owned()),
@@ -263,5 +393,11 @@ fn stamps_a_complete_port_admittance_with_ground_reduction() {
     )
     .expect("port model should stamp");
 
-    assert_eq!(a[(0, 0)], parse!("2+3*s"));
+    let expected_g = parse!(format!("{:.17e}", 2.0_f64).as_str());
+    let expected_c = parse!(format!("{:.17e}", 3.0_f64).as_str());
+    let s = parse!("s");
+
+    let expected = expected_g + &s * expected_c;
+
+    assert_eq!(a[(0, 0)], expected);
 }

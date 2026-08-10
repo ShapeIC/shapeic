@@ -1,17 +1,45 @@
+//! SPICE netlist preprocessing and node mapping.
+//!
+//! This module converts SPICE netlists with named nodes into the
+//! numeric-node representation expected by the symbolic MNA implementation.
+//!
+//! During parsing, each unique node name is assigned a numeric identifier.
+//! The `vss` net is treated as ground and mapped to node `0`.
 use std::collections::HashMap;
 use std::fs::{File, create_dir_all};
 use std::path::Path;
 use std::io::{BufRead, BufReader, Write};
 
 #[derive(Debug, Clone)]
+/// Mapping between SPICE net names and their numeric node identifiers.
+///
+/// Non-ground nodes are numbered sequentially starting from `1`.
+/// The `vss` net is treated as ground and assigned node `0`.
 pub struct NodeMap {
-    pub nodes: HashMap<String, usize>,
+    nodes: HashMap<String, usize>,
+}
+
+impl NodeMap {
+    /// Returns the numeric identifier associated with a SPICE net name.
+    pub fn get(&self, net: &str) -> Option<usize> {
+        self.nodes.get(net).copied()
+    }
+
+    /// Returns the complete mapping from SPICE net names to numeric node identifiers.
+    pub fn nodes(&self) -> &HashMap<String, usize> {
+        &self.nodes
+    }
+
+    pub(crate) fn from_map(nodes: HashMap<String, usize>) -> Self {
+        Self { nodes }
+    }
 }
 
 #[derive(Debug)]
+/// Errors that may occur while preprocessing a SPICE netlist.
 pub enum SpiceError {
+    /// An I/O operation failed while reading or writing the netlist.
     Io(std::io::Error),
-    EmptyLine,
 }
 
 impl From<std::io::Error> for SpiceError {
@@ -20,7 +48,31 @@ impl From<std::io::Error> for SpiceError {
     }
 }
 
-pub fn spice_parser(
+/// Converts a SPICE netlist with named nodes into a numeric-node netlist.
+///
+/// The input netlist is read from:
+///
+/// ```text
+/// <spice_dir>/<filename>.spice
+/// ```
+///
+/// and the converted netlist is written to:
+///
+/// ```text
+/// <output_dir>/<filename>.cir
+/// ```
+///
+/// Node names appearing in supported circuit elements are replaced by
+/// sequential numeric identifiers. The `vss` net is mapped to node `0`.
+///
+/// The returned [`NodeMap`] preserves the correspondence between the
+/// original node names and their assigned numeric identifiers.
+///
+/// # Errors
+///
+/// Returns [`SpiceError::Io`] if the input file cannot be read, the output
+/// directory or file cannot be created, or writing the converted netlist fails.
+pub fn spice2cir(
     spice_dir: &Path,
     output_dir: &Path,
     filename: &str,
@@ -40,12 +92,11 @@ pub fn spice_parser(
 
     for line_result in reader.lines() {
         let line = line_result?;
-
-        if line.trim().is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty(){
             continue;
         }
-
-        let first_char = line.chars().next().ok_or(SpiceError::EmptyLine)?;
+        let first_char = trimmed.chars().next().unwrap();
 
         if first_char == '*' || first_char == '.' {
             continue;

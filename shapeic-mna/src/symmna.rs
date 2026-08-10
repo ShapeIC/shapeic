@@ -1,44 +1,87 @@
+//! Symbolic modified nodal analysis.
+//!
+//! This module generates the symbolic MNA representation of a SPICE-like
+//! circuit netlist.
+//!
+//! The implementation is adapted from the Python SymMNA project and uses
+//! Symbolica for symbolic manipulation.
 use symbolica::atom::Atom;
 use symbolica::prelude::{Matrix, parse};
 use symbolica::domains::atom::AtomField;
 
+/// Definition of a Vector
 pub type Vector = Vec<Atom>;
 
+/// Errors that may occur while parsing a netlist or constructing the MNA system.
 #[derive(Debug)]
 pub enum SmnaError {
+    /// The netlist contains an unsupported circuit element.
     UnknownElement {
+        /// Zero-based line index where the element was found.
         line: usize,
+
+        /// Contents of the offending netlist line.
         content: String,
     },
+    /// A netlist element contains an unexpected number of tokens.
     BadTokenCount {
+        /// Zero-based line index where the error occurred.
         line: usize,
+
+        /// Contents of the malformed netlist line.
         content: String,
+
+        /// Expected number of tokens.
         expected: usize,
+
+        /// Actual number of tokens.
         actual: usize,
     },
+    /// A node identifier could not be parsed.
     BadNode {
+        /// Invalid node token.
         token: String,
     },
+    /// An element value could not be parsed.
     BadValue {
+        /// Invalid value token.
         token: String,
     },
+    /// A required node is missing from the numeric node sequence.
     MissingNode {
+        /// Missing node identifier.
         node: usize,
     },
+    /// A referenced branch could not be found.
     MissingBranch {
+        /// Name of the missing branch.
         name: String,
     },
 }
 
+/// Result of symbolic modified nodal analysis.
+///
+/// Contains the assembled MNA system
+///
+/// ```text
+/// A x = z
+/// ```
+///
+/// where `A` is the symbolic system matrix, `x` contains the circuit
+/// unknowns, and `z` contains the independent excitations.
 pub struct SmnaResult {
+    /// Human-readable summary of the parsed netlist.
     pub report: String,
+    /// Symbolic MNA system matrix `A`.
     pub a: Matrix<AtomField>,
+    /// Ordered vector of MNA unknowns `x`.
     pub x: Vector,
+    /// Right-hand-side excitation vector `z`.
     pub z: Matrix<AtomField>,
 }
 
 #[derive(Debug, Default)]
-pub struct Counts {
+struct Counts {
     branch_cnt: usize,
     num_rlc: usize,
     num_ind: u32,
@@ -53,17 +96,17 @@ pub struct Counts {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Branch {
-    pub element: String,
-    pub p_node: Option<usize>,
-    pub n_node: Option<usize>,
-    pub cp_node: Option<usize>,
-    pub cn_node: Option<usize>,
-    pub vout: Option<usize>,
-    pub value: Option<Atom>,
-    pub vname: Option<String>,
-    pub lname1: Option<String>,
-    pub lname2: Option<String>,
+struct Branch {
+    element: String,
+    p_node: Option<usize>,
+    n_node: Option<usize>,
+    cp_node: Option<usize>,
+    cn_node: Option<usize>,
+    vout: Option<usize>,
+    value: Option<Atom>,
+    vname: Option<String>,
+    lname1: Option<String>,
+    lname2: Option<String>,
 }
 
 impl Branch {
@@ -88,12 +131,18 @@ impl Branch {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CurrentUnknown {
-    pub element: String,
-    pub p_node: Option<usize>,
-    pub n_node: Option<usize>,
+struct CurrentUnknown {
+    element: String,
+    p_node: Option<usize>,
+    n_node: Option<usize>,
 }
 
+/// Generates the symbolic MNA representation of a netlist.
+///
+/// # Errors
+///
+/// Returns [`SmnaError`] if the netlist contains an unsupported element,
+/// malformed element, invalid node, or unresolved branch reference.
 pub fn smna(net_list: &str) -> Result<SmnaResult, SmnaError> {
     let content = preprocess(net_list);
     let counts = validate_and_count_elements(&content)?;

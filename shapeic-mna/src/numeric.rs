@@ -8,7 +8,7 @@ use num_complex::Complex64;
 use symbolica::prelude::{Atom, AtomCore, EvaluationError, ExpressionEvaluator};
 
 use crate::mna::MnaResult;
-use crate::spice_parser::NodeMap;
+use crate::spice2cir::NodeMap;
 
 /// A compiled, frequency-independent MNA template.
 ///
@@ -229,7 +229,7 @@ impl NumericMnaSystem {
                     })?;
             let node_number = self
                 .nodes
-                .nodes
+                .nodes()
                 .get(node_name)
                 .copied()
                 .ok_or_else(|| NumericMnaError::MissingNode(node_name.clone()))?;
@@ -275,7 +275,7 @@ impl NumericMnaSystem {
         }
         let node_number = self
             .nodes
-            .nodes
+            .nodes()
             .get(node_name)
             .copied()
             .ok_or_else(|| NumericMnaError::MissingNode(node_name.to_owned()))?;
@@ -387,7 +387,7 @@ mod tests {
 
     use super::{NumericMnaError, PreparedNumericMna};
     use crate::mna::MnaResult;
-    use crate::spice_parser::NodeMap;
+    use crate::spice2cir::NodeMap;
 
     fn rc_low_pass() -> MnaResult {
         let mut a = Matrix::new(3, 3, AtomField::new());
@@ -405,13 +405,11 @@ mod tests {
             a,
             x: Vec::new(),
             z,
-            nodes: NodeMap {
-                nodes: HashMap::from([
+            nodes: NodeMap::from_map(HashMap::from([
                     ("VIN".to_owned(), 1),
                     ("VOUT".to_owned(), 2),
                     ("VSS".to_owned(), 0),
-                ]),
-            },
+                ])),
         }
     }
 
