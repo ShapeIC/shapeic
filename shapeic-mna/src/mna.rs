@@ -8,7 +8,6 @@ use ndarray::ArrayView2;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::collections::HashMap;
 use symbolica::domains::atom::AtomField;
 use symbolica::prelude::{Matrix, parse};
 
@@ -345,23 +344,6 @@ pub fn stamp_port_admittance(
         }
     }
     Ok(())
-}
-
-#[test]
-fn solves_basic_netlist_from_smna() {
-    let content = "R1 1 0 1\nI1 1 0 1\n";
-
-    let system = smna(content).expect("SMNA should build the MNA system");
-
-    let result = mna_solve(&system.a, &system.x, &system.z).expect("MNA system should be solvable");
-
-    assert_eq!(result.variables.len(), 1);
-    assert_eq!(result.variables[0], parse!("v1"));
-
-    assert_eq!(result.solution.nrows(), 1);
-    assert_eq!(result.solution.ncols(), 1);
-
-    assert_eq!(result.solution[(0, 0)], parse!("-1"));
 }
 
 #[test]

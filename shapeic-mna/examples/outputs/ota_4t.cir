@@ -1,0 +1,12 @@
+R_dp_m1 1 2 r_gds_xdp
+G_dp_m1 1 2 3 2 g_gm_xdp
+R_dp_m2 4 2 r_gds_xdp
+G_dp_m2 4 2 5 2 g_gm_xdp
+R_cm_m1 1 6 r_gds_xcm
+G_cm_m1 1 6 4 6 g_gm_xcm
+R_cm_m2 4 6 r_gds_xcm
+G_cm_m2 4 6 4 6 g_gm_xcm
+I_tail 2 0 0
+V_dd 6 0 0
+V_n 5 0 0
+V_p 3 0 1

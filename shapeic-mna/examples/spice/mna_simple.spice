@@ -1,0 +1,4 @@
+* Simple circuit for simple_mna example.
+R1 VOUT VSS 1
+I1 VOUT VSS 1
+.end
