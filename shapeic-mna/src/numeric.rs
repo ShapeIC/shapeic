@@ -1,3 +1,19 @@
+//! Numerical evaluation and AC solution of prepared MNA systems.
+//!
+//! This module converts a frequency-independent symbolic MNA system into a
+//! reusable numerical evaluator. Symbolic circuit parameters are compiled once
+//! with Symbolica and can then be evaluated repeatedly for different parameter
+//! values.
+//!
+//! The instantiated numerical system is represented as
+//!
+//! ```text
+//! A(s) = A0 + sC
+//! ```
+//!
+//! where `A0` is the frequency-independent MNA matrix and `C` contains the
+//! capacitance contributions. AC systems are evaluated using `s = jω` and
+//! solved numerically with `nalgebra`.
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -12,9 +28,12 @@ use crate::spice2cir::NodeMap;
 
 /// A compiled, frequency-independent MNA template.
 ///
-/// The symbolic base system is compiled once. Each parameter set can then be
-/// instantiated as a numerical DC matrix before numerical capacitances are
-/// stamped into the resulting [`NumericMnaSystem`].
+/// The symbolic entries of the MNA matrix and right-hand side are compiled
+/// once into a numerical evaluator. The resulting template can then be
+/// instantiated repeatedly for different parameter values without rebuilding
+/// the symbolic expressions.
+///
+/// Use [`PreparedNumericMna::instantiate`] to create a [`NumericMnaSystem`].
 #[derive(Clone, Debug)]
 pub struct PreparedNumericMna {
     parameter_names: Vec<String>,
@@ -25,49 +44,131 @@ pub struct PreparedNumericMna {
     nodes: NodeMap,
 }
 
-/// A numerical linear MNA represented as `A(s) = G + sC`.
+/// A numerical MNA system represented as `A(s) = A0 + sC`.
+///
+/// `A0` contains the frequency-independent part of the MNA system, while
+/// the capacitance matrix contains the coefficients multiplied by `s`.
+///
+/// For AC analysis, the system matrix is evaluated as
+///
+/// ```text
+/// A(jω) = A0 + jωC
+/// ```
+///
+/// and solved numerically.
 #[derive(Clone, Debug)]
 pub struct NumericMnaSystem {
-    dc: DMatrix<f64>,
+    base: DMatrix<f64>,
     capacitance: DMatrix<f64>,
     rhs: DVector<f64>,
     nodes: NodeMap,
 }
 
+/// Errors that may occur while preparing, instantiating, stamping, or solving
+/// a numerical MNA system.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NumericMnaError {
+    /// The symbolic base MNA matrix or right-hand side has invalid dimensions.
     InvalidBaseDimensions {
+        /// Number of rows in the MNA matrix.
         matrix_rows: usize,
+        /// Number of columns in the MNA matrix.
         matrix_columns: usize,
+        /// Number of rows in the right-hand-side matrix.
         rhs_rows: usize,
+        /// Number of columns in the right-hand-side matrix.
         rhs_columns: usize,
     },
+    /// The symbolic base MNA contains the Laplace variable `s`.
+    ///
+    /// Numerical frequency-dependent terms must be stamped separately into
+    /// the capacitance matrix.
     FrequencyDependentBase,
+    /// The requested parameter order does not match the symbolic parameters
+    /// present in the MNA system.
     ParameterMismatch {
+        /// Parameters found in the symbolic MNA system.
         expected: Vec<String>,
+        /// Parameter names provided by the caller.
         actual: Vec<String>,
     },
+    /// The number of numerical parameter values does not match the prepared
+    /// parameter list.
     InvalidParameterCount {
+        /// Number of parameter values required by the prepared system.
         expected: usize,
+        /// Number of parameter values provided by the caller.
         actual: usize,
     },
+    /// A numerical parameter value is not finite.
     NonFiniteParameter {
+        /// Index of the invalid parameter in the parameter vector.
         index: usize,
+
+        /// Invalid parameter value.
         value: f64,
     },
+    /// The symbolic base MNA contains coefficients that cannot be represented
+    /// as real numbers.
     NonRealCoefficients,
-    Evaluation(EvaluationError),
+    /// Symbolica failed while compiling or evaluating the symbolic expressions.
+    Evaluation(
+        /// Underlying Symbolica evaluation error.
+        EvaluationError,
+    ),
+    /// Evaluation of the symbolic base MNA produced a non-finite coefficient.
     NonFiniteBaseCoefficient,
+    /// A numerical multiport admittance model is malformed.
     InvalidPortAdmittance {
+        /// Description of the invalid port model.
         message: String,
     },
-    MissingNode(String),
-    InvalidFrequency(f64),
+    /// A referenced circuit node is not present in the MNA node map.
+    MissingNode(
+        /// Name of the missing circuit node.
+        String,
+    ),
+    /// The requested AC frequency is invalid.
+    InvalidFrequency(
+        /// Invalid frequency in hertz.
+        f64,
+    ),
+    /// The assembled numerical MNA system contains a non-finite coefficient.
     NonFiniteSystemCoefficient {
+        /// Frequency at which the invalid coefficient was detected.
         frequency_hz: f64,
     },
 }
 
+/// Compiles a frequency-independent symbolic MNA system for numerical evaluation.
+///
+/// `parameter_order` defines the exact order in which numerical parameter
+/// values must later be passed to [`PreparedNumericMna::instantiate`].
+///
+/// All symbolic parameters present in the MNA matrix and right-hand side must
+/// appear exactly once in `parameter_order`.
+///
+/// The symbolic system must not contain the Laplace variable `s`;
+/// frequency-dependent capacitance terms are added later to the instantiated
+/// [`NumericMnaSystem`].
+///
+/// # Errors
+///
+/// Returns [`NumericMnaError::InvalidBaseDimensions`] if the MNA matrix is
+/// empty or non-square, or if the right-hand side is not a compatible column
+/// vector.
+///
+/// Returns [`NumericMnaError::FrequencyDependentBase`] if the symbolic system
+/// contains `s`.
+///
+/// Returns [`NumericMnaError::ParameterMismatch`] if `parameter_order` does not
+/// contain exactly the symbolic parameters found in the system.
+///
+/// Returns [`NumericMnaError::NonRealCoefficients`] if the compiled expressions
+/// contain non-real coefficients.
+///
+/// Returns [`NumericMnaError::Evaluation`] if Symbolica cannot compile the
+/// expressions.
 impl PreparedNumericMna {
     /// Compile a frequency-independent symbolic MNA using an exact parameter order.
     pub fn new(system: &MnaResult, parameter_order: &[&str]) -> Result<Self, NumericMnaError> {
@@ -145,11 +246,34 @@ impl PreparedNumericMna {
         })
     }
 
+    /// Returns the parameter names in the order expected by [`Self::instantiate`].
     pub fn parameter_names(&self) -> &[String] {
         &self.parameter_names
     }
 
-    /// Evaluate the prepared base once and create a numerical `G + sC` system.
+    /// Instantiates the prepared MNA system with numerical parameter values.
+    ///
+    /// `parameter_values` must follow the order returned by
+    /// [`Self::parameter_names`].
+    ///
+    /// The symbolic matrix and right-hand side are evaluated numerically and used
+    /// to initialize a new [`NumericMnaSystem`]. Its capacitance matrix initially
+    /// contains only zeros and can subsequently be populated using
+    /// [`NumericMnaSystem::stamp_port_admittance`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericMnaError::InvalidParameterCount`] if the number of values
+    /// does not match the number of prepared parameters.
+    ///
+    /// Returns [`NumericMnaError::NonFiniteParameter`] if any parameter is NaN or
+    /// infinite.
+    ///
+    /// Returns [`NumericMnaError::Evaluation`] if the compiled symbolic expressions
+    /// cannot be evaluated.
+    ///
+    /// Returns [`NumericMnaError::NonFiniteBaseCoefficient`] if evaluation produces
+    /// a NaN or infinite matrix coefficient.
     pub fn instantiate(
         &mut self,
         parameter_values: &[f64],
@@ -177,7 +301,7 @@ impl PreparedNumericMna {
         }
 
         Ok(NumericMnaSystem {
-            dc: DMatrix::from_row_slice(self.rows, self.rows, &self.outputs[..self.matrix_len]),
+            base: DMatrix::from_row_slice(self.rows, self.rows, &self.outputs[..self.matrix_len]),
             capacitance: DMatrix::zeros(self.rows, self.rows),
             rhs: DVector::from_row_slice(&self.outputs[self.matrix_len..]),
             nodes: self.nodes.clone(),
@@ -186,19 +310,44 @@ impl PreparedNumericMna {
 }
 
 impl NumericMnaSystem {
-    pub fn dc_matrix(&self) -> &DMatrix<f64> {
-        &self.dc
+    /// Returns the frequency-independent MNA matrix.
+    pub fn base_matrix(&self) -> &DMatrix<f64> {
+        &self.base
     }
-
+    /// Returns the capacitance matrix of the numerical MNA system.
     pub fn capacitance_matrix(&self) -> &DMatrix<f64> {
         &self.capacitance
     }
-
+    /// Returns the numerical right-hand-side vector.
     pub fn rhs(&self) -> &DVector<f64> {
         &self.rhs
     }
 
-    /// Stamp a complete port model into the numerical `G` and `C` matrices.
+    /// Stamps a numerical multiport admittance model into the MNA system.
+    ///
+    /// The port model is represented as
+    ///
+    /// ```text
+    /// Y(s) = G + sC
+    /// ```
+    ///
+    /// where `conductance` contains `G` and `capacitance` contains `C`.
+    ///
+    /// `port_order` defines the row and column ordering of both matrices, while
+    /// `connections` maps each port name to a circuit node name.
+    ///
+    /// Ports connected to ground are omitted according to the reduced MNA
+    /// formulation. Multiple physical ports may map to the same circuit node; in
+    /// that case their contributions are accumulated into the same MNA entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericMnaError::InvalidPortAdmittance`] if the port matrices have
+    /// invalid dimensions, a port has no connection, a node lies outside the MNA
+    /// system, or a coefficient is not finite.
+    ///
+    /// Returns [`NumericMnaError::MissingNode`] if a referenced circuit node does
+    /// not exist in the node map.
     pub fn stamp_port_admittance(
         &mut self,
         port_order: &[String],
@@ -229,12 +378,10 @@ impl NumericMnaSystem {
                     })?;
             let node_number = self
                 .nodes
-                .nodes()
                 .get(node_name)
-                .copied()
                 .ok_or_else(|| NumericMnaError::MissingNode(node_name.clone()))?;
             let matrix_index = node_number.checked_sub(1);
-            if matrix_index.is_some_and(|index| index >= self.dc.nrows()) {
+            if matrix_index.is_some_and(|index| index >= self.base.nrows()) {
                 return Err(NumericMnaError::InvalidPortAdmittance {
                     message: format!("node '{node_name}' is outside the MNA matrix"),
                 });
@@ -257,14 +404,42 @@ impl NumericMnaSystem {
                         message: format!("non-finite coefficient at ({row}, {column})"),
                     });
                 }
-                self.dc[(mna_row, mna_column)] += g;
+                self.base[(mna_row, mna_column)] += g;
                 self.capacitance[(mna_row, mna_column)] += c;
             }
         }
         Ok(())
     }
 
-    /// Solve the numerical MNA at one frequency and return a node voltage.
+    /// Solves the numerical MNA system at one frequency and returns a node voltage.
+    ///
+    /// The AC system matrix is constructed as
+    ///
+    /// ```text
+    /// A(jω) = A0 + jωC
+    /// ```
+    ///
+    /// with `ω = 2πf`, and the resulting complex linear system is solved using LU
+    /// decomposition.
+    ///
+    /// A frequency of `0.0` performs a DC solution.
+    ///
+    /// Returns `Ok(None)` if the MNA matrix is singular and the linear system cannot
+    /// be solved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericMnaError::InvalidFrequency`] if `frequency_hz` is negative,
+    /// NaN, or infinite.
+    ///
+    /// Returns [`NumericMnaError::MissingNode`] if `node_name` is not present in
+    /// the node map.
+    ///
+    /// Returns [`NumericMnaError::InvalidPortAdmittance`] if the requested node is
+    /// ground or lies outside the MNA matrix.
+    ///
+    /// Returns [`NumericMnaError::NonFiniteSystemCoefficient`] if the assembled
+    /// system or resulting node voltage contains a non-finite value.
     pub fn solve_node(
         &self,
         frequency_hz: f64,
@@ -275,9 +450,7 @@ impl NumericMnaSystem {
         }
         let node_number = self
             .nodes
-            .nodes()
             .get(node_name)
-            .copied()
             .ok_or_else(|| NumericMnaError::MissingNode(node_name.to_owned()))?;
         let output_row =
             node_number
@@ -285,16 +458,16 @@ impl NumericMnaSystem {
                 .ok_or_else(|| NumericMnaError::InvalidPortAdmittance {
                     message: format!("cannot return ground node '{node_name}'"),
                 })?;
-        if output_row >= self.dc.nrows() {
+        if output_row >= self.base.nrows() {
             return Err(NumericMnaError::InvalidPortAdmittance {
                 message: format!("node '{node_name}' is outside the MNA matrix"),
             });
         }
 
         let omega = 2.0 * std::f64::consts::PI * frequency_hz;
-        let matrix = DMatrix::from_fn(self.dc.nrows(), self.dc.ncols(), |row, column| {
+        let matrix = DMatrix::from_fn(self.base.nrows(), self.base.ncols(), |row, column| {
             Complex64::new(
-                self.dc[(row, column)],
+                self.base[(row, column)],
                 omega * self.capacitance[(row, column)],
             )
         });
