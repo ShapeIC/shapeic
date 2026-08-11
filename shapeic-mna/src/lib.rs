@@ -5,7 +5,6 @@
 //! preprocessing, circuit evaluation, and utilities for inspecting generated
 //! MNA systems.
 
-/// Utilities for formatting and inspecting MNA systems and their solutions.
 pub mod evaluation;
 /// High-level modified nodal analysis construction and symbolic solution.
 pub mod mna;

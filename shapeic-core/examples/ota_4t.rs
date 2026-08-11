@@ -560,9 +560,7 @@ fn ota_transfer_expression(
 fn ota_output_row(system: &MnaResult) -> Result<usize, io::Error> {
     let output_node = system
         .nodes
-        .nodes
         .get("VOUT")
-        .copied()
         .ok_or_else(|| io::Error::other("OTA netlist has no VOUT node"))?;
     output_node
         .checked_sub(1)

@@ -35,6 +35,8 @@
 //! [`DeviceLut::size_for_current`] selects a per-finger width and integer finger count for a
 //! requested total current. Any expressions passed to it are returned as per-finger values.
 
+#![warn(missing_docs)]
+
 mod array;
 mod error;
 mod expression;
