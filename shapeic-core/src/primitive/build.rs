@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::DeviceLut;
+use shapeic_lut::{DeviceLut, OperatingPoint, Expr};
 use crate::exploration::candidate::{CandidateSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,9 +140,14 @@ pub fn build_candidate_set_for_primitive(
         .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
             primitive: primitive.name.clone(),
         }).unwrap();
+
+    let mut input = input.clone();
+    if input.lut_config.is_none() {
+        input.lut_config = primitive.lut_config.clone();
+    }
     
     build(model, build_spec, &input)?;
-    Ok(())
+    Ok(())  
 }
 
 fn build(
@@ -166,10 +171,7 @@ fn lut_query(
 ) -> Result<(), PrimitiveBuildError>{
     
     for lut in &spec.lut {
-        println!("spec.lut: {:?}", lut);
         let lengths = resolve_lut_lengths(lut, input)?;
-        println!("lengths: {:?}", lengths);
-        println!("AJSDAKSD");
         //let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
         //let mut queries = Vec::with_capacity(rows.len() * lengths.len());
 
@@ -190,7 +192,24 @@ fn lut_query(
 
                 
                 println!("dof: {:?}", dof);
-                //model.size_for_current(operating_point, requested_current, expressions)
+
+                let vbs = match dof.get("vbs") {
+                    Some(value) => *value,
+                    None => 0.0,
+                };
+                let vgs = match dof.get("vgs") {
+                    Some(value) => *value,
+                    None => 0.0,
+                };
+                let vds = match dof.get("vds") {
+                    Some(value) => *value,
+                    None => 0.0,
+                };
+                let requested_current = input.values.get("current");
+                println!("{:?}", requested_current.values());
+
+                let operating_point = OperatingPoint::new(*length, vbs, vgs, vds);
+                //model.size_for_current(operating_point, requested_current, vec![Expr::parameter("gm"), Expr::parameter("gds")]);
 
 //                queries.push(LutQuery {
 //                    lut_name: lut.name.clone(),

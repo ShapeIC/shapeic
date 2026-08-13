@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //let primtive_build_engine = PrimitiveBuildEngine::new();
     //println!("{:?}", diffpair.build);
     let diffpair_candidate_set = build_candidate_set_for_primitive(
-        pmos,
+        nmos,
         diffpair, 
         "xdp",
         diffpair_input
