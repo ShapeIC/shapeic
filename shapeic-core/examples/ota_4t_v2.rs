@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::ffi::OsString;
 use std::error::Error;
+use std::time::Instant;
 
 use shapeic_lut::LookupTable;
 use shapeic_core::utils::{linspace};
@@ -19,7 +20,7 @@ const VOUT: f64 = 1.0;
 const VDD: f64 = 1.5;
 const VIN: f64 = 0.9;
 const VTAIL_START: f64 = 0.65;
-const VTAIL_STOP: f64 = 0.8;
+const VTAIL_STOP: f64 = 0.79;
 const VTAIL_POINTS: usize = 10;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
@@ -41,14 +42,18 @@ const DC_GAIN_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm",
 //};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let total_start = Instant::now();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let spice_dir = manifest.join("examples/ota_4t");
     let output_dir = manifest.join("../target/shapeic-ota-4t-v2");
     let primitives_dir = manifest.join("../analoglib/primitives/");
     let (nmos_path, pmos_path, physical_path) = lut_paths()?;
     
+    let stage_start = Instant::now();
     let nmos_table = LookupTable::open(nmos_path)?;
     let pmos_table = LookupTable::open(pmos_path)?;
+    let lut_load = stage_start.elapsed();
+    println!("The LUT load took: {:?}", lut_load);
     let nmos = nmos_table.model(NMOS_MODEL)?;
     let pmos = pmos_table.model(PMOS_MODEL)?;
 
@@ -83,16 +88,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("VTAIL".to_string(), PrimitiveBuildValue::Vector(linspace(VTAIL_START, VTAIL_STOP, VTAIL_POINTS))),
     ]));
 
-    //let primtive_build_engine = PrimitiveBuildEngine::new();
-    //println!("{:?}", diffpair.build);
+    let stage_start = Instant::now();
     let diffpair_candidate_set = build_candidate_set_for_primitive(
         nmos,
         diffpair, 
         "xdp",
         diffpair_input
     ).map_err(|error| format!("{error:?}"))?;
+    let diffpair_candidate_set_time = stage_start.elapsed();
+    println!("Diffpair candidate set took: {:?}", diffpair_candidate_set_time);
 
-
+    let total = total_start.elapsed();
+    println!("Total time: {:?}", total);
     Ok(())
 }
 
