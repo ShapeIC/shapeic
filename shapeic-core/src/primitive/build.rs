@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::{DeviceLut, OperatingPoint, Expr};
+use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, OperatingPoint};
 use crate::exploration::candidate::{CandidateSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,10 +157,20 @@ fn build(
 ) -> Result<(), PrimitiveBuildError>{
     let mut rows = expand_inputs(build_spec, input)?;
     evaluate_expressions(&mut rows, &build_spec.derived)?;
-    //model.size_for_current();
     lut_query(model, build_spec, &mut rows, input)?;
-    println!("Evaluated expressions: {:?}", rows);
+    //evaluate_expressions(&mut rows, &build_spec.columns)?;
+    println!("rows: {:?}", rows);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LutQuery {
+    pub lut_name: String,
+    pub device: String,
+    pub dof: HashMap<String, f64>,
+    pub length: f64,
+    pub op: OperatingPoint,
+    pub current: f64
 }
 
 fn lut_query(
@@ -172,8 +182,8 @@ fn lut_query(
     
     for lut in &spec.lut {
         let lengths = resolve_lut_lengths(lut, input)?;
-        //let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
-        //let mut queries = Vec::with_capacity(rows.len() * lengths.len());
+        let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
+        let mut queries = Vec::with_capacity(rows.len() * lengths.len());
 
         
         for row in rows.iter() {
@@ -190,8 +200,14 @@ fn lut_query(
                     dof.insert(dof_name.clone(), value);
                 }
 
-                
-                println!("dof: {:?}", dof);
+                let requested_current = row
+                    .get("current")
+                    .copied()
+                    .ok_or_else(|| PrimitiveBuildError::Expression {
+                        name: "current".to_string(),
+                        expression: "current".to_string(),
+                        reason: "missing input 'current'".to_string(),
+                    })?;
 
                 let vbs = match dof.get("vbs") {
                     Some(value) => *value,
@@ -205,19 +221,18 @@ fn lut_query(
                     Some(value) => *value,
                     None => 0.0,
                 };
-                let requested_current = input.values.get("current");
-                println!("{:?}", requested_current.values());
 
                 let operating_point = OperatingPoint::new(*length, vbs, vgs, vds);
-                //model.size_for_current(operating_point, requested_current, vec![Expr::parameter("gm"), Expr::parameter("gds")]);
 
-//                queries.push(LutQuery {
-//                    lut_name: lut.name.clone(),
-//                    device: lut.device.clone(),
-//                    dof,
-//                    length: *length,
-//                });
-//                query_rows.push((row.clone(), *length));
+                queries.push(LutQuery {
+                    lut_name: lut.name.clone(),
+                    device: lut.device.clone(),
+                    dof,
+                    length: *length,
+                    op: operating_point,
+                    current: requested_current
+                });
+                query_rows.push((row.clone(), *length));
             }
         }
 //
@@ -239,19 +254,41 @@ fn lut_query(
 //            });
 //        }
 //
-//        let mut next_rows = Vec::with_capacity(query_rows.len());
-//        for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
-//            let mut next_row = row;
-//            next_row.insert(format!("lut.{}.length", lut.name), length);
-//            for (key, value) in lut_values {
-//                next_row.insert(format!("lut.{}.{}", lut.name, key), value);
-//            }
-//            next_rows.push(next_row);
-//        }
+//  
+        
+        let expressions = &vec![Expr::parameter("gm"), Expr::parameter("gds")];
+        let lut_results = many_size_for_current(model, &queries, &expressions).unwrap();
+        //println!("lut_results: {:?}", lut_results);
+        let mut next_rows = Vec::with_capacity(query_rows.len());
+        for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
+            let mut next_row = row;
+            next_row.insert(format!("lut.{}.length", lut.name), length);
+            for (key, value) in expressions.iter().zip(lut_values.values) {
+                next_row.insert(format!("lut.{}.{}", lut.name, key.parameter_name().unwrap()), value);
+            }
+            next_rows.push(next_row);
+        }
 //
-//        *rows = next_rows;
+        *rows = next_rows;
     }
     Ok(())
+}
+
+fn many_size_for_current(
+    model: &DeviceLut,
+    queries: &Vec<LutQuery>,
+    expressions: &Vec<Expr>
+) -> Result<Vec<CurrentSizingResult>, PrimitiveBuildError> {
+    let mut lut_results = Vec::with_capacity(queries.len());
+    for query in queries {
+        let size = model.size_for_current(
+            &query.op, 
+            query.current,
+            expressions
+        ).unwrap();
+        lut_results.push(size);
+    }
+    Ok(lut_results)
 }
 
 fn resolve_lut_lengths(
