@@ -8,7 +8,7 @@ use std::error::Error;
 use shapeic_lut::LookupTable;
 use shapeic_core::utils::{linspace};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
-use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
+use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue, build_candidate_set_for_primitive, PrimitiveBuildError};
 use shapeic_mna::mna::{mna};
 use shapeic_mna::numeric::PreparedNumericMna;
     
@@ -84,7 +84,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     ]));
 
     //let primtive_build_engine = PrimitiveBuildEngine::new();
-    println!("{:?}", diffpair.build);
+    //println!("{:?}", diffpair.build);
+    let diffpair_candidate_set = build_candidate_set_for_primitive(
+        pmos,
+        diffpair, 
+        "xdp",
+        diffpair_input
+    ).map_err(|error| format!("{error:?}"))?;
+
 
     Ok(())
 }
