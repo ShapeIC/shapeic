@@ -35,6 +35,13 @@ impl Expr {
         Self::Parameter(name.into())
     }
 
+    pub fn parameter_name(&self) -> Option<&str> {
+        match self {
+            Self::Parameter(name) => Some(name),
+            _ => None,
+        }
+    }
+
     pub fn device_parameter(name: impl Into<String>) -> Self {
         Self::DeviceParameter(name.into())
     }
