@@ -4,11 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
 use shapeic_lut::DeviceLut;
+use crate::exploration::candidate::{CandidateSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimitiveBuildSpec {
     #[serde(default)]
     pub inputs: Vec<PrimitiveBuildInputSpec>,
+    #[serde(default)]
+    pub sweep_mode: SweepMode,
     #[serde(default)]
     pub derived: Vec<BuildExpression>,
     #[serde(default)]
@@ -21,6 +24,23 @@ pub struct PrimitiveBuildSpec {
 pub enum PrimitiveBuildError {
     MissingBuildSpec {
         primitive: String,
+    },
+    AlignedLengthMismatch {
+        input: String,
+        expected: usize,
+        actual: usize,
+    },
+    Expression {
+        name: String,
+        expression: String,
+        reason: String,
+    },
+    MissingLutLengths {
+        lut: String,
+    },
+    InvalidLutLengthsRef {
+        lut: String,
+        reference: String,
     },
 }
 
@@ -76,6 +96,15 @@ pub enum PrimitiveBuildValue {
     Vector(Vec<f64>),
 }
 
+impl PrimitiveBuildValue {
+    fn values(&self) -> &[f64] {
+        match self {
+            Self::Scalar(value) => std::slice::from_ref(value),
+            Self::Vector(values) => values,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PrimitiveBuildInput {
     pub values: HashMap<String, PrimitiveBuildValue>,
@@ -94,34 +123,151 @@ impl PrimitiveBuildInput {
 pub struct PrimitiveBuildEngine<B> {
     lut_backend: B,
 }
-impl<B: LutBackend> PrimitiveBuildEngine<B> {
-    pub fn new(lut_backend: B) -> Self {
-        Self { lut_backend }
-    }
-}
+//impl<B: LutBackend> PrimitiveBuildEngine<B> {
+//    pub fn new(lut_backend: B) -> Self {
+//        Self { lut_backend }
+//    }
+//}
 
 pub fn build_candidate_set_for_primitive(
     model: &DeviceLut,
     primitive: &PrimitiveManifest,
     instance_name: &str,
     input: PrimitiveBuildInput
-) -> Result<CandidateSet, PrimitiveBuildError> {
+) -> Result<(), PrimitiveBuildError>
+{
     let build_spec = primitive.build.as_ref()
         .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
             primitive: primitive.name.clone(),
-        })?;
+        }).unwrap();
     
-    build(model, build_spec, &input);
+    build(model, build_spec, &input)?;
+    Ok(())
 }
 
 fn build(
     model: &DeviceLut,
     build_spec: &PrimitiveBuildSpec,
     input: &PrimitiveBuildInput,
-) {
+) -> Result<(), PrimitiveBuildError>{
     let mut rows = expand_inputs(build_spec, input)?;
     evaluate_expressions(&mut rows, &build_spec.derived)?;
-    model.size_for_current(); 
+    //model.size_for_current();
+    lut_query(model, build_spec, &mut rows, input)?;
+    println!("Evaluated expressions: {:?}", rows);
+    Ok(())
+}
+
+fn lut_query(
+    model: &DeviceLut,
+    spec: &PrimitiveBuildSpec,
+    rows: &mut Vec<HashMap<String, f64>>,
+    input: &PrimitiveBuildInput
+) -> Result<(), PrimitiveBuildError>{
+    
+    for lut in &spec.lut {
+        println!("spec.lut: {:?}", lut);
+        let lengths = resolve_lut_lengths(lut, input)?;
+        println!("lengths: {:?}", lengths);
+        println!("AJSDAKSD");
+        //let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
+        //let mut queries = Vec::with_capacity(rows.len() * lengths.len());
+
+        
+        for row in rows.iter() {
+            for length in &lengths {
+                let mut dof = HashMap::new();
+                for (dof_name, expr) in &lut.dof {
+                    let value = ExpressionParser::new(expr, row).parse().map_err(|reason| {
+                        PrimitiveBuildError::Expression {
+                            name: format!("lut.{}.{}", lut.name, dof_name),
+                            expression: expr.clone(),
+                            reason,
+                        }
+                    })?;
+                    dof.insert(dof_name.clone(), value);
+                }
+
+                
+                println!("dof: {:?}", dof);
+                //model.size_for_current(operating_point, requested_current, expressions)
+
+//                queries.push(LutQuery {
+//                    lut_name: lut.name.clone(),
+//                    device: lut.device.clone(),
+//                    dof,
+//                    length: *length,
+//                });
+//                query_rows.push((row.clone(), *length));
+            }
+        }
+//
+//        let lut_results =
+//            backend
+//                .query_many(&queries)
+//                .map_err(|reason| PrimitiveBuildError::Lut {
+//                    lut: lut.name.clone(),
+//                    reason,
+//                })?;
+//        if lut_results.len() != query_rows.len() {
+//            return Err(PrimitiveBuildError::Lut {
+//                lut: lut.name.clone(),
+//                reason: format!(
+//                    "backend returned {} rows for {} queries",
+//                    lut_results.len(),
+//                    query_rows.len()
+//                ),
+//            });
+//        }
+//
+//        let mut next_rows = Vec::with_capacity(query_rows.len());
+//        for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
+//            let mut next_row = row;
+//            next_row.insert(format!("lut.{}.length", lut.name), length);
+//            for (key, value) in lut_values {
+//                next_row.insert(format!("lut.{}.{}", lut.name, key), value);
+//            }
+//            next_rows.push(next_row);
+//        }
+//
+//        *rows = next_rows;
+    }
+    Ok(())
+}
+
+fn resolve_lut_lengths(
+    lut: &LutBuildSpec,
+    input: &PrimitiveBuildInput,
+) -> Result<Vec<f64>, PrimitiveBuildError> {
+    match &lut.lengths {
+        Some(LutLengths::Values(values)) if !values.is_empty() => Ok(values.clone()),
+        Some(LutLengths::Values(_)) => Err(PrimitiveBuildError::MissingLutLengths {
+            lut: lut.name.clone(),
+        }),
+        Some(LutLengths::Ref(reference)) if reference == "$lut_config.lengths" => input
+            .lut_config
+            .as_ref()
+            .and_then(|config| config.get("lengths"))
+            .and_then(|lengths| lengths.as_array())
+            .map(|lengths| {
+                lengths
+                    .iter()
+                    .filter_map(serde_json::Value::as_f64)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|lengths| !lengths.is_empty())
+            .ok_or_else(|| PrimitiveBuildError::InvalidLutLengthsRef {
+                lut: lut.name.clone(),
+                reference: reference.clone(),
+            }),
+        Some(LutLengths::Ref(reference)) => Err(PrimitiveBuildError::InvalidLutLengthsRef {
+            lut: lut.name.clone(),
+            reference: reference.clone(),
+        }),
+        None => Err(PrimitiveBuildError::MissingLutLengths {
+            lut: lut.name.clone(),
+        }),
+    }
 }
 
 fn expand_inputs(
@@ -209,7 +355,7 @@ fn evaluate_expressions(
 ) -> Result<(), PrimitiveBuildError> {
     for expression in expressions {
         for row in rows.iter_mut() {
-            let value = ExpressionParser::new(&expression.expr, row).parser().map_err(|reason| {
+            let value = ExpressionParser::new(&expression.expr, row).parse().map_err(|reason| {
                 PrimitiveBuildError::Expression {
                     name: expression.name.clone(),
                     expression: expression.expr.clone(),
