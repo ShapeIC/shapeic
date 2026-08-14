@@ -92,7 +92,7 @@ fn evaluates_expressions_on_corners_before_interpolation() {
     let model = table.model("fixture_nmos").expect("nmos");
     let point = OperatingPoint::new(2.0, 0.0, 1.0, 2.0);
     let gmid = model
-        .standard_expression(MosExpression::GmOverId)
+        .standard_expression(MosExpression::Gmid)
         .expect("gmid expression");
     let expected = (1..=16).map(|id| 16.0 / f64::from(id)).sum::<f64>() / 16.0;
     let actual = model.query_expression(&point, &gmid).expect("gmid query");
@@ -141,6 +141,41 @@ fn evaluates_standard_mos_expressions() {
             .expect("inverse Early query"),
         expected_inverse_early,
     );
+}
+
+#[test]
+fn standard_mos_expressions_expose_canonical_parameter_names() {
+    let table = fixture();
+    let model = table.model("fixture_nmos").expect("nmos");
+    let cases = [
+        (MosExpression::Vsg, "vsg"),
+        (MosExpression::Vsb, "vsb"),
+        (MosExpression::Vsd, "vsd"),
+        (MosExpression::Gmid, "gmid"),
+        (MosExpression::Vov, "vov"),
+        (MosExpression::Vstar, "vstar"),
+        (MosExpression::CurrentDensity, "jd"),
+        (MosExpression::IntrinsicGain, "av"),
+        (MosExpression::TransitFrequency, "ft"),
+        (MosExpression::EarlyVoltage, "va"),
+        (MosExpression::InverseEarlyVoltage, "gdsid"),
+        (MosExpression::Rds, "rds"),
+        (MosExpression::Vdsat, "vdsat"),
+    ];
+
+    for (kind, expected_name) in cases {
+        assert_eq!(kind.parameter_name(), expected_name);
+        assert_eq!(
+            model
+                .standard_expression(kind)
+                .expect("standard expression")
+                .parameter_name(),
+            Some(expected_name),
+        );
+    }
+
+    let manual_gmid = Expr::parameter("gm") / Expr::parameter("id");
+    assert_eq!(manual_gmid.parameter_name(), None);
 }
 
 #[test]
@@ -255,7 +290,7 @@ fn interpolates_five_dimensions_and_expressions_on_corners() {
         id_sum / 32.0,
     );
     let gmid = model
-        .standard_expression(MosExpression::GmOverId)
+        .standard_expression(MosExpression::Gmid)
         .expect("gmid");
     assert_close(
         model
@@ -333,12 +368,15 @@ fn sizes_for_current_and_returns_per_finger_expressions() {
         .expect("maximum-width current");
     let requested_current = (minimum_current + maximum_current) / 2.0;
     let gm = Expr::parameter("gm");
+    let gmid = model
+        .standard_expression(MosExpression::Gmid)
+        .expect("gmid expression");
 
     let result = model
         .size_for_current(
             &operating_point,
             requested_current,
-            std::slice::from_ref(&gm),
+            &[gm.clone(), gmid.clone()],
         )
         .expect("inverse current sizing");
 
@@ -352,5 +390,12 @@ fn sizes_for_current_and_returns_per_finger_expressions() {
         model
             .query_expression_at(&result.point, &gm)
             .expect("per-finger gm"),
+    );
+    assert_eq!(gmid.parameter_name(), Some("gmid"));
+    assert_close(
+        result.values[1],
+        model
+            .query_expression_at(&result.point, &gmid)
+            .expect("per-finger gmid"),
     );
 }
