@@ -120,15 +120,6 @@ impl PrimitiveBuildInput {
     }
 }
 
-pub struct PrimitiveBuildEngine<B> {
-    lut_backend: B,
-}
-//impl<B: LutBackend> PrimitiveBuildEngine<B> {
-//    pub fn new(lut_backend: B) -> Self {
-//        Self { lut_backend }
-//    }
-//}
-
 pub fn build_candidate_set_for_primitive(
     model: &DeviceLut,
     primitive: &PrimitiveManifest,
@@ -179,13 +170,11 @@ fn lut_query(
     rows: &mut Vec<HashMap<String, f64>>,
     input: &PrimitiveBuildInput
 ) -> Result<(), PrimitiveBuildError>{
-    
     for lut in &spec.lut {
         let lengths = resolve_lut_lengths(lut, input)?;
         let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
         let mut queries = Vec::with_capacity(rows.len() * lengths.len());
 
-        
         for row in rows.iter() {
             for length in &lengths {
                 let mut dof = HashMap::new();
@@ -235,27 +224,6 @@ fn lut_query(
                 query_rows.push((row.clone(), *length));
             }
         }
-//
-//        let lut_results =
-//            backend
-//                .query_many(&queries)
-//                .map_err(|reason| PrimitiveBuildError::Lut {
-//                    lut: lut.name.clone(),
-//                    reason,
-//                })?;
-//        if lut_results.len() != query_rows.len() {
-//            return Err(PrimitiveBuildError::Lut {
-//                lut: lut.name.clone(),
-//                reason: format!(
-//                    "backend returned {} rows for {} queries",
-//                    lut_results.len(),
-//                    query_rows.len()
-//                ),
-//            });
-//        }
-//
-//  
-        
         let gmid = model.standard_expression(MosExpression::Gmid).expect("gmid expression");
         let jd = model.standard_expression(MosExpression::CurrentDensity).expect("jd expression"); 
         let expressions = &vec![gmid, jd, Expr::parameter("gds"), Expr::parameter("id")];
@@ -270,7 +238,6 @@ fn lut_query(
             }
             next_rows.push(next_row);
         }
-//
         *rows = next_rows;
     }
     Ok(())
