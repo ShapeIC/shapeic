@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, OperatingPoint};
+use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, OperatingPoint, MosExpression};
 use crate::exploration::candidate::{CandidateSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,7 +158,7 @@ fn build(
     let mut rows = expand_inputs(build_spec, input)?;
     evaluate_expressions(&mut rows, &build_spec.derived)?;
     lut_query(model, build_spec, &mut rows, input)?;
-    //evaluate_expressions(&mut rows, &build_spec.columns)?;
+    evaluate_expressions(&mut rows, &build_spec.columns)?;
     println!("rows: {:?}", rows);
     Ok(())
 }
@@ -256,7 +256,9 @@ fn lut_query(
 //
 //  
         
-        let expressions = &vec![Expr::parameter("gm"), Expr::parameter("gds")];
+        let gmid = model.standard_expression(MosExpression::Gmid).expect("gmid expression");
+        let jd = model.standard_expression(MosExpression::CurrentDensity).expect("jd expression"); 
+        let expressions = &vec![gmid, jd, Expr::parameter("gds"), Expr::parameter("id")];
         let lut_results = many_size_for_current(model, &queries, &expressions).unwrap();
         //println!("lut_results: {:?}", lut_results);
         let mut next_rows = Vec::with_capacity(query_rows.len());

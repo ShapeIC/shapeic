@@ -33,12 +33,6 @@
     { "name": "gds__m1", "expr": "gdsid * (id_m1/2)" },
     { "name": "gds__m2", "expr": "gds__m1" },
     { "name": "ro__m1", "expr": "1 / gds__m1" },
-    { "name": "ro__m2", "expr": "ro__m1" },
-    { "name": "cgg__m1", "expr": "width__m1 * lut.m1.cgg" },
-    { "name": "cgg__m2", "expr": "cgg__m1" },
-    { "name": "cgs__m1", "expr": "width__m1 * lut.m1.cgs" },
-    { "name": "cgs__m2", "expr": "cgs__m1" },
-    { "name": "cgd__m1", "expr": "width__m1 * lut.m1.cgd" },
-    { "name": "cgd__m2", "expr": "cgd__m1" }
+    { "name": "ro__m2", "expr": "ro__m1" }
   ]
 }
