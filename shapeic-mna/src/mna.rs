@@ -11,7 +11,7 @@ use std::path::Path;
 use symbolica::domains::atom::AtomField;
 use symbolica::prelude::{Matrix, parse};
 
-use crate::spice2cir::{NodeMap, SpiceError, spice2cir};
+use crate::spice2cir::{NodeMap, SpiceError, spice2cir, spice2cir_text};
 use crate::symmna::{SmnaError, Vector, smna};
 
 /// Symbolic MNA system generated from a SPICE netlist.
@@ -189,7 +189,38 @@ pub fn mna(spice_dir: &Path, output_dir: &Path, design_name: &str) -> Result<Mna
     let input_path = output_dir.join(format!("{design_name}.cir"));
     let content = fs::read_to_string(input_path)?;
 
-    let symmna_output = smna(&content).map_err(MnaError::SymMna)?;
+    mna_from_cir(&content, nodes)
+}
+
+/// Builds a symbolic MNA system directly from SPICE source text.
+///
+/// The netlist is preprocessed entirely in memory; no `.cir` file is created.
+/// Use [`mna`] when the converted artifact is desired for inspection or legacy
+/// workflows.
+///
+/// # Errors
+///
+/// Returns [`MnaError::SpiceConversion`] if preprocessing fails or
+/// [`MnaError::SymMna`] if symbolic MNA generation fails.
+pub fn mna_from_spice(source: &str) -> Result<MnaResult, MnaError> {
+    let (content, nodes) = spice2cir_text(source).map_err(MnaError::SpiceConversion)?;
+    mna_from_cir(&content, nodes)
+}
+
+/// Builds a symbolic MNA system from one `.spice` file without writing `.cir`.
+///
+/// # Errors
+///
+/// Returns [`MnaError::Io`] if the file cannot be read,
+/// [`MnaError::SpiceConversion`] if preprocessing fails, or
+/// [`MnaError::SymMna`] if symbolic MNA generation fails.
+pub fn mna_from_spice_file(path: &Path) -> Result<MnaResult, MnaError> {
+    let source = fs::read_to_string(path)?;
+    mna_from_spice(&source)
+}
+
+fn mna_from_cir(content: &str, nodes: NodeMap) -> Result<MnaResult, MnaError> {
+    let symmna_output = smna(content).map_err(MnaError::SymMna)?;
 
     Ok(MnaResult {
         report: symmna_output.report,
@@ -382,4 +413,32 @@ fn stamps_a_complete_port_admittance_with_ground_reduction() {
     let expected = expected_g + &s * expected_c;
 
     assert_eq!(a[(0, 0)], expected);
+}
+
+#[test]
+fn builds_mna_directly_from_spice_text() {
+    let system = mna_from_spice(
+        "V1 VIN 0 2\n\
+         R1 VIN VOUT resistance\n\
+         C1 VOUT VSS capacitance\n",
+    )
+    .expect("in-memory SPICE should build an MNA system");
+
+    assert_eq!(system.nodes.get("VIN"), Some(1));
+    assert_eq!(system.nodes.get("VOUT"), Some(2));
+    assert_eq!(system.nodes.get("0"), Some(0));
+    assert_eq!(system.nodes.get("VSS"), Some(0));
+    assert_eq!(system.a.nrows(), 3);
+    assert_eq!(system.a.ncols(), 3);
+    assert_eq!(system.z.nrows(), 3);
+}
+
+#[test]
+fn builds_mna_from_a_spice_file_without_an_output_directory() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/spice/r_divider.spice");
+    let system = mna_from_spice_file(&path).expect("SPICE file should build an MNA system");
+
+    assert_eq!(system.nodes.get("VIN"), Some(1));
+    assert_eq!(system.nodes.get("VOUT"), Some(2));
+    assert_eq!(system.nodes.get("VSS"), Some(0));
 }
