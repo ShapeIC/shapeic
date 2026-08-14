@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::error::Error;
 use std::time::Instant;
 
+use shapeic_core::exploration::candidate::CandidateSet;
 use shapeic_lut::LookupTable;
 use shapeic_core::utils::{linspace};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
@@ -80,6 +81,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let diffpair = catalog.get("simplediffpair")
         .ok_or_else(|| "missing simplediffpair primitive".to_string())?;
+    let currentmirror = catalog.get("simplecurrentmirror")
+        .ok_or_else(|| "missing simplecurrentmirror primitive".to_string())?;
 
     let diffpair_input = PrimitiveBuildInput::new(HashMap::from([
         ("current".to_string(), PrimitiveBuildValue::Scalar(TAIL_CURRENT)),
@@ -87,6 +90,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("VOUTP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
         ("VTAIL".to_string(), PrimitiveBuildValue::Vector(linspace(VTAIL_START, VTAIL_STOP, VTAIL_POINTS))),
     ]));
+    let currentmirror_input = PrimitiveBuildInput::new(HashMap::from([
+        ("current".to_string(), PrimitiveBuildValue::Scalar(TAIL_CURRENT)),
+        ("VINP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
+        ("VOUTP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
+        ("VDD".to_string(), PrimitiveBuildValue::Scalar(VDD))
+    ]));
+    //TODO: Take a look into the expressions of primitive/build.json columns, the current might be
+    //divided by 2 twice, once on the derived and once on the columns.
 
     let stage_start = Instant::now();
     let diffpair_candidate_set = build_candidate_set_for_primitive(
@@ -97,13 +108,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     ).map_err(|error| format!("{error:?}"))?;
     let diffpair_candidate_set_time = stage_start.elapsed();
     println!("Diffpair candidate set took: {:?}", diffpair_candidate_set_time);
+  
+    let stage_start = Instant::now();  
+    let currentmirror_candidate_set = build_candidate_set_for_primitive(
+        pmos,
+        currentmirror, 
+        "xcm",
+        currentmirror_input
+    ).map_err(|error| format!("{error:?}"))?;
+    let currentmirror_candidate_set_time = stage_start.elapsed();
+    println!("Current Mirror candidate set took: {:?}", currentmirror_candidate_set_time);
 
-    println!("diffpair_candidate_set: {:?}", diffpair_candidate_set);
+
+    let mut results = Vec::with_capacity(diffpair_candidate_set.points.len() * currentmirror_candidate_set.points.len());
 
     let total = total_start.elapsed();
     println!("Total time: {:?}", total);
     Ok(())
 }
+
 
 fn lut_paths() -> Result<(PathBuf, PathBuf, Option<PathBuf>), io::Error> {
     let mut arguments = env::args_os();
