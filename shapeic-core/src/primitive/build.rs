@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
 use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, OperatingPoint, MosExpression};
-use crate::exploration::candidate::{CandidateSet};
+use crate::exploration::candidate::{CandidateSet, CandidateSetBuildError, candidate_set_from_columns, candidate_column_name};
+use crate::exploration::table::ExplorationColumn;
+use crate::netlist::names::small_signal_param_name;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimitiveBuildSpec {
@@ -42,6 +45,10 @@ pub enum PrimitiveBuildError {
         lut: String,
         reference: String,
     },
+    MissingSymbol {
+        symbol: String,
+    },
+    CandidateSet(CandidateSetBuildError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +73,39 @@ pub enum SweepMode {
     #[default]
     Aligned,
     Cartesian,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimitiveBuildOutput {
+    pub columns: Vec<ExplorationColumn>,
+    pub row_count: usize,
+}
+
+impl PrimitiveBuildOutput {
+    pub fn to_candidate_set(
+        &self,
+        instance_name: &str,
+    ) -> Result<CandidateSet, CandidateSetBuildError> {
+        let columns = self
+            .columns
+            .iter()
+            .map(|column| ExplorationColumn {
+                name: primitive_build_candidate_column_name(instance_name, &column.name),
+                values: column.values.clone(),
+            })
+            .collect::<Vec<_>>();
+        candidate_set_from_columns(instance_name, &columns)
+    }
+}
+
+fn primitive_build_candidate_column_name(instance_name: &str, column_name: &str) -> String {
+    if let Some((param, branch)) = column_name.split_once("__") {
+        if !param.is_empty() && !branch.is_empty() && !branch.contains("__") {
+            return small_signal_param_name(param, instance_name, branch);
+        }
+    }
+
+    candidate_column_name(instance_name, column_name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,8 +165,7 @@ pub fn build_candidate_set_for_primitive(
     primitive: &PrimitiveManifest,
     instance_name: &str,
     input: PrimitiveBuildInput
-) -> Result<(), PrimitiveBuildError>
-{
+) -> Result<CandidateSet, PrimitiveBuildError> {
     let build_spec = primitive.build.as_ref()
         .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
             primitive: primitive.name.clone(),
@@ -136,22 +175,84 @@ pub fn build_candidate_set_for_primitive(
     if input.lut_config.is_none() {
         input.lut_config = primitive.lut_config.clone();
     }
-    
-    build(model, build_spec, &input)?;
-    Ok(())  
+    build(model, build_spec, &input)?.to_candidate_set(instance_name).map_err(PrimitiveBuildError::CandidateSet)
 }
 
 fn build(
     model: &DeviceLut,
     build_spec: &PrimitiveBuildSpec,
     input: &PrimitiveBuildInput,
-) -> Result<(), PrimitiveBuildError>{
+) -> Result<PrimitiveBuildOutput, PrimitiveBuildError>{
     let mut rows = expand_inputs(build_spec, input)?;
     evaluate_expressions(&mut rows, &build_spec.derived)?;
     lut_query(model, build_spec, &mut rows, input)?;
     evaluate_expressions(&mut rows, &build_spec.columns)?;
-    println!("rows: {:?}", rows);
-    Ok(())
+
+    let columns = build_spec
+        .columns
+        .iter()
+        .map(|column| {
+            let values = rows
+            .iter()
+            .map(|row| {
+                row.get(&column.name).copied().ok_or_else(|| {
+                    PrimitiveBuildError::MissingSymbol {
+                        symbol: column.name.clone(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ExplorationColumn {
+            name: column.name.clone(),
+            values,
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let mut columns = columns;
+    columns.extend(exposed_input_columns(build_spec, &rows)?);
+
+    Ok(PrimitiveBuildOutput {
+        row_count: rows.len(),
+        columns,
+    })
+}
+
+fn exposed_input_columns(
+    spec: &PrimitiveBuildSpec,
+    rows: &[HashMap<String, f64>],
+) -> Result<Vec<ExplorationColumn>, PrimitiveBuildError> {
+    let existing_columns = spec
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut exposed = Vec::new();
+
+    for input in &spec.inputs {
+        if input.source.as_deref() != Some("port_voltage") {
+            continue;
+        }
+
+        let column_name = input.name.to_ascii_lowercase();
+        if existing_columns.contains(column_name.as_str()) {
+            continue;
+        }
+
+        let values = rows
+            .iter()
+            .map(|row| {
+                row.get(&input.name)
+                    .copied()
+                    .ok_or_else(|| PrimitiveBuildError::MissingSymbol {
+                        symbol: input.name.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        exposed.push(ExplorationColumn::new(column_name, values));
+    }
+
+    Ok(exposed)
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -98,6 +98,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let diffpair_candidate_set_time = stage_start.elapsed();
     println!("Diffpair candidate set took: {:?}", diffpair_candidate_set_time);
 
+    println!("diffpair_candidate_set: {:?}", diffpair_candidate_set);
+
     let total = total_start.elapsed();
     println!("Total time: {:?}", total);
     Ok(())

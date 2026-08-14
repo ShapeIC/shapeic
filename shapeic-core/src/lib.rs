@@ -3,3 +3,4 @@ pub mod utils;
 pub mod catalog;
 pub mod primitive;
 pub mod exploration;
+pub mod netlist;
