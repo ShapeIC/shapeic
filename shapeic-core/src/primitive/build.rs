@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, OperatingPoint, MosExpression};
+use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, MosExpression, OperatingPoint};
 use crate::exploration::candidate::{CandidateSet, CandidateSetBuildError, candidate_set_from_columns, candidate_column_name};
 use crate::exploration::table::ExplorationColumn;
 use crate::netlist::names::small_signal_param_name;
@@ -44,6 +44,10 @@ pub enum PrimitiveBuildError {
     InvalidLutLengthsRef {
         lut: String,
         reference: String,
+    },
+    LutSizing {
+        lut: String,
+        reason: String,
     },
     MissingSymbol {
         symbol: String,
@@ -118,6 +122,7 @@ pub struct BuildExpression {
 pub struct LutBuildSpec {
     pub name: String,
     pub device: String,
+    pub current: String,
     #[serde(default)]
     pub dof: HashMap<String, String>,
     pub lengths: Option<LutLengths>,
@@ -277,6 +282,8 @@ fn lut_query(
         let mut queries = Vec::with_capacity(rows.len() * lengths.len());
 
         for row in rows.iter() {
+            let requested_current = evaluate_lut_current(lut, row)?;
+
             for length in &lengths {
                 let mut dof = HashMap::new();
                 for (dof_name, expr) in &lut.dof {
@@ -289,15 +296,6 @@ fn lut_query(
                     })?;
                     dof.insert(dof_name.clone(), value);
                 }
-
-                let requested_current = row
-                    .get("current")
-                    .copied()
-                    .ok_or_else(|| PrimitiveBuildError::Expression {
-                        name: "current".to_string(),
-                        expression: "current".to_string(),
-                        reason: "missing input 'current'".to_string(),
-                    })?;
 
                 let vbs = match dof.get("vbs") {
                     Some(value) => *value,
@@ -320,16 +318,22 @@ fn lut_query(
                     dof,
                     length: *length,
                     op: operating_point,
-                    current: requested_current
+                    current: requested_current,
                 });
                 query_rows.push((row.clone(), *length));
             }
         }
-        let gmid = model.standard_expression(MosExpression::Gmid).expect("gmid expression");
-        let jd = model.standard_expression(MosExpression::CurrentDensity).expect("jd expression"); 
-        let expressions = &vec![gmid, jd, Expr::parameter("gds"), Expr::parameter("id")];
-        let lut_results = many_size_for_current(model, &queries, &expressions).unwrap();
-        //println!("lut_results: {:?}", lut_results);
+        let gmid = model
+            .standard_expression(MosExpression::Gmid)
+            .expect("gmid expression");
+        let jd = model
+            .standard_expression(MosExpression::CurrentDensity)
+            .expect("jd expression");
+        let gdsid = model
+            .standard_expression(MosExpression::InverseEarlyVoltage)
+            .expect("gdsid expression");
+        let expressions = vec![gmid, jd, gdsid];
+        let lut_results = many_size_for_current(model, &queries, &expressions)?;
         let mut next_rows = Vec::with_capacity(query_rows.len());
         for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
             let mut next_row = row;
@@ -344,18 +348,32 @@ fn lut_query(
     Ok(())
 }
 
+fn evaluate_lut_current(
+    lut: &LutBuildSpec,
+    row: &HashMap<String, f64>,
+) -> Result<f64, PrimitiveBuildError> {
+    ExpressionParser::new(&lut.current, row)
+        .parse()
+        .map_err(|reason| PrimitiveBuildError::Expression {
+            name: format!("lut.{}.current", lut.name),
+            expression: lut.current.clone(),
+            reason,
+        })
+}
+
 fn many_size_for_current(
     model: &DeviceLut,
-    queries: &Vec<LutQuery>,
-    expressions: &Vec<Expr>
+    queries: &[LutQuery],
+    expressions: &[Expr],
 ) -> Result<Vec<CurrentSizingResult>, PrimitiveBuildError> {
     let mut lut_results = Vec::with_capacity(queries.len());
     for query in queries {
-        let size = model.size_for_current(
-            &query.op, 
-            query.current,
-            expressions
-        ).unwrap();
+        let size = model
+            .size_for_current(&query.op, query.current, expressions)
+            .map_err(|error| PrimitiveBuildError::LutSizing {
+                lut: query.lut_name.clone(),
+                reason: error.to_string(),
+            })?;
         lut_results.push(size);
     }
     Ok(lut_results)
@@ -645,4 +663,121 @@ fn is_identifier_start(byte: u8) -> bool {
 
 fn is_identifier_body(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.')
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use shapeic_lut::LookupTable;
+
+    use super::*;
+
+    fn lut_spec(current: &str) -> LutBuildSpec {
+        LutBuildSpec {
+            name: "m1".to_owned(),
+            device: "nmos".to_owned(),
+            current: current.to_owned(),
+            dof: HashMap::new(),
+            lengths: Some(LutLengths::Values(vec![0.4e-6])),
+        }
+    }
+
+    #[test]
+    fn lut_current_uses_the_derived_branch_current() {
+        let mut rows = vec![HashMap::from([("current".to_owned(), 20.0e-6)])];
+        evaluate_expressions(
+            &mut rows,
+            &[BuildExpression {
+                name: "id_m1".to_owned(),
+                expr: "current / 2".to_owned(),
+            }],
+        )
+        .expect("derived current should evaluate");
+
+        let current = evaluate_lut_current(&lut_spec("id_m1"), &rows[0])
+            .expect("LUT current should resolve");
+
+        assert_eq!(current, 10.0e-6);
+    }
+
+    #[test]
+    fn lut_current_supports_a_direct_primitive_current() {
+        let mut rows = vec![HashMap::from([("current".to_owned(), 20.0e-6)])];
+        evaluate_expressions(
+            &mut rows,
+            &[BuildExpression {
+                name: "id_m1".to_owned(),
+                expr: "current".to_owned(),
+            }],
+        )
+        .expect("derived current should evaluate");
+
+        let current = evaluate_lut_current(&lut_spec("id_m1"), &rows[0])
+            .expect("LUT current should resolve");
+
+        assert_eq!(current, 20.0e-6);
+    }
+
+    #[test]
+    fn missing_lut_current_symbol_has_lut_context() {
+        let error = evaluate_lut_current(&lut_spec("id_m1"), &HashMap::new())
+            .expect_err("missing branch current should fail");
+
+        assert_eq!(
+            error,
+            PrimitiveBuildError::Expression {
+                name: "lut.m1.current".to_owned(),
+                expression: "id_m1".to_owned(),
+                reason: "missing symbol 'id_m1'".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn non_positive_lut_current_returns_a_build_error() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../shapeic-lut/tests/fixtures/shapeic_v2_5d.npz");
+        let table = LookupTable::open(fixture).expect("five-dimensional LUT fixture should load");
+        let model = table.model("sg13_lv_nmos").expect("fixture nmos");
+        let queries = [LutQuery {
+            lut_name: "m1".to_owned(),
+            device: "nmos".to_owned(),
+            dof: HashMap::new(),
+            length: 0.4e-6,
+            op: OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4),
+            current: 0.0,
+        }];
+
+        let error = many_size_for_current(model, &queries, &[])
+            .expect_err("non-positive LUT current should fail");
+
+        assert!(matches!(
+            error,
+            PrimitiveBuildError::LutSizing { lut, reason }
+                if lut == "m1" && reason.contains("finite and positive")
+        ));
+    }
+
+    #[test]
+    fn analog_primitives_declare_their_lut_current() {
+        for json in [
+            include_str!("../../../analoglib/primitives/simplediffpair/build.json"),
+            include_str!("../../../analoglib/primitives/simplecurrentmirror/build.json"),
+        ] {
+            let spec: PrimitiveBuildSpec =
+                serde_json::from_str(json).expect("primitive build spec should deserialize");
+            assert_eq!(spec.lut[0].current, "id_m1");
+        }
+    }
+
+    #[test]
+    fn lut_current_is_required_by_the_build_schema() {
+        let error = serde_json::from_str::<LutBuildSpec>(
+            r#"{"name":"m1","device":"nmos","lengths":[4e-7]}"#,
+        )
+        .expect_err("LUT current must be explicit");
+
+        assert!(error.to_string().contains("missing field `current`"));
+    }
 }

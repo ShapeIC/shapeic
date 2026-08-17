@@ -15,6 +15,7 @@
     {
       "name": "m1",
       "device": "nmos",
+      "current": "id_m1",
       "dof": {
         "vds": "vds_m1",
         "vgs": "vgs_m1"
@@ -25,12 +26,11 @@
   "columns": [
     { "name": "length__m1", "expr": "lut.m1.length" },
     { "name": "length__m2", "expr": "length__m1" },
-    { "name": "width__m1", "expr": "(id_m1/2) / lut.m1.jd" },
+    { "name": "width__m1", "expr": "(id_m1) / lut.m1.jd" },
     { "name": "width__m2", "expr": "width__m1" },
-    { "name": "gm__m1", "expr": "lut.m1.gmid * (id_m1/2)" },
+    { "name": "gm__m1", "expr": "lut.m1.gmid * (id_m1)" },
     { "name": "gm__m2", "expr": "gm__m1" },
-    { "name": "gdsid", "expr": "lut.m1.gds / lut.m1.id" },
-    { "name": "gds__m1", "expr": "gdsid * (id_m1/2)" },
+    { "name": "gds__m1", "expr": "lut.m1.gdsid * (id_m1)" },
     { "name": "gds__m2", "expr": "gds__m1" },
     { "name": "ro__m1", "expr": "1 / gds__m1" },
     { "name": "ro__m2", "expr": "ro__m1" }

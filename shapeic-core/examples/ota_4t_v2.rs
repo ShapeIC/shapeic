@@ -115,9 +115,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("VOUTP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
         ("VDD".to_string(), PrimitiveBuildValue::Scalar(VDD)),
     ]));
-    //TODO: Take a look into the expressions of primitive/build.json columns, the current might be
-    //divided by 2 twice, once on the derived and once on the columns.
-
     let stage_start = Instant::now();
     let diffpair_candidate_set =
         build_candidate_set_for_primitive(nmos, diffpair, "xdp", diffpair_input)
