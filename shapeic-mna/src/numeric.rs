@@ -140,6 +140,13 @@ pub enum NumericMnaError {
         /// Name of the missing circuit node.
         String,
     ),
+    /// The input voltage of a requested transfer function is exactly zero.
+    ZeroInputVoltage {
+        /// Input node whose solved voltage is zero.
+        node: String,
+        /// Frequency at which the zero input voltage was obtained.
+        frequency_hz: f64,
+    },
     /// The requested AC frequency is invalid.
     InvalidFrequency(
         /// Invalid frequency in hertz.
@@ -516,25 +523,94 @@ impl NumericMnaSystem {
         frequency_hz: f64,
         node_name: &str,
     ) -> Result<Option<Complex64>, NumericMnaError> {
-        if !frequency_hz.is_finite() || frequency_hz < 0.0 {
-            return Err(NumericMnaError::InvalidFrequency(frequency_hz));
+        validate_frequency(frequency_hz)?;
+        let output_row = self.node_voltage_index(node_name)?;
+        let Some(solution) = self.solve_at_frequency(frequency_hz)? else {
+            return Ok(None);
+        };
+        let output = solution[output_row];
+        validate_complex_result(output, frequency_hz)?;
+        Ok(Some(output))
+    }
+
+    /// Solves the numerical MNA system at one frequency and returns `Vout / Vin`.
+    ///
+    /// `input_node` and `output_node` identify single-ended node voltages relative
+    /// to ground. The AC system is factored and solved only once; both voltages
+    /// are extracted from the same solution vector.
+    ///
+    /// A frequency of `0.0` performs a DC solution.
+    ///
+    /// Returns `Ok(None)` if the MNA matrix is singular and the linear system cannot
+    /// be solved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericMnaError::InvalidFrequency`] if `frequency_hz` is negative,
+    /// NaN, or infinite.
+    ///
+    /// Returns [`NumericMnaError::MissingNode`] if either requested node is absent
+    /// from the node map.
+    ///
+    /// Returns [`NumericMnaError::InvalidPortAdmittance`] if either requested node
+    /// is ground or lies outside the MNA matrix.
+    ///
+    /// Returns [`NumericMnaError::ZeroInputVoltage`] if the solved input voltage is
+    /// exactly zero.
+    ///
+    /// Returns [`NumericMnaError::NonFiniteSystemCoefficient`] if the assembled
+    /// system, either requested node voltage, or the resulting transfer contains
+    /// a non-finite value.
+    pub fn solve_transfer(
+        &self,
+        frequency_hz: f64,
+        input_node: &str,
+        output_node: &str,
+    ) -> Result<Option<Complex64>, NumericMnaError> {
+        validate_frequency(frequency_hz)?;
+        let input_row = self.node_voltage_index(input_node)?;
+        let output_row = self.node_voltage_index(output_node)?;
+        let Some(solution) = self.solve_at_frequency(frequency_hz)? else {
+            return Ok(None);
+        };
+        let input = solution[input_row];
+        let output = solution[output_row];
+        validate_complex_result(input, frequency_hz)?;
+        validate_complex_result(output, frequency_hz)?;
+        if input == Complex64::new(0.0, 0.0) {
+            return Err(NumericMnaError::ZeroInputVoltage {
+                node: input_node.to_owned(),
+                frequency_hz,
+            });
         }
+        let transfer = output / input;
+        validate_complex_result(transfer, frequency_hz)?;
+        Ok(Some(transfer))
+    }
+
+    fn node_voltage_index(&self, node_name: &str) -> Result<usize, NumericMnaError> {
         let node_number = self
             .nodes
             .get(node_name)
             .ok_or_else(|| NumericMnaError::MissingNode(node_name.to_owned()))?;
-        let output_row =
+        let row =
             node_number
                 .checked_sub(1)
                 .ok_or_else(|| NumericMnaError::InvalidPortAdmittance {
                     message: format!("cannot return ground node '{node_name}'"),
                 })?;
-        if output_row >= self.base.nrows() {
+        if row >= self.base.nrows() {
             return Err(NumericMnaError::InvalidPortAdmittance {
                 message: format!("node '{node_name}' is outside the MNA matrix"),
             });
         }
+        Ok(row)
+    }
 
+    fn solve_at_frequency(
+        &self,
+        frequency_hz: f64,
+    ) -> Result<Option<DVector<Complex64>>, NumericMnaError> {
         let omega = 2.0 * std::f64::consts::PI * frequency_hz;
         let matrix = DMatrix::from_fn(self.base.nrows(), self.base.ncols(), |row, column| {
             Complex64::new(
@@ -553,12 +629,22 @@ impl NumericMnaSystem {
         let Some(solution) = matrix.lu().solve(&rhs) else {
             return Ok(None);
         };
-        let output = solution[output_row];
-        if !output.re.is_finite() || !output.im.is_finite() {
-            return Err(NumericMnaError::NonFiniteSystemCoefficient { frequency_hz });
-        }
-        Ok(Some(output))
+        Ok(Some(solution))
     }
+}
+
+fn validate_frequency(frequency_hz: f64) -> Result<(), NumericMnaError> {
+    if !frequency_hz.is_finite() || frequency_hz < 0.0 {
+        return Err(NumericMnaError::InvalidFrequency(frequency_hz));
+    }
+    Ok(())
+}
+
+fn validate_complex_result(value: Complex64, frequency_hz: f64) -> Result<(), NumericMnaError> {
+    if !value.re.is_finite() || !value.im.is_finite() {
+        return Err(NumericMnaError::NonFiniteSystemCoefficient { frequency_hz });
+    }
+    Ok(())
 }
 
 impl fmt::Display for NumericMnaError {
@@ -610,6 +696,10 @@ impl fmt::Display for NumericMnaError {
                 write!(formatter, "invalid port admittance: {message}")
             }
             Self::MissingNode(node) => write!(formatter, "MNA node '{node}' is missing"),
+            Self::ZeroInputVoltage { node, frequency_hz } => write!(
+                formatter,
+                "transfer-function input node '{node}' is zero at {frequency_hz:.6e} Hz"
+            ),
             Self::InvalidFrequency(value) => {
                 write!(formatter, "invalid AC frequency {value}")
             }
@@ -634,11 +724,13 @@ impl Error for NumericMnaError {
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 
+    use nalgebra::{DMatrix, DVector};
     use ndarray::array;
+    use num_complex::Complex64;
     use symbolica::domains::atom::AtomField;
     use symbolica::prelude::{Matrix, parse};
 
-    use super::{NumericMnaError, PreparedNumericMna};
+    use super::{NumericMnaError, NumericMnaSystem, PreparedNumericMna};
     use crate::mna::MnaResult;
     use crate::spice2cir::NodeMap;
 
@@ -670,6 +762,20 @@ mod tests {
         let mut system = rc_low_pass();
         system.a[(1, 1)] += parse!("s*c");
         system
+    }
+
+    fn two_node_numeric_system(base: DMatrix<f64>, rhs: [f64; 2]) -> NumericMnaSystem {
+        NumericMnaSystem {
+            base,
+            capacitance: DMatrix::zeros(2, 2),
+            rhs: DVector::from_row_slice(&rhs),
+            nodes: NodeMap::from_map(HashMap::from([
+                ("VIN".to_owned(), 1),
+                ("VOUT".to_owned(), 2),
+                ("VSS".to_owned(), 0),
+                ("OUTSIDE".to_owned(), 3),
+            ])),
+        }
     }
 
     fn stamp_output_capacitance(
@@ -731,6 +837,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((at_combined_pole.norm() - 2.0_f64.sqrt().recip()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn solves_a_node_transfer_independently_of_input_amplitude() {
+        let mut symbolic = rc_low_pass_with_netlist_capacitance();
+        symbolic.z[(2, 0)] = parse!("2");
+        let mut prepared = PreparedNumericMna::new(&symbolic, &["r", "c"]).unwrap();
+        let resistance = 1.0e3;
+        let capacitance = 1.0e-9;
+        let system = prepared.instantiate(&[resistance, capacitance]).unwrap();
+
+        let input = system.solve_node(0.0, "VIN").unwrap().unwrap();
+        let output = system.solve_node(0.0, "VOUT").unwrap().unwrap();
+        let dc_transfer = system.solve_transfer(0.0, "VIN", "VOUT").unwrap().unwrap();
+        assert_eq!(input, Complex64::new(2.0, 0.0));
+        assert_eq!(output, Complex64::new(2.0, 0.0));
+        assert!((dc_transfer - Complex64::new(1.0, 0.0)).norm() < 1.0e-12);
+
+        let pole_hz = 1.0 / (2.0 * std::f64::consts::PI * resistance * capacitance);
+        let at_pole = system
+            .solve_transfer(pole_hz, "VIN", "VOUT")
+            .unwrap()
+            .unwrap();
+        assert!((at_pole.norm() - 2.0_f64.sqrt().recip()).abs() < 1.0e-12);
+        assert!((at_pole.arg().to_degrees() + 45.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn validates_transfer_nodes_input_voltage_and_singular_systems() {
+        let system = two_node_numeric_system(DMatrix::identity(2, 2), [1.0, 1.0]);
+        assert!(matches!(
+            system.solve_transfer(-1.0, "VIN", "VOUT"),
+            Err(NumericMnaError::InvalidFrequency(value)) if value == -1.0
+        ));
+        assert!(matches!(
+            system.solve_transfer(0.0, "MISSING", "VOUT"),
+            Err(NumericMnaError::MissingNode(node)) if node == "MISSING"
+        ));
+        assert!(matches!(
+            system.solve_transfer(0.0, "VIN", "MISSING"),
+            Err(NumericMnaError::MissingNode(node)) if node == "MISSING"
+        ));
+        assert!(matches!(
+            system.solve_transfer(0.0, "VSS", "VOUT"),
+            Err(NumericMnaError::InvalidPortAdmittance { .. })
+        ));
+        assert!(matches!(
+            system.solve_transfer(0.0, "VIN", "VSS"),
+            Err(NumericMnaError::InvalidPortAdmittance { .. })
+        ));
+        assert!(matches!(
+            system.solve_transfer(0.0, "OUTSIDE", "VOUT"),
+            Err(NumericMnaError::InvalidPortAdmittance { .. })
+        ));
+
+        let zero_input = two_node_numeric_system(DMatrix::identity(2, 2), [0.0, 1.0]);
+        assert!(matches!(
+            zero_input.solve_transfer(1.0e3, "VIN", "VOUT"),
+            Err(NumericMnaError::ZeroInputVoltage { node, frequency_hz })
+                if node == "VIN" && frequency_hz == 1.0e3
+        ));
+
+        let singular = two_node_numeric_system(DMatrix::zeros(2, 2), [1.0, 1.0]);
+        assert_eq!(singular.solve_transfer(1.0e3, "VIN", "VOUT").unwrap(), None);
     }
 
     #[test]
