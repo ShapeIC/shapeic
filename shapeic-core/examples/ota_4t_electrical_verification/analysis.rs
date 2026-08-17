@@ -829,7 +829,7 @@ fn solve_numeric_mna(
 fn ota_output_row(system: &MnaResult) -> Result<usize, io::Error> {
     let node = system
         .nodes
-        .nodes
+        .nodes()
         .get("VOUT")
         .copied()
         .ok_or_else(|| io::Error::other("OTA MNA has no VOUT node"))?;
@@ -896,7 +896,7 @@ fn ac_from_responses(
 
     EvaluatedAc {
         metrics: AcMetrics {
-            dc_gain_db,
+            dc_gain_db: Some(dc_gain_db),
             bandwidth_3db_hz,
             unity_gain_hz,
             phase_margin_deg,
@@ -1051,7 +1051,7 @@ mod tests {
         let ac = ac_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
         let metrics = ac.metrics;
 
-        assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
+        assert!((metrics.dc_gain_db.unwrap() - 20.0).abs() < 1.0e-12);
         assert!((metrics.bandwidth_3db_hz.unwrap() / pole_hz - 1.0).abs() < 0.01);
         assert!(metrics.unity_gain_hz.is_some());
         let phase_margin = metrics.phase_margin_deg.unwrap();

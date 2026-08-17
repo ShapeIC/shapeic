@@ -161,7 +161,7 @@ fn comparison_metrics(metrics: AcMetrics) -> Result<ComparisonMetrics, io::Error
         ));
     }
     Ok(ComparisonMetrics {
-        dc_gain_db: metrics.dc_gain_db,
+        dc_gain_db: metrics.dc_gain_db.ok_or_else(|| missing("DC gain"))?,
         bandwidth_3db_hz: metrics
             .bandwidth_3db_hz
             .ok_or_else(|| missing("the -3 dB bandwidth"))?,

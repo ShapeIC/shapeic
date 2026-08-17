@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use ndarray::Array2;
 use num_complex::Complex64;
+#[cfg(test)]
+use shapeic_core::analysis::AcMetrics;
 use shapeic_core::analysis::{
-    AcCompletion, AcMetrics, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
-    AnalysisTargets, TargetAssessment, TargetFailure, TargetMetric, analyze_adaptive_ac,
+    AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
+    AnalysisTargets, TargetAssessment, TargetFailure, analyze_adaptive_ac,
 };
 use shapeic_layout::{LayoutError, PhysicalLookupTable, PhysicalPoint, PortAdmittance};
 use shapeic_lut::{
@@ -258,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     })?;
             let gain = evaluate_ota_gain(&electrical_system)?;
             numeric_mna += stage_start.elapsed();
-            let dc_targets = ANALYSIS_TARGETS.assess_dc_gain(gain_db(gain));
+            let dc_targets = ANALYSIS_TARGETS.assess_dc_gain(Some(gain_db(gain)));
 
             let electrical_ac = if ANALYSIS_MODE.should_continue(&dc_targets) {
                 let stage_start = Instant::now();
@@ -644,6 +646,7 @@ fn adaptive_policy(include_dc_target: bool) -> AdaptiveAcPolicy {
     AdaptiveAcPolicy {
         mode: ANALYSIS_MODE,
         targets,
+        metrics: AcMetricSet::ALL,
     }
 }
 
@@ -992,7 +995,7 @@ fn ac_metrics_from_responses(
         (None, None)
     };
     AcMetrics {
-        dc_gain_db,
+        dc_gain_db: Some(dc_gain_db),
         bandwidth_3db_hz,
         unity_gain_hz,
         phase_margin_deg,
@@ -1351,12 +1354,7 @@ fn print_ac_table_header(title: &str) {
 fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<AdaptiveAcOutcome>) {
     match evaluation {
         StageEvaluation::Evaluated { value, targets } => {
-            print_ac_metrics_row(
-                result,
-                value.metrics,
-                value.completion,
-                &format_target_assessment(targets),
-            );
+            print_ac_metrics_row(result, value, &format_target_assessment(targets));
         }
         StageEvaluation::Skipped { reason } => {
             print_empty_ac_row(result, &format!("skipped: {}", reason.label()));
@@ -1367,14 +1365,10 @@ fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<Ad
     }
 }
 
-fn print_ac_metrics_row(
-    result: &SweepResult,
-    metrics: AcMetrics,
-    completion: AcCompletion,
-    status: &str,
-) {
+fn print_ac_metrics_row(result: &SweepResult, outcome: &AdaptiveAcOutcome, status: &str) {
+    let metrics = outcome.metrics;
     println!(
-        "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11.3} | {:>11} | {:>11} | {:>9} | {status}",
+        "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11} | {:>11} | {:>11} | {:>9} | {status}",
         result.diff_length * 1.0e6,
         result.mirror_length * 1.0e6,
         result.source_voltage,
@@ -1382,23 +1376,28 @@ fn print_ac_metrics_row(
         result.diff_pair.nf,
         result.current_mirror.finger_width * 1.0e6,
         result.current_mirror.nf,
-        metrics.dc_gain_db,
+        format_adaptive_metric(
+            metrics.dc_gain_db,
+            outcome,
+            AcMetric::DcGainDb,
+            format_optional,
+        ),
         format_adaptive_metric(
             metrics.bandwidth_3db_hz,
-            completion,
-            TargetMetric::Bandwidth3DbHz,
+            outcome,
+            AcMetric::Bandwidth3DbHz,
             format_frequency,
         ),
         format_adaptive_metric(
             metrics.unity_gain_hz,
-            completion,
-            TargetMetric::UnityGainHz,
+            outcome,
+            AcMetric::UnityGainHz,
             format_frequency,
         ),
         format_adaptive_metric(
             metrics.phase_margin_deg,
-            completion,
-            TargetMetric::PhaseMarginDeg,
+            outcome,
+            AcMetric::PhaseMarginDeg,
             format_optional,
         ),
     );
@@ -1457,7 +1456,8 @@ fn print_ac_delta_table(results: &[SweepResult]) {
             ) => (
                 format!(
                     "{:.3}",
-                    physical.metrics.dc_gain_db - electrical.metrics.dc_gain_db
+                    option_difference(electrical.metrics.dc_gain_db, physical.metrics.dc_gain_db)
+                        .expect("complete AC analyses must include DC gain")
                 ),
                 format_optional(relative_change_percent(
                     electrical.metrics.bandwidth_3db_hz,
@@ -1544,10 +1544,10 @@ fn format_target_failure(failure: &TargetFailure) -> String {
     )
 }
 
-fn format_metric_value(metric: TargetMetric, value: f64) -> String {
+fn format_metric_value(metric: AcMetric, value: f64) -> String {
     match metric {
-        TargetMetric::Bandwidth3DbHz | TargetMetric::UnityGainHz => format!("{value:.3e}"),
-        TargetMetric::DcGainDb | TargetMetric::PhaseMarginDeg => format!("{value:.3}"),
+        AcMetric::Bandwidth3DbHz | AcMetric::UnityGainHz => format!("{value:.3e}"),
+        AcMetric::DcGainDb | AcMetric::PhaseMarginDeg => format!("{value:.3}"),
     }
 }
 
@@ -1573,11 +1573,11 @@ fn format_optional(value: Option<f64>) -> String {
 
 fn format_adaptive_metric(
     value: Option<f64>,
-    completion: AcCompletion,
-    metric: TargetMetric,
+    outcome: &AdaptiveAcOutcome,
+    metric: AcMetric,
     formatter: fn(Option<f64>) -> String,
 ) -> String {
-    if completion.metric_evaluated(metric) {
+    if outcome.metric_evaluated(metric) {
         formatter(value)
     } else {
         "not eval".to_owned()
@@ -1835,7 +1835,7 @@ mod tests {
             .collect::<Vec<_>>();
         let metrics = ac_metrics_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
 
-        assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
+        assert!((metrics.dc_gain_db.unwrap() - 20.0).abs() < 1.0e-12);
         let bandwidth = metrics.bandwidth_3db_hz.unwrap();
         assert!((bandwidth / pole_hz - 1.0).abs() < 0.01);
         assert!(metrics.unity_gain_hz.is_some());
@@ -1848,11 +1848,11 @@ mod tests {
         let evaluations = [
             StageEvaluation::Evaluated {
                 value: (),
-                targets: AnalysisTargets::NONE.assess_dc_gain(0.0),
+                targets: AnalysisTargets::NONE.assess_dc_gain(Some(0.0)),
             },
             StageEvaluation::Evaluated {
                 value: (),
-                targets: ANALYSIS_TARGETS.assess_dc_gain(10.0),
+                targets: ANALYSIS_TARGETS.assess_dc_gain(Some(10.0)),
             },
             StageEvaluation::Skipped {
                 reason: SkipReason::DcTargets,
@@ -1880,12 +1880,12 @@ mod tests {
             .min_dc_gain_db
             .expect("example configures a DC gain target");
         assert_eq!(
-            format_target_assessment(&ANALYSIS_TARGETS.assess_dc_gain(19.0)),
+            format_target_assessment(&ANALYSIS_TARGETS.assess_dc_gain(Some(19.0))),
             format!("fail: GainDC=19.000<{gain_target:.3}")
         );
 
         let metrics = AcMetrics {
-            dc_gain_db: 20.0,
+            dc_gain_db: Some(20.0),
             bandwidth_3db_hz: Some(100.0e6),
             unity_gain_hz: None,
             phase_margin_deg: Some(45.0),

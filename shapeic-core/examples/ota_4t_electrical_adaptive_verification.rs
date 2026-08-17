@@ -195,7 +195,7 @@ fn comparison_rows(
 
 fn metric_value(metrics: AcMetrics, metric: &str) -> Option<f64> {
     match metric {
-        "dc_gain_db" => Some(metrics.dc_gain_db),
+        "dc_gain_db" => metrics.dc_gain_db,
         "bandwidth_3db_hz" => metrics.bandwidth_3db_hz,
         "unity_gain_hz" => metrics.unity_gain_hz,
         "phase_margin_deg" => metrics.phase_margin_deg,
