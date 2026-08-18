@@ -52,6 +52,21 @@ impl CandidatePairSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateEquality {
+    pub left_column: String,
+    pub right_column: String,
+}
+
+impl CandidateEquality {
+    pub fn new(left_column: impl Into<String>, right_column: impl Into<String>) -> Self {
+        Self {
+            left_column: left_column.into(),
+            right_column: right_column.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateJoinError {
     EmptyCandidateSet {
         set: String,
@@ -73,6 +88,15 @@ pub enum CandidateJoinError {
         column_index: usize,
         expected: String,
         actual: String,
+    },
+    MissingColumn {
+        set: String,
+        column: String,
+    },
+    NonFiniteJoinValue {
+        set: String,
+        point_index: usize,
+        column: String,
     },
     PairCountOverflow {
         left_count: usize,
@@ -112,6 +136,17 @@ impl fmt::Display for CandidateJoinError {
             } => write!(
                 formatter,
                 "candidate set '{set}' point {point_index} column {column_index} is '{actual}', expected '{expected}'"
+            ),
+            Self::MissingColumn { set, column } => {
+                write!(formatter, "candidate set '{set}' has no column '{column}'")
+            }
+            Self::NonFiniteJoinValue {
+                set,
+                point_index,
+                column,
+            } => write!(
+                formatter,
+                "candidate set '{set}' point {point_index} has a non-finite join value in '{column}'"
             ),
             Self::PairCountOverflow {
                 left_count,
@@ -169,34 +204,133 @@ impl From<CandidateSchemaError> for CandidateJoinError {
 
 #[derive(Debug)]
 pub struct CandidatePairJoin<'a> {
-    _left: &'a CandidateSet,
+    left: &'a CandidateSet,
     right: &'a CandidateSet,
-    next_left: usize,
-    next_right: usize,
+    state: CandidatePairJoinState,
     remaining: usize,
 }
 
+#[derive(Debug)]
+enum CandidatePairJoinState {
+    Cartesian {
+        next_left: usize,
+        next_right: usize,
+    },
+    Indexed {
+        indexed_side: IndexedSide,
+        index: HashMap<Box<[u64]>, Vec<usize>>,
+        probe_offsets: Vec<usize>,
+        next_probe: usize,
+        current_probe: usize,
+        current_key: Option<Box<[u64]>>,
+        next_match: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexedSide {
+    Left,
+    Right,
+}
+
 impl<'a> CandidatePairJoin<'a> {
+    pub fn new(
+        left: &'a CandidateSet,
+        right: &'a CandidateSet,
+        equalities: &[CandidateEquality],
+    ) -> Result<Self, CandidateJoinError> {
+        let left_columns = candidate_column_indices(left)?;
+        let right_columns = candidate_column_indices(right)?;
+
+        if equalities.is_empty() {
+            let remaining = checked_pair_count(left, right)?;
+            return Ok(Self {
+                left,
+                right,
+                state: CandidatePairJoinState::Cartesian {
+                    next_left: 0,
+                    next_right: 0,
+                },
+                remaining,
+            });
+        }
+
+        let left_offsets = equality_offsets(left, &left_columns, equalities, true)?;
+        let right_offsets = equality_offsets(right, &right_columns, equalities, false)?;
+        let left_names = equality_names(equalities, true);
+        let right_names = equality_names(equalities, false);
+        let indexed_side = if left.points.len() < right.points.len() {
+            IndexedSide::Left
+        } else {
+            IndexedSide::Right
+        };
+        let (indexed_set, indexed_offsets, indexed_names, probe_set, probe_offsets, probe_names) =
+            match indexed_side {
+                IndexedSide::Left => (
+                    left,
+                    &left_offsets,
+                    &left_names,
+                    right,
+                    right_offsets,
+                    right_names,
+                ),
+                IndexedSide::Right => (
+                    right,
+                    &right_offsets,
+                    &right_names,
+                    left,
+                    left_offsets,
+                    left_names,
+                ),
+            };
+
+        let mut index = HashMap::<Box<[u64]>, Vec<usize>>::new();
+        for (point_index, point) in indexed_set.points.iter().enumerate() {
+            let key = candidate_join_key(
+                indexed_set,
+                point,
+                point_index,
+                indexed_offsets,
+                indexed_names,
+            )?;
+            index.entry(key).or_default().push(point_index);
+        }
+
+        let mut remaining = 0usize;
+        for (point_index, point) in probe_set.points.iter().enumerate() {
+            let key =
+                candidate_join_key(probe_set, point, point_index, &probe_offsets, &probe_names)?;
+            if let Some(matches) = index.get(&key) {
+                remaining = remaining.checked_add(matches.len()).ok_or(
+                    CandidateJoinError::PairCountOverflow {
+                        left_count: left.points.len(),
+                        right_count: right.points.len(),
+                    },
+                )?;
+            }
+        }
+
+        Ok(Self {
+            left,
+            right,
+            state: CandidatePairJoinState::Indexed {
+                indexed_side,
+                index,
+                probe_offsets,
+                next_probe: 0,
+                current_probe: 0,
+                current_key: None,
+                next_match: 0,
+            },
+            remaining,
+        })
+    }
+
     pub fn cartesian(
         left: &'a CandidateSet,
         right: &'a CandidateSet,
     ) -> Result<Self, CandidateJoinError> {
-        candidate_column_indices(left)?;
-        candidate_column_indices(right)?;
-        let remaining = left.points.len().checked_mul(right.points.len()).ok_or(
-            CandidateJoinError::PairCountOverflow {
-                left_count: left.points.len(),
-                right_count: right.points.len(),
-            },
-        )?;
-
-        Ok(Self {
-            _left: left,
-            right,
-            next_left: 0,
-            next_right: 0,
-            remaining,
-        })
+        Self::new(left, right, &[])
     }
 }
 
@@ -208,13 +342,63 @@ impl Iterator for CandidatePairJoin<'_> {
             return None;
         }
 
-        let selection = CandidatePairSelection::new(self.next_left, self.next_right);
+        let selection = match &mut self.state {
+            CandidatePairJoinState::Cartesian {
+                next_left,
+                next_right,
+            } => {
+                let selection = CandidatePairSelection::new(*next_left, *next_right);
+                *next_right += 1;
+                if *next_right == self.right.points.len() {
+                    *next_right = 0;
+                    *next_left += 1;
+                }
+                selection
+            }
+            CandidatePairJoinState::Indexed {
+                indexed_side,
+                index,
+                probe_offsets,
+                next_probe,
+                current_probe,
+                current_key,
+                next_match,
+            } => loop {
+                if let Some(key) = current_key.as_ref() {
+                    let matches = index
+                        .get(key)
+                        .expect("the current indexed join key must have a bucket");
+                    if let Some(indexed_index) = matches.get(*next_match).copied() {
+                        *next_match += 1;
+                        break match indexed_side {
+                            IndexedSide::Left => {
+                                CandidatePairSelection::new(indexed_index, *current_probe)
+                            }
+                            IndexedSide::Right => {
+                                CandidatePairSelection::new(*current_probe, indexed_index)
+                            }
+                        };
+                    }
+                    *current_key = None;
+                }
+
+                let probe_set = match indexed_side {
+                    IndexedSide::Left => self.right,
+                    IndexedSide::Right => self.left,
+                };
+                let point = probe_set.points.get(*next_probe).expect(
+                    "remaining indexed join pairs require another validated probe candidate",
+                );
+                *current_probe = *next_probe;
+                *next_probe += 1;
+                *next_match = 0;
+                let key = candidate_join_key_unchecked(point, probe_offsets);
+                if index.contains_key(&key) {
+                    *current_key = Some(key);
+                }
+            },
+        };
         self.remaining -= 1;
-        self.next_right += 1;
-        if self.next_right == self.right.points.len() {
-            self.next_right = 0;
-            self.next_left += 1;
-        }
         Some(selection)
     }
 
@@ -230,6 +414,96 @@ impl ExactSizeIterator for CandidatePairJoin<'_> {
 }
 
 impl FusedIterator for CandidatePairJoin<'_> {}
+
+fn checked_pair_count(
+    left: &CandidateSet,
+    right: &CandidateSet,
+) -> Result<usize, CandidateJoinError> {
+    left.points
+        .len()
+        .checked_mul(right.points.len())
+        .ok_or(CandidateJoinError::PairCountOverflow {
+            left_count: left.points.len(),
+            right_count: right.points.len(),
+        })
+}
+
+fn equality_offsets(
+    candidates: &CandidateSet,
+    columns: &HashMap<String, usize>,
+    equalities: &[CandidateEquality],
+    left: bool,
+) -> Result<Vec<usize>, CandidateJoinError> {
+    equalities
+        .iter()
+        .map(|equality| {
+            let column = if left {
+                &equality.left_column
+            } else {
+                &equality.right_column
+            };
+            columns
+                .get(column)
+                .copied()
+                .ok_or_else(|| CandidateJoinError::MissingColumn {
+                    set: candidates.name.clone(),
+                    column: column.clone(),
+                })
+        })
+        .collect()
+}
+
+fn equality_names(equalities: &[CandidateEquality], left: bool) -> Vec<String> {
+    equalities
+        .iter()
+        .map(|equality| {
+            if left {
+                equality.left_column.clone()
+            } else {
+                equality.right_column.clone()
+            }
+        })
+        .collect()
+}
+
+fn candidate_join_key(
+    candidates: &CandidateSet,
+    point: &CandidatePoint,
+    point_index: usize,
+    offsets: &[usize],
+    columns: &[String],
+) -> Result<Box<[u64]>, CandidateJoinError> {
+    offsets
+        .iter()
+        .zip(columns)
+        .map(|(offset, column)| {
+            let value = point.values[*offset].1;
+            canonical_join_value(value).ok_or_else(|| CandidateJoinError::NonFiniteJoinValue {
+                set: candidates.name.clone(),
+                point_index,
+                column: column.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
+}
+
+fn candidate_join_key_unchecked(point: &CandidatePoint, offsets: &[usize]) -> Box<[u64]> {
+    offsets
+        .iter()
+        .map(|offset| {
+            canonical_join_value(point.values[*offset].1)
+                .expect("indexed join values were validated during construction")
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
+
+fn canonical_join_value(value: f64) -> Option<u64> {
+    value
+        .is_finite()
+        .then(|| if value == 0.0 { 0 } else { value.to_bits() })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CandidateSchemaError {
@@ -366,8 +640,8 @@ pub fn candidate_column_name(prefix: &str, column: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateJoinError, CandidatePairJoin, CandidatePairSelection, CandidatePoint,
-        CandidateSchemaError, CandidateSet, candidate_column_indices,
+        CandidateEquality, CandidateJoinError, CandidatePairJoin, CandidatePairSelection,
+        CandidatePoint, CandidateSchemaError, CandidateSet, candidate_column_indices,
     };
 
     fn point(values: &[(&str, f64)]) -> CandidatePoint {
@@ -377,6 +651,27 @@ mod tests {
                 .map(|(name, value)| ((*name).to_owned(), *value))
                 .collect(),
         )
+    }
+
+    fn voltage_length_candidates(
+        name: &str,
+        voltage_column: &str,
+        length_column: &str,
+        voltages: &[f64],
+        lengths: &[f64],
+    ) -> CandidateSet {
+        let points = voltages
+            .iter()
+            .flat_map(|voltage| {
+                lengths.iter().map(|length| {
+                    CandidatePoint::new(vec![
+                        (voltage_column.to_owned(), *voltage),
+                        (length_column.to_owned(), *length),
+                    ])
+                })
+            })
+            .collect();
+        CandidateSet::new(name, points)
     }
 
     #[test]
@@ -452,6 +747,159 @@ mod tests {
         assert_eq!(
             right.points[selection.right_index].get("length__xcm__m1"),
             Some(0.8e-6)
+        );
+    }
+
+    #[test]
+    fn indexed_join_reduces_four_voltages_and_three_lengths_to_compatible_pairs() {
+        let voltages = [0.8, 0.9, 1.0, 1.1];
+        let lengths = [0.4e-6, 0.8e-6, 1.6e-6];
+        let left =
+            voltage_length_candidates("xdp", "xdp.voutp", "length__xdp__m1", &voltages, &lengths);
+        let right =
+            voltage_length_candidates("xcm", "xcm.voutp", "length__xcm__m1", &voltages, &lengths);
+        let equality = CandidateEquality::new("xdp.voutp", "xcm.voutp");
+        let mut join = CandidatePairJoin::new(&left, &right, &[equality]).unwrap();
+
+        assert_eq!(left.points.len() * right.points.len(), 144);
+        assert_eq!(join.len(), 36);
+        let selections = join.by_ref().collect::<Vec<_>>();
+        assert_eq!(join.next(), None);
+        for selection in &selections {
+            assert_eq!(
+                left.points[selection.left_index].get("xdp.voutp"),
+                right.points[selection.right_index].get("xcm.voutp")
+            );
+        }
+        for voltage in voltages {
+            assert_eq!(
+                selections
+                    .iter()
+                    .filter(|selection| {
+                        left.points[selection.left_index].get("xdp.voutp") == Some(voltage)
+                    })
+                    .count(),
+                9
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_join_uses_a_composite_key_for_multiple_shared_nodes() {
+        let left = CandidateSet::new(
+            "xdp",
+            vec![
+                point(&[("xdp.voutp", 0.8), ("xdp.voutn", 0.4)]),
+                point(&[("xdp.voutp", 0.8), ("xdp.voutn", 0.5)]),
+                point(&[("xdp.voutp", 0.9), ("xdp.voutn", 0.4)]),
+            ],
+        );
+        let right = CandidateSet::new(
+            "xcm",
+            vec![
+                point(&[("xcm.voutp", 0.8), ("xcm.vinp", 0.4)]),
+                point(&[("xcm.voutp", 0.8), ("xcm.vinp", 0.6)]),
+                point(&[("xcm.voutp", 0.9), ("xcm.vinp", 0.4)]),
+            ],
+        );
+        let equalities = [
+            CandidateEquality::new("xdp.voutp", "xcm.voutp"),
+            CandidateEquality::new("xdp.voutn", "xcm.vinp"),
+        ];
+
+        assert_eq!(
+            CandidatePairJoin::new(&left, &right, &equalities)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![
+                CandidatePairSelection::new(0, 0),
+                CandidatePairSelection::new(2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn indexed_join_preserves_selection_orientation_when_the_left_set_is_indexed() {
+        let left = CandidateSet::new("xdp", vec![point(&[("xdp.voutp", 1.0)])]);
+        let right = CandidateSet::new(
+            "xcm",
+            vec![point(&[("xcm.voutp", 1.0)]), point(&[("xcm.voutp", 1.0)])],
+        );
+
+        assert_eq!(
+            CandidatePairJoin::new(
+                &left,
+                &right,
+                &[CandidateEquality::new("xdp.voutp", "xcm.voutp")],
+            )
+            .unwrap()
+            .collect::<Vec<_>>(),
+            vec![
+                CandidatePairSelection::new(0, 0),
+                CandidatePairSelection::new(0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn indexed_join_canonicalizes_signed_zero_and_can_produce_no_matches() {
+        let left = CandidateSet::new(
+            "xdp",
+            vec![point(&[("xdp.voutp", -0.0)]), point(&[("xdp.voutp", 1.0)])],
+        );
+        let right = CandidateSet::new(
+            "xcm",
+            vec![point(&[("xcm.voutp", 0.0)]), point(&[("xcm.voutp", 2.0)])],
+        );
+        let equality = CandidateEquality::new("xdp.voutp", "xcm.voutp");
+
+        assert_eq!(
+            CandidatePairJoin::new(&left, &right, &[equality])
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![CandidatePairSelection::new(0, 0)]
+        );
+
+        let unmatched_left = CandidateSet::new("a", vec![point(&[("a.v", 1.0)])]);
+        let unmatched_right = CandidateSet::new("b", vec![point(&[("b.v", 2.0)])]);
+        let no_matches = CandidatePairJoin::new(
+            &unmatched_left,
+            &unmatched_right,
+            &[CandidateEquality::new("a.v", "b.v")],
+        )
+        .unwrap();
+        assert_eq!(no_matches.len(), 0);
+    }
+
+    #[test]
+    fn indexed_join_rejects_missing_or_non_finite_shared_node_columns() {
+        let left = CandidateSet::new("xdp", vec![point(&[("xdp.voutp", f64::NAN)])]);
+        let right = CandidateSet::new("xcm", vec![point(&[("xcm.voutp", 1.0)])]);
+
+        assert_eq!(
+            CandidatePairJoin::new(
+                &left,
+                &right,
+                &[CandidateEquality::new("xdp.missing", "xcm.voutp")],
+            )
+            .unwrap_err(),
+            CandidateJoinError::MissingColumn {
+                set: "xdp".to_owned(),
+                column: "xdp.missing".to_owned(),
+            }
+        );
+        assert_eq!(
+            CandidatePairJoin::new(
+                &left,
+                &right,
+                &[CandidateEquality::new("xdp.voutp", "xcm.voutp")],
+            )
+            .unwrap_err(),
+            CandidateJoinError::NonFiniteJoinValue {
+                set: "xdp".to_owned(),
+                point_index: 0,
+                column: "xdp.voutp".to_owned(),
+            }
         );
     }
 
