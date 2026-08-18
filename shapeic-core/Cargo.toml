@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+ndarray = "0.17"
 num-complex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -16,7 +17,6 @@ shapeic-mna = { path = "../shapeic-mna" }
 
 [dev-dependencies]
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
-ndarray = "0.17"
 shapeic-layout = { path = "../shapeic-layout" }
 shapeic-lut = { path = "../shapeic-lut" }
 symbolica = "2.1"
