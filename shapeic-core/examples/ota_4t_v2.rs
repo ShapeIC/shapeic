@@ -12,7 +12,10 @@ use shapeic_core::analysis::{
 };
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::compact_model::MosDeviceCapacitances;
-use shapeic_core::exploration::candidate::{CandidatePoint, CandidateSet};
+use shapeic_core::exploration::candidate::{
+    CandidateEquality, CandidateJoinError, CandidatePairJoin, CandidatePairSelection,
+    CandidatePoint, CandidateSet,
+};
 use shapeic_core::netlist::names::small_signal_param_name;
 use shapeic_core::primitive::build::{
     PrimitiveBuildInput, PrimitiveBuildValue, build_candidate_set_for_primitive,
@@ -24,11 +27,14 @@ use shapeic_mna::numeric::NumericMnaSystem;
 
 const TAIL_CURRENT: f64 = 20.0e-6;
 const VOUT: f64 = 1.0;
+const VOUT_START: f64 = 0.9;
+const VOUT_STOP: f64 = 1.1;
+const VOUT_POINTS: usize = 10;
 const VDD: f64 = 1.5;
 const VIN: f64 = 0.9;
 const VTAIL_START: f64 = 0.65;
 const VTAIL_STOP: f64 = 0.79;
-const VTAIL_POINTS: usize = 1000;
+const VTAIL_POINTS: usize = 10;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const AC_MIN_HZ: f64 = 1.0;
@@ -43,6 +49,12 @@ const DIFF_PAIR_GM_COLUMN: &str = "gm__xdp__m1";
 const DIFF_PAIR_RO_COLUMN: &str = "ro__xdp__m1";
 const CURRENT_MIRROR_GM_COLUMN: &str = "gm__xcm__m1";
 const CURRENT_MIRROR_RO_COLUMN: &str = "ro__xcm__m1";
+const DIFF_PAIR_VOUT_COLUMN: &str = "xdp.voutp";
+const CURRENT_MIRROR_VOUT_COLUMN: &str = "xcm.voutp";
+const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
+const DIFF_PAIR_LENGTH_COLUMN: &str = "length__xdp__m1";
+const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
+const CURRENT_MIRROR_LENGTH_COLUMN: &str = "length__xcm__m1";
 const DIFF_PAIR_MOS_CONNECTIONS: [[(&str, &str); 4]; 2] = [
     [("G", "VINP"), ("D", "VOUT"), ("S", "IBIAS"), ("B", "VSS")],
     [("G", "VINN"), ("D", "N1"), ("S", "IBIAS"), ("B", "VSS")],
@@ -65,8 +77,7 @@ struct PrimitiveCandidate {
 
 #[derive(Debug)]
 struct OtaAcResult {
-    diff_pair_index: usize,
-    current_mirror_index: usize,
+    selection: CandidatePairSelection,
     outcome: AdaptiveAcOutcome,
 }
 
@@ -119,7 +130,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             PrimitiveBuildValue::Scalar(TAIL_CURRENT),
         ),
         ("VINP".to_string(), PrimitiveBuildValue::Scalar(VIN)),
-        ("VOUTP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
+        (
+            "VOUTP".to_string(),
+            PrimitiveBuildValue::Vector(linspace(VOUT_START, VOUT_STOP, VOUT_POINTS)),
+        ),
         (
             "VTAIL".to_string(),
             PrimitiveBuildValue::Vector(linspace(VTAIL_START, VTAIL_STOP, VTAIL_POINTS)),
@@ -131,7 +145,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             PrimitiveBuildValue::Scalar(TAIL_CURRENT),
         ),
         ("VINP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
-        ("VOUTP".to_string(), PrimitiveBuildValue::Scalar(VOUT)),
+        (
+            "VOUTP".to_string(),
+            PrimitiveBuildValue::Vector(linspace(VOUT_START, VOUT_STOP, VOUT_POINTS)),
+        ),
         ("VDD".to_string(), PrimitiveBuildValue::Scalar(VDD)),
     ]));
     let stage_start = Instant::now();
@@ -166,54 +183,66 @@ fn main() -> Result<(), Box<dyn Error>> {
         CURRENT_MIRROR_GM_COLUMN,
         CURRENT_MIRROR_RO_COLUMN,
     )?;
-    let mut results = Vec::with_capacity(
-        diffpair_candidate_set.points.len() * currentmirror_candidate_set.points.len(),
-    );
+    let possible_pairs = diffpair_candidate_set
+        .points
+        .len()
+        .checked_mul(currentmirror_candidate_set.points.len())
+        .ok_or_else(|| io::Error::other("OTA candidate pair count overflows usize"))?;
+    let candidate_pairs =
+        ota_candidate_pairs(&diffpair_candidate_set, &currentmirror_candidate_set)
+            .map_err(|error| io::Error::other(format!("could not join OTA candidates: {error}")))?;
+    let compatible_pairs = candidate_pairs.len();
+    let mut results = Vec::with_capacity(compatible_pairs);
     let stage_start = Instant::now();
     let mut frequency_evaluations = 0;
-    for (diff_pair_index, diff_pair) in diff_pair_candidates.iter().enumerate() {
-        for (current_mirror_index, current_mirror) in current_mirror_candidates.iter().enumerate() {
-            let parameter_values = [
-                diff_pair.mna_parameters[0],
-                diff_pair.mna_parameters[1],
-                current_mirror.mna_parameters[0],
-                current_mirror.mna_parameters[1],
-            ];
-            let mut candidate_testbench =
-                testbench.instantiate(&parameter_values).map_err(|error| {
+    for selection in candidate_pairs {
+        let diff_pair = &diff_pair_candidates[selection.left_index];
+        let current_mirror = &current_mirror_candidates[selection.right_index];
+        let parameter_values = [
+            diff_pair.mna_parameters[0],
+            diff_pair.mna_parameters[1],
+            current_mirror.mna_parameters[0],
+            current_mirror.mna_parameters[1],
+        ];
+        let mut candidate_testbench =
+            testbench.instantiate(&parameter_values).map_err(|error| {
                 io::Error::other(format!(
-                    "could not instantiate OTA testbench for diff-pair candidate {diff_pair_index} \
-                     and current-mirror candidate {current_mirror_index}: {error}"
+                    "could not instantiate OTA testbench for diff-pair candidate {} and \
+                     current-mirror candidate {}: {error}",
+                    selection.left_index, selection.right_index,
                 ))
             })?;
-            stamp_ota_capacitances(
-                candidate_testbench.system_mut(),
-                diff_pair,
-                current_mirror,
-            )
+        stamp_ota_capacitances(candidate_testbench.system_mut(), diff_pair, current_mirror)
             .map_err(|error| {
                 io::Error::other(format!(
-                    "could not stamp OTA capacitances for diff-pair candidate {diff_pair_index} \
-                     and current-mirror candidate {current_mirror_index}: {error}"
+                    "could not stamp OTA capacitances for diff-pair candidate {} and \
+                 current-mirror candidate {}: {error}",
+                    selection.left_index, selection.right_index,
                 ))
             })?;
-            let outcome = candidate_testbench.analyze().map_err(|error| {
-                io::Error::other(format!(
-                    "could not analyze OTA testbench for diff-pair candidate {diff_pair_index} \
-                     and current-mirror candidate {current_mirror_index}: {error}"
-                ))
-            })?;
-            frequency_evaluations += outcome.frequency_evaluations;
-            results.push(OtaAcResult {
-                diff_pair_index,
-                current_mirror_index,
-                outcome,
-            });
-        }
+        let outcome = candidate_testbench.analyze().map_err(|error| {
+            io::Error::other(format!(
+                "could not analyze OTA testbench for diff-pair candidate {} and \
+                 current-mirror candidate {}: {error}",
+                selection.left_index, selection.right_index,
+            ))
+        })?;
+        frequency_evaluations += outcome.frequency_evaluations;
+        results.push(OtaAcResult { selection, outcome });
     }
     let ac_evaluation = stage_start.elapsed();
 
-    print_results(&results);
+    print_results(
+        &results,
+        &diffpair_candidate_set,
+        &currentmirror_candidate_set,
+    )?;
+    println!("Candidate pairs: {possible_pairs}");
+    println!("Compatible candidate pairs: {compatible_pairs}");
+    println!(
+        "Rejected by shared VOUT: {}",
+        possible_pairs - compatible_pairs
+    );
     println!("Testbench preparation took: {testbench_preparation:?}");
     println!("AC evaluation took: {ac_evaluation:?}");
     println!("Frequency evaluations: {frequency_evaluations}");
@@ -254,6 +283,20 @@ fn primitive_candidates(
             })
         })
         .collect()
+}
+
+fn ota_candidate_pairs<'a>(
+    diff_pair: &'a CandidateSet,
+    current_mirror: &'a CandidateSet,
+) -> Result<CandidatePairJoin<'a>, CandidateJoinError> {
+    CandidatePairJoin::new(
+        diff_pair,
+        current_mirror,
+        &[CandidateEquality::new(
+            DIFF_PAIR_VOUT_COLUMN,
+            CURRENT_MIRROR_VOUT_COLUMN,
+        )],
+    )
 }
 
 fn candidate_capacitances(
@@ -303,9 +346,7 @@ fn candidate_value(
     column: &str,
 ) -> Result<f64, io::Error> {
     candidate
-        .values
-        .iter()
-        .find_map(|(name, value)| (name == column).then_some(*value))
+        .get(column)
         .filter(|value| value.is_finite())
         .ok_or_else(|| {
             io::Error::other(format!(
@@ -326,24 +367,64 @@ fn stamp_ota_capacitances(
     current_mirror.capacitances[1].stamp(system, CURRENT_MIRROR_MOS_CONNECTIONS[1])
 }
 
-fn print_results(results: &[OtaAcResult]) {
+fn print_results(
+    results: &[OtaAcResult],
+    diffpair_candidate_set: &CandidateSet,
+    currentmirror_candidate_set: &CandidateSet,
+) -> Result<(), io::Error> {
     println!("\nOTA AC results");
     println!(
-        "{:<10} {:<10} {:>14} {:>14} {:>14} {:>14}",
-        "diff_pair", "mirror", "dc_gain_db", "f3db_hz", "ugf_hz", "pm_deg"
+        "{:<8} {:<8} {:>9} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12} {:>12} {:>10}",
+        "dp_idx",
+        "cm_idx",
+        "vout_v",
+        "w_dp_um",
+        "l_dp_um",
+        "w_cm_um",
+        "l_cm_um",
+        "dc_gain_db",
+        "f3db_hz",
+        "ugf_hz",
+        "pm_deg",
     );
     for result in results {
         let metrics = result.outcome.metrics;
+        let diffpair_point = &diffpair_candidate_set.points[result.selection.left_index];
+        let currentmirror_point = &currentmirror_candidate_set.points[result.selection.right_index];
+        let diff_value = |column| {
+            candidate_value(
+                diffpair_candidate_set,
+                diffpair_point,
+                result.selection.left_index,
+                column,
+            )
+        };
+        let mirror_value = |column| {
+            candidate_value(
+                currentmirror_candidate_set,
+                currentmirror_point,
+                result.selection.right_index,
+                column,
+            )
+        };
+        let vout = diff_value(DIFF_PAIR_VOUT_COLUMN)?;
+        debug_assert_eq!(vout, mirror_value(CURRENT_MIRROR_VOUT_COLUMN)?);
         println!(
-            "{:<10} {:<10} {:>14.6} {:>14.6e} {:>14.6e} {:>14.6}",
-            result.diff_pair_index,
-            result.current_mirror_index,
+            "{:<8} {:<8} {:>9.4} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>12.6e} {:>12.6e} {:>10.6}",
+            result.selection.left_index,
+            result.selection.right_index,
+            vout,
+            diff_value(DIFF_PAIR_WIDTH_COLUMN)? * 1.0e6,
+            diff_value(DIFF_PAIR_LENGTH_COLUMN)? * 1.0e6,
+            mirror_value(CURRENT_MIRROR_WIDTH_COLUMN)? * 1.0e6,
+            mirror_value(CURRENT_MIRROR_LENGTH_COLUMN)? * 1.0e6,
             metrics.dc_gain_db.unwrap_or(f64::NAN),
             metrics.bandwidth_3db_hz.unwrap_or(f64::NAN),
             metrics.unity_gain_hz.unwrap_or(f64::NAN),
             metrics.phase_margin_deg.unwrap_or(f64::NAN),
         );
     }
+    Ok(())
 }
 
 fn lut_paths() -> Result<(PathBuf, PathBuf, Option<PathBuf>), io::Error> {
@@ -373,9 +454,11 @@ mod tests {
 
     use super::{
         ANALYSIS_POLICY, CURRENT_MIRROR_GM_COLUMN, CURRENT_MIRROR_INSTANCE,
-        CURRENT_MIRROR_MOS_CONNECTIONS, CURRENT_MIRROR_RO_COLUMN, DIFF_PAIR_GM_COLUMN,
-        DIFF_PAIR_INSTANCE, DIFF_PAIR_MOS_CONNECTIONS, DIFF_PAIR_RO_COLUMN, adaptive_ac_config,
-        primitive_candidates, small_signal_param_name,
+        CURRENT_MIRROR_LENGTH_COLUMN, CURRENT_MIRROR_MOS_CONNECTIONS, CURRENT_MIRROR_RO_COLUMN,
+        CURRENT_MIRROR_VOUT_COLUMN, CURRENT_MIRROR_WIDTH_COLUMN, DIFF_PAIR_GM_COLUMN,
+        DIFF_PAIR_INSTANCE, DIFF_PAIR_LENGTH_COLUMN, DIFF_PAIR_MOS_CONNECTIONS,
+        DIFF_PAIR_RO_COLUMN, DIFF_PAIR_VOUT_COLUMN, DIFF_PAIR_WIDTH_COLUMN, adaptive_ac_config,
+        ota_candidate_pairs, primitive_candidates, small_signal_param_name,
     };
     use shapeic_core::analysis::AcMetric;
 
@@ -405,6 +488,21 @@ mod tests {
             }
         }
         CandidatePoint::new(values)
+    }
+
+    fn join_candidate(
+        vout_column: &str,
+        width_column: &str,
+        length_column: &str,
+        vout: f64,
+        width: f64,
+        length: f64,
+    ) -> CandidatePoint {
+        CandidatePoint::new(vec![
+            (vout_column.to_owned(), vout),
+            (width_column.to_owned(), width),
+            (length_column.to_owned(), length),
+        ])
     }
 
     #[test]
@@ -468,6 +566,68 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains(&missing_column));
+    }
+
+    #[test]
+    fn joins_ota_candidates_by_vout_and_preserves_metadata_indices() {
+        let diff_pair = CandidateSet::new(
+            "xdp",
+            vec![
+                join_candidate(
+                    DIFF_PAIR_VOUT_COLUMN,
+                    DIFF_PAIR_WIDTH_COLUMN,
+                    DIFF_PAIR_LENGTH_COLUMN,
+                    0.9,
+                    4.0e-6,
+                    0.4e-6,
+                ),
+                join_candidate(
+                    DIFF_PAIR_VOUT_COLUMN,
+                    DIFF_PAIR_WIDTH_COLUMN,
+                    DIFF_PAIR_LENGTH_COLUMN,
+                    1.0,
+                    6.0e-6,
+                    0.8e-6,
+                ),
+            ],
+        );
+        let current_mirror = CandidateSet::new(
+            "xcm",
+            vec![
+                join_candidate(
+                    CURRENT_MIRROR_VOUT_COLUMN,
+                    CURRENT_MIRROR_WIDTH_COLUMN,
+                    CURRENT_MIRROR_LENGTH_COLUMN,
+                    1.0,
+                    8.0e-6,
+                    1.0e-6,
+                ),
+                join_candidate(
+                    CURRENT_MIRROR_VOUT_COLUMN,
+                    CURRENT_MIRROR_WIDTH_COLUMN,
+                    CURRENT_MIRROR_LENGTH_COLUMN,
+                    1.1,
+                    10.0e-6,
+                    1.2e-6,
+                ),
+            ],
+        );
+
+        let selections = ota_candidate_pairs(&diff_pair, &current_mirror)
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        assert_eq!(selections.len(), 1);
+        let selection = selections[0];
+        assert_eq!((selection.left_index, selection.right_index), (1, 0));
+        assert_eq!(
+            diff_pair.points[selection.left_index].get(DIFF_PAIR_WIDTH_COLUMN),
+            Some(6.0e-6)
+        );
+        assert_eq!(
+            current_mirror.points[selection.right_index].get(CURRENT_MIRROR_LENGTH_COLUMN),
+            Some(1.0e-6)
+        );
     }
 
     #[test]
