@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::{CurrentSizingResult, DeviceLut, Expr, MosExpression, OperatingPoint};
+use shapeic_lut::{
+    CurrentSizingResult, DeviceLut, Expr, MosCapacitanceMatrix, MosExpression, OperatingPoint,
+};
 use crate::exploration::candidate::{CandidateSet, CandidateSetBuildError, candidate_set_from_columns, candidate_column_name};
 use crate::exploration::table::ExplorationColumn;
 use crate::netlist::names::small_signal_param_name;
@@ -48,6 +50,9 @@ pub enum PrimitiveBuildError {
     LutSizing {
         lut: String,
         reason: String,
+    },
+    MissingLutExtrinsicCapacitances {
+        lut: String,
     },
     MissingSymbol {
         symbol: String,
@@ -323,28 +328,74 @@ fn lut_query(
                 query_rows.push((row.clone(), *length));
             }
         }
-        let gmid = model
-            .standard_expression(MosExpression::Gmid)
-            .expect("gmid expression");
-        let jd = model
-            .standard_expression(MosExpression::CurrentDensity)
-            .expect("jd expression");
-        let gdsid = model
-            .standard_expression(MosExpression::InverseEarlyVoltage)
-            .expect("gdsid expression");
-        let expressions = vec![gmid, jd, gdsid];
+        let expressions = lut_expressions(model, lut)?;
         let lut_results = many_size_for_current(model, &queries, &expressions)?;
         let mut next_rows = Vec::with_capacity(query_rows.len());
         for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
             let mut next_row = row;
-            next_row.insert(format!("lut.{}.length", lut.name), length);
-            for (key, value) in expressions.iter().zip(lut_values.values) {
-                next_row.insert(format!("lut.{}.{}", lut.name, key.parameter_name().unwrap()), value);
-            }
+            insert_lut_result(&mut next_row, lut, length, &expressions, lut_values)?;
             next_rows.push(next_row);
         }
         *rows = next_rows;
     }
+    Ok(())
+}
+
+fn lut_expressions(
+    model: &DeviceLut,
+    lut: &LutBuildSpec,
+) -> Result<Vec<Expr>, PrimitiveBuildError> {
+    let standard = |kind| {
+        model
+            .standard_expression(kind)
+            .map_err(|error| PrimitiveBuildError::LutSizing {
+                lut: lut.name.clone(),
+                reason: error.to_string(),
+            })
+    };
+    let mut expressions = vec![
+        standard(MosExpression::Gmid)?,
+        standard(MosExpression::CurrentDensity)?,
+        standard(MosExpression::InverseEarlyVoltage)?,
+    ];
+    expressions.extend(
+        MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+            .into_iter()
+            .map(Expr::parameter),
+    );
+    Ok(expressions)
+}
+
+fn insert_lut_result(
+    row: &mut HashMap<String, f64>,
+    lut: &LutBuildSpec,
+    length: f64,
+    expressions: &[Expr],
+    sizing: CurrentSizingResult,
+) -> Result<(), PrimitiveBuildError> {
+    let extrinsic = sizing.extrinsic_capacitances.ok_or_else(|| {
+        PrimitiveBuildError::MissingLutExtrinsicCapacitances {
+            lut: lut.name.clone(),
+        }
+    })?;
+    let prefix = format!("lut.{}", lut.name);
+    row.insert(format!("{prefix}.length"), length);
+    row.insert(format!("{prefix}.nf"), f64::from(sizing.nf));
+    row.insert(
+        format!("{prefix}.finger_width"),
+        sizing.point.finger_width,
+    );
+    row.insert(format!("{prefix}.total_width"), sizing.total_width);
+    for (key, value) in expressions.iter().zip(sizing.values) {
+        row.insert(
+            format!("{prefix}.{}", key.parameter_name().unwrap()),
+            value,
+        );
+    }
+    row.insert(format!("{prefix}.cgsol_total"), extrinsic.cgsol);
+    row.insert(format!("{prefix}.cgdol_total"), extrinsic.cgdol);
+    row.insert(format!("{prefix}.cjs_total"), extrinsic.cjs);
+    row.insert(format!("{prefix}.cjd_total"), extrinsic.cjd);
     Ok(())
 }
 
@@ -669,7 +720,7 @@ fn is_identifier_body(byte: u8) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use shapeic_lut::LookupTable;
+    use shapeic_lut::{LookupTable, LutPoint, MosExtrinsicCapacitances};
 
     use super::*;
 
@@ -680,6 +731,40 @@ mod tests {
             current: current.to_owned(),
             dof: HashMap::new(),
             lengths: Some(LutLengths::Values(vec![0.4e-6])),
+        }
+    }
+
+    fn build_lut_expressions() -> Vec<Expr> {
+        let mut expressions = vec![
+            Expr::parameter("gmid"),
+            Expr::parameter("jd"),
+            Expr::parameter("gdsid"),
+        ];
+        expressions.extend(
+            MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .map(Expr::parameter),
+        );
+        expressions
+    }
+
+    fn sizing_result(
+        extrinsic_capacitances: Option<MosExtrinsicCapacitances>,
+    ) -> CurrentSizingResult {
+        let operating_point = OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4);
+        CurrentSizingResult {
+            point: LutPoint::new(operating_point, 0.75e-6),
+            nf: 3,
+            total_width: 2.25e-6,
+            requested_current: 30.0e-6,
+            finger_current: 10.0e-6,
+            predicted_current: 30.0e-6,
+            current_error: 0.0,
+            values: vec![
+                12.0, 20.0, 0.02, 1.0e-15, 2.0e-15, 3.0e-15, 4.0e-15, 5.0e-15,
+                6.0e-15, 7.0e-15, 8.0e-15, 9.0e-15,
+            ],
+            extrinsic_capacitances,
         }
     }
 
@@ -779,5 +864,86 @@ mod tests {
         .expect_err("LUT current must be explicit");
 
         assert!(error.to_string().contains("missing field `current`"));
+    }
+
+    #[test]
+    fn exposes_sizing_geometry_and_capacitances_to_build_expressions() {
+        let extrinsic = MosExtrinsicCapacitances {
+            cgsol: 10.0e-15,
+            cgdol: 11.0e-15,
+            cjs: 12.0e-15,
+            cjd: 13.0e-15,
+        };
+        let mut row = HashMap::new();
+
+        insert_lut_result(
+            &mut row,
+            &lut_spec("id_m1"),
+            0.4e-6,
+            &build_lut_expressions(),
+            sizing_result(Some(extrinsic)),
+        )
+        .expect("complete sizing data should be exposed");
+
+        assert_eq!(row["lut.m1.nf"], 3.0);
+        assert_eq!(row["lut.m1.finger_width"], 0.75e-6);
+        assert_eq!(row["lut.m1.total_width"], 2.25e-6);
+        assert_eq!(row["lut.m1.cgg"], 1.0e-15);
+        assert_eq!(row["lut.m1.css"], 9.0e-15);
+        assert_eq!(row["lut.m1.cgsol_total"], extrinsic.cgsol);
+        assert_eq!(row["lut.m1.cgdol_total"], extrinsic.cgdol);
+        assert_eq!(row["lut.m1.cjs_total"], extrinsic.cjs);
+        assert_eq!(row["lut.m1.cjd_total"], extrinsic.cjd);
+    }
+
+    #[test]
+    fn rejects_sizing_results_without_extrinsic_capacitances() {
+        let error = insert_lut_result(
+            &mut HashMap::new(),
+            &lut_spec("id_m1"),
+            0.4e-6,
+            &build_lut_expressions(),
+            sizing_result(None),
+        )
+        .expect_err("extrinsic capacitances are required by the build flow");
+
+        assert_eq!(
+            error,
+            PrimitiveBuildError::MissingLutExtrinsicCapacitances {
+                lut: "m1".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn reports_missing_intrinsic_capacitance_parameters_with_lut_context() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../shapeic-lut/tests/fixtures/shapeic_v2_5d.npz");
+        let table = LookupTable::open(fixture).expect("five-dimensional LUT fixture should load");
+        let model = table.model("sg13_lv_nmos").expect("fixture nmos");
+        let lut = lut_spec("id_m1");
+        let operating_point = OperatingPoint::new(0.4e-6, 0.0, 0.4, 0.4);
+        let finger_width = model.finger_widths().expect("finger-width axis")[0];
+        let current = model
+            .query_parameter_at(&LutPoint::new(operating_point, finger_width), "id")
+            .expect("fixture drain current");
+        let queries = [LutQuery {
+            lut_name: lut.name.clone(),
+            device: lut.device.clone(),
+            dof: HashMap::new(),
+            length: 0.4e-6,
+            op: operating_point,
+            current,
+        }];
+        let expressions = lut_expressions(model, &lut).expect("standard expressions");
+
+        let error = many_size_for_current(model, &queries, &expressions)
+            .expect_err("fixture intentionally lacks the complete intrinsic set");
+
+        assert!(matches!(
+            error,
+            PrimitiveBuildError::LutSizing { lut, reason }
+                if lut == "m1" && reason.contains("cdg")
+        ));
     }
 }
