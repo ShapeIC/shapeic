@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use shapeic_core::analysis::{
-    AcMetricSet, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
-    AnalysisTargets,
+    AcCompletion, AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy,
+    AnalysisMode, AnalysisTargets,
 };
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::compact_model::MosDeviceCapacitances;
@@ -42,6 +42,10 @@ const AC_MAX_HZ: f64 = 100.0e9;
 const AC_COARSE_POINTS_PER_DECADE: usize = 4;
 const AC_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
 const AC_MAX_REFINEMENT_STEPS: usize = 32;
+const MIN_DC_GAIN_DB: f64 = 25.0;
+const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
+const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
+const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
 const MNA_PARAMETER_ORDER: [&str; 4] = ["g_gm_xdp", "r_gds_xdp", "g_gm_xcm", "r_gds_xcm"];
 const DIFF_PAIR_INSTANCE: &str = "xdp";
 const CURRENT_MIRROR_INSTANCE: &str = "xcm";
@@ -64,8 +68,13 @@ const CURRENT_MIRROR_MOS_CONNECTIONS: [[(&str, &str); 4]; 2] = [
     [("G", "N1"), ("D", "N1"), ("S", "VDD"), ("B", "VDD")],
 ];
 const ANALYSIS_POLICY: AdaptiveAcPolicy = AdaptiveAcPolicy {
-    mode: AnalysisMode::FullInsight,
-    targets: AnalysisTargets::NONE,
+    mode: AnalysisMode::Prune,
+    targets: AnalysisTargets {
+        min_dc_gain_db: Some(MIN_DC_GAIN_DB),
+        min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
+        min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
+        min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
+    },
     metrics: AcMetricSet::ALL,
 };
 
@@ -79,6 +88,46 @@ struct PrimitiveCandidate {
 struct OtaAcResult {
     selection: CandidatePairSelection,
     outcome: AdaptiveAcOutcome,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AcRejectionCounts {
+    dc_gain: usize,
+    bandwidth_3db: usize,
+    unity_gain: usize,
+    phase_margin: usize,
+}
+
+impl AcRejectionCounts {
+    fn record(
+        &mut self,
+        completion: AcCompletion,
+        targets_passed: bool,
+    ) -> Result<bool, io::Error> {
+        match (completion, targets_passed) {
+            (AcCompletion::Complete, true) => Ok(true),
+            (AcCompletion::PrunedAfter(metric), false) => {
+                match metric {
+                    AcMetric::DcGainDb => self.dc_gain += 1,
+                    AcMetric::Bandwidth3DbHz => self.bandwidth_3db += 1,
+                    AcMetric::UnityGainHz => self.unity_gain += 1,
+                    AcMetric::PhaseMarginDeg => self.phase_margin += 1,
+                }
+                Ok(false)
+            }
+            (AcCompletion::Complete, false) => Err(io::Error::other(
+                "AC analysis completed despite failing one or more targets",
+            )),
+            (AcCompletion::PrunedAfter(metric), true) => Err(io::Error::other(format!(
+                "AC analysis pruned after {} despite passing all evaluated targets",
+                metric.label()
+            ))),
+        }
+    }
+
+    const fn total(&self) -> usize {
+        self.dc_gain + self.bandwidth_3db + self.unity_gain + self.phase_margin
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -195,6 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::with_capacity(compatible_pairs);
     let stage_start = Instant::now();
     let mut frequency_evaluations = 0;
+    let mut ac_rejections = AcRejectionCounts::default();
     for selection in candidate_pairs {
         let diff_pair = &diff_pair_candidates[selection.left_index];
         let current_mirror = &current_mirror_candidates[selection.right_index];
@@ -228,9 +278,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         })?;
         frequency_evaluations += outcome.frequency_evaluations;
-        results.push(OtaAcResult { selection, outcome });
+        if ac_rejections.record(outcome.completion, outcome.targets.passed())? {
+            results.push(OtaAcResult { selection, outcome });
+        }
     }
     let ac_evaluation = stage_start.elapsed();
+    debug_assert_eq!(compatible_pairs, results.len() + ac_rejections.total());
 
     print_results(
         &results,
@@ -243,6 +296,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Rejected by shared VOUT: {}",
         possible_pairs - compatible_pairs
     );
+    println!("Rejected by DC gain: {}", ac_rejections.dc_gain);
+    println!(
+        "Rejected by 3 dB bandwidth: {}",
+        ac_rejections.bandwidth_3db
+    );
+    println!("Rejected by UGF: {}", ac_rejections.unity_gain);
+    println!("Rejected by phase margin: {}", ac_rejections.phase_margin);
+    println!("Accepted candidates: {}", results.len());
     println!("Testbench preparation took: {testbench_preparation:?}");
     println!("AC evaluation took: {ac_evaluation:?}");
     println!("Frequency evaluations: {frequency_evaluations}");
@@ -453,14 +514,15 @@ mod tests {
     use shapeic_core::exploration::candidate::{CandidatePoint, CandidateSet};
 
     use super::{
-        ANALYSIS_POLICY, CURRENT_MIRROR_GM_COLUMN, CURRENT_MIRROR_INSTANCE,
+        ANALYSIS_POLICY, AcRejectionCounts, CURRENT_MIRROR_GM_COLUMN, CURRENT_MIRROR_INSTANCE,
         CURRENT_MIRROR_LENGTH_COLUMN, CURRENT_MIRROR_MOS_CONNECTIONS, CURRENT_MIRROR_RO_COLUMN,
         CURRENT_MIRROR_VOUT_COLUMN, CURRENT_MIRROR_WIDTH_COLUMN, DIFF_PAIR_GM_COLUMN,
         DIFF_PAIR_INSTANCE, DIFF_PAIR_LENGTH_COLUMN, DIFF_PAIR_MOS_CONNECTIONS,
-        DIFF_PAIR_RO_COLUMN, DIFF_PAIR_VOUT_COLUMN, DIFF_PAIR_WIDTH_COLUMN, adaptive_ac_config,
+        DIFF_PAIR_RO_COLUMN, DIFF_PAIR_VOUT_COLUMN, DIFF_PAIR_WIDTH_COLUMN, MIN_BANDWIDTH_3DB_HZ,
+        MIN_DC_GAIN_DB, MIN_PHASE_MARGIN_DEG, MIN_UNITY_GAIN_HZ, adaptive_ac_config,
         ota_candidate_pairs, primitive_candidates, small_signal_param_name,
     };
-    use shapeic_core::analysis::AcMetric;
+    use shapeic_core::analysis::{AcCompletion, AcMetric, AnalysisMode, AnalysisTargets};
 
     const INTRINSIC: [f64; 9] = [
         10.0e-15, 2.0e-15, 3.0e-15, 1.0e-15, 8.0e-15, 2.0e-15, 1.5e-15, 2.5e-15, 7.0e-15,
@@ -658,6 +720,53 @@ mod tests {
         ] {
             assert!(ANALYSIS_POLICY.metrics.contains(metric));
         }
+        assert_eq!(ANALYSIS_POLICY.mode, AnalysisMode::Prune);
+        assert_eq!(
+            ANALYSIS_POLICY.targets,
+            AnalysisTargets {
+                min_dc_gain_db: Some(MIN_DC_GAIN_DB),
+                min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
+                min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
+                min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
+            }
+        );
+        ANALYSIS_POLICY.validate().unwrap();
         adaptive_ac_config().validate().unwrap();
+    }
+
+    #[test]
+    fn classifies_sequential_ac_rejections_and_preserves_count_conservation() {
+        let mut counts = AcRejectionCounts::default();
+        let mut accepted = 0;
+
+        for completion in [
+            AcCompletion::Complete,
+            AcCompletion::PrunedAfter(AcMetric::DcGainDb),
+            AcCompletion::PrunedAfter(AcMetric::Bandwidth3DbHz),
+            AcCompletion::PrunedAfter(AcMetric::UnityGainHz),
+            AcCompletion::PrunedAfter(AcMetric::PhaseMarginDeg),
+        ] {
+            let passed = completion == AcCompletion::Complete;
+            if counts.record(completion, passed).unwrap() {
+                accepted += 1;
+            }
+        }
+
+        assert_eq!(
+            counts,
+            AcRejectionCounts {
+                dc_gain: 1,
+                bandwidth_3db: 1,
+                unity_gain: 1,
+                phase_margin: 1,
+            }
+        );
+        assert_eq!(accepted + counts.total(), 5);
+        assert!(counts.record(AcCompletion::Complete, false).is_err());
+        assert!(
+            counts
+                .record(AcCompletion::PrunedAfter(AcMetric::DcGainDb), true)
+                .is_err()
+        );
     }
 }
