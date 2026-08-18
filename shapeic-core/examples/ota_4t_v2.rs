@@ -20,7 +20,9 @@ use shapeic_core::netlist::names::small_signal_param_name;
 use shapeic_core::primitive::build::{
     PrimitiveBuildInput, PrimitiveBuildValue, build_candidate_set_for_primitive,
 };
-use shapeic_core::testbench::{AcAnalysis, PreparedAcTestbench, TransferFunction};
+use shapeic_core::testbench::{
+    AcAnalysis, PreparedAcTestbench, TransferFunction, TransferPolarity,
+};
 use shapeic_core::utils::linspace;
 use shapeic_lut::{LookupTable, MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_mna::numeric::NumericMnaSystem;
@@ -155,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let stage_start = Instant::now();
     let analysis = AcAnalysis::new(
-        TransferFunction::new("VINP", "VOUT"),
+        ota_transfer_function(),
         adaptive_ac_config(),
         ANALYSIS_POLICY,
     );
@@ -310,6 +312,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let total = total_start.elapsed();
     println!("Total time: {total:?}");
     Ok(())
+}
+
+fn ota_transfer_function() -> TransferFunction {
+    TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Negative)
 }
 
 fn adaptive_ac_config() -> AdaptiveAcConfig {
@@ -520,9 +526,10 @@ mod tests {
         DIFF_PAIR_INSTANCE, DIFF_PAIR_LENGTH_COLUMN, DIFF_PAIR_MOS_CONNECTIONS,
         DIFF_PAIR_RO_COLUMN, DIFF_PAIR_VOUT_COLUMN, DIFF_PAIR_WIDTH_COLUMN, MIN_BANDWIDTH_3DB_HZ,
         MIN_DC_GAIN_DB, MIN_PHASE_MARGIN_DEG, MIN_UNITY_GAIN_HZ, adaptive_ac_config,
-        ota_candidate_pairs, primitive_candidates, small_signal_param_name,
+        ota_candidate_pairs, ota_transfer_function, primitive_candidates, small_signal_param_name,
     };
     use shapeic_core::analysis::{AcCompletion, AcMetric, AnalysisMode, AnalysisTargets};
+    use shapeic_core::testbench::TransferPolarity;
 
     const INTRINSIC: [f64; 9] = [
         10.0e-15, 2.0e-15, 3.0e-15, 1.0e-15, 8.0e-15, 2.0e-15, 1.5e-15, 2.5e-15, 7.0e-15,
@@ -732,6 +739,15 @@ mod tests {
         );
         ANALYSIS_POLICY.validate().unwrap();
         adaptive_ac_config().validate().unwrap();
+    }
+
+    #[test]
+    fn configures_the_inverting_ota_as_a_negative_transfer() {
+        let transfer = ota_transfer_function();
+
+        assert_eq!(transfer.input_node, "VINP");
+        assert_eq!(transfer.output_node, "VOUT");
+        assert_eq!(transfer.polarity, TransferPolarity::Negative);
     }
 
     #[test]

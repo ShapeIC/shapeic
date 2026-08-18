@@ -18,6 +18,25 @@ use crate::analysis::{
     AdaptiveAcConfig, AdaptiveAcError, AdaptiveAcOutcome, AdaptiveAcPolicy, analyze_adaptive_ac,
 };
 
+/// Sign applied to a node-to-node voltage transfer before AC metric extraction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransferPolarity {
+    /// Evaluates `V(output_node) / V(input_node)`.
+    #[default]
+    Positive,
+    /// Evaluates `-V(output_node) / V(input_node)`.
+    Negative,
+}
+
+impl TransferPolarity {
+    fn apply(self, response: Complex64) -> Complex64 {
+        match self {
+            Self::Positive => response,
+            Self::Negative => -response,
+        }
+    }
+}
+
 /// A single-ended node-to-node voltage transfer function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferFunction {
@@ -25,6 +44,8 @@ pub struct TransferFunction {
     pub input_node: String,
     /// Output voltage node, measured relative to ground.
     pub output_node: String,
+    /// Sign applied to the solved node transfer before AC metric extraction.
+    pub polarity: TransferPolarity,
 }
 
 impl TransferFunction {
@@ -33,7 +54,14 @@ impl TransferFunction {
         Self {
             input_node: input_node.into(),
             output_node: output_node.into(),
+            polarity: TransferPolarity::Positive,
         }
+    }
+
+    /// Selects the sign applied to `V(output_node) / V(input_node)`.
+    pub fn with_polarity(mut self, polarity: TransferPolarity) -> Self {
+        self.polarity = polarity;
+        self
     }
 }
 
@@ -156,7 +184,7 @@ impl AcTestbench {
         &self.analysis
     }
 
-    /// Executes the selected adaptive AC metrics for `Vout / Vin`.
+    /// Executes the selected adaptive AC metrics for the configured transfer.
     pub fn analyze(
         &self,
     ) -> Result<AdaptiveAcOutcome, AdaptiveAcError<AcTestbenchEvaluationError>> {
@@ -169,7 +197,7 @@ impl AcTestbench {
                 .solve_transfer(frequency_hz, &transfer.input_node, &transfer.output_node)
                 .map_err(AcTestbenchEvaluationError::NumericMna)?
             {
-                Some(response) => Ok(response),
+                Some(response) => Ok(transfer.polarity.apply(response)),
                 None if frequency_hz == 0.0 => Ok(Complex64::new(f64::NAN, f64::NAN)),
                 None => Err(AcTestbenchEvaluationError::SingularSystem),
             },
@@ -239,14 +267,17 @@ impl Error for AcTestbenchEvaluationError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::convert::Infallible;
     use std::f64::consts::PI;
     use std::path::Path;
 
     use ndarray::array;
+    use num_complex::Complex64;
 
-    use super::{AcAnalysis, PreparedAcTestbench, TransferFunction};
+    use super::{AcAnalysis, PreparedAcTestbench, TransferFunction, TransferPolarity};
     use crate::analysis::{
         AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
+        analyze_adaptive_ac,
     };
 
     const CONFIG: AdaptiveAcConfig = AdaptiveAcConfig {
@@ -268,6 +299,42 @@ mod tests {
                 metrics,
             },
         )
+    }
+
+    #[test]
+    fn applies_transfer_polarity_without_changing_magnitude() {
+        let response = Complex64::new(3.0, -4.0);
+        let positive = TransferPolarity::Positive.apply(response);
+        let negative = TransferPolarity::Negative.apply(response);
+
+        assert_eq!(positive, response);
+        assert_eq!(negative, -response);
+        assert_eq!(positive.norm(), negative.norm());
+        assert!(((negative / positive).arg().abs() - PI).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn negative_polarity_normalizes_an_inverting_one_pole_loop_response() {
+        let dc_gain = 10.0;
+        let pole_hz = 1.0e3;
+        let outcome = analyze_adaptive_ac(
+            CONFIG,
+            AdaptiveAcPolicy {
+                mode: AnalysisMode::FullInsight,
+                targets: AnalysisTargets::NONE,
+                metrics: AcMetricSet::ALL,
+            },
+            |frequency_hz| {
+                let loop_response = dc_gain / Complex64::new(1.0, frequency_hz / pole_hz);
+                let inverting_amplifier_response = -loop_response;
+                Ok::<_, Infallible>(TransferPolarity::Negative.apply(inverting_amplifier_response))
+            },
+        )
+        .unwrap();
+
+        let expected_phase_margin = 180.0 - (99.0_f64.sqrt()).atan().to_degrees();
+        assert!((outcome.metrics.dc_gain_db.unwrap() - 20.0).abs() < 1.0e-12);
+        assert!((outcome.metrics.phase_margin_deg.unwrap() - expected_phase_margin).abs() < 0.5);
     }
 
     #[test]
