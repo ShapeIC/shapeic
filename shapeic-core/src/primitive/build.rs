@@ -946,4 +946,79 @@ mod tests {
                 if lut == "m1" && reason.contains("cdg")
         ));
     }
+
+    #[test]
+    fn analog_builds_publish_total_capacitances_for_both_branches() {
+        for json in [
+            include_str!("../../../analoglib/primitives/simplediffpair/build.json"),
+            include_str!("../../../analoglib/primitives/simplecurrentmirror/build.json"),
+        ] {
+            let spec: PrimitiveBuildSpec =
+                serde_json::from_str(json).expect("primitive build spec should deserialize");
+            let mut row = HashMap::from([
+                ("id_m1".to_owned(), 10.0e-6),
+                ("lut.m1.length".to_owned(), 0.4e-6),
+                ("lut.m1.total_width".to_owned(), 2.25e-6),
+                ("lut.m1.gmid".to_owned(), 12.0),
+                ("lut.m1.gdsid".to_owned(), 0.02),
+                ("lut.m1.nf".to_owned(), 3.0),
+                ("lut.m1.cgsol_total".to_owned(), 10.0e-15),
+                ("lut.m1.cgdol_total".to_owned(), 11.0e-15),
+                ("lut.m1.cjs_total".to_owned(), 12.0e-15),
+                ("lut.m1.cjd_total".to_owned(), 13.0e-15),
+            ]);
+            for (index, parameter) in MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .enumerate()
+            {
+                row.insert(
+                    format!("lut.m1.{parameter}"),
+                    (index as f64 + 1.0) * 1.0e-15,
+                );
+            }
+
+            evaluate_expressions(std::slice::from_mut(&mut row), &spec.columns)
+                .expect("capacitance columns should evaluate");
+
+            assert_eq!(row["width__m1"], 2.25e-6);
+            assert_eq!(spec.columns.len(), 36);
+            for (index, parameter) in MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .enumerate()
+            {
+                let expected = (index as f64 + 1.0) * 1.0e-15 * 3.0;
+                assert_eq!(row[&format!("{parameter}__m1")], expected);
+                assert_eq!(row[&format!("{parameter}__m2")], expected);
+            }
+            for (parameter, expected) in [
+                ("cgsol", 10.0e-15),
+                ("cgdol", 11.0e-15),
+                ("cjs", 12.0e-15),
+                ("cjd", 13.0e-15),
+            ] {
+                assert_eq!(row[&format!("{parameter}__m1")], expected);
+                assert_eq!(row[&format!("{parameter}__m2")], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn capacitance_columns_map_to_branch_specific_candidate_names() {
+        assert_eq!(
+            primitive_build_candidate_column_name("xdp", "cgg__m1"),
+            "cgg__xdp__m1"
+        );
+        assert_eq!(
+            primitive_build_candidate_column_name("xdp", "cgg__m2"),
+            "cgg__xdp__m2"
+        );
+        assert_eq!(
+            primitive_build_candidate_column_name("xcm", "cgsol__m1"),
+            "cgsol__xcm__m1"
+        );
+        assert_eq!(
+            primitive_build_candidate_column_name("xcm", "cgsol__m2"),
+            "cgsol__xcm__m2"
+        );
+    }
 }
