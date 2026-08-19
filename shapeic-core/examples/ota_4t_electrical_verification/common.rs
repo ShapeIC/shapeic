@@ -9,7 +9,7 @@ use super::analysis;
 use super::analysis::SizingSummary;
 
 pub const TAIL_CURRENT: f64 = 20.0e-6;
-pub const VOUT_DC: f64 = 1.0;
+pub const VOUT_DC: f64 = 1.1;
 pub const VDD_DC: f64 = 1.5;
 pub const VG_DC: f64 = 0.9;
 pub const OUTPUT_BIAS_INDUCTANCE_H: f64 = 1.0e9;

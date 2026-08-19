@@ -9,7 +9,7 @@
   "derived": [
     { "name": "id_m1", "expr": "current / 2" },
     { "name": "vds_m1", "expr": "VOUTP - VDD" },
-    { "name": "vgs_m1", "expr": "VINP - VDD" }
+    { "name": "vgs_m1", "expr": "VOUTP - VDD" }
   ],
   "lut": [
     {

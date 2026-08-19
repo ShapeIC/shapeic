@@ -19,8 +19,8 @@ use shapeic_lut::verification::{VerificationEngine, VerificationInput};
 use shapeic_lut::{LookupTable, OperatingPoint};
 
 const DIFF_LENGTH: f64 = 0.8e-6;
-const MIRROR_LENGTH: f64 = 0.4e-6;
-const SOURCE_VOLTAGE: f64 = 0.65;
+const MIRROR_LENGTH: f64 = 1.6e-6;
+const SOURCE_VOLTAGE: f64 = 0.7122;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (nmos_path, pmos_path) = lut_paths()?;
