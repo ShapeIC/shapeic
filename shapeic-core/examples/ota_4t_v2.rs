@@ -27,6 +27,10 @@ use shapeic_core::utils::linspace;
 use shapeic_lut::{LookupTable, MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_mna::numeric::NumericMnaSystem;
 
+use shapeic_core::exploration::filter::{
+      CandidateFilter, retain_candidate_set,
+  };
+
 const TAIL_CURRENT: f64 = 20.0e-6;
 const VOUT: f64 = 1.0;
 const VOUT_START: f64 = 0.9;
@@ -69,6 +73,8 @@ const CURRENT_MIRROR_MOS_CONNECTIONS: [[(&str, &str); 4]; 2] = [
     [("G", "N1"), ("D", "VOUT"), ("S", "VDD"), ("B", "VDD")],
     [("G", "N1"), ("D", "N1"), ("S", "VDD"), ("B", "VDD")],
 ];
+const MAX_DIFF_PAIR_WIDTH: f64 = 100.0e-6;
+const MAX_CURRENT_MIRROR_WIDTH: f64 = 100.0e-6;
 
 #[derive(Clone, Debug, PartialEq)]
 struct PrimitiveCandidate {
@@ -222,20 +228,34 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     //Generate the Candidates
     let stage_start = Instant::now();
-    let diffpair_candidate_set =
+    let mut diffpair_candidate_set =
         build_candidate_set_for_primitive(nmos, diffpair, "xdp", diffpair_input)
             .map_err(|error| format!("{error:?}"))?;
     let diffpair_candidate_set_time = stage_start.elapsed();
+    let diffpair_filter_report = retain_candidate_set(
+        &mut diffpair_candidate_set,
+        &[CandidateFilter::at_most(
+            DIFF_PAIR_WIDTH_COLUMN,
+            MAX_DIFF_PAIR_WIDTH,
+        )?],
+    )?;
     println!(
         "Diffpair candidate set took: {:?}",
         diffpair_candidate_set_time
     );
 
     let stage_start = Instant::now();
-    let currentmirror_candidate_set =
+    let mut currentmirror_candidate_set =
         build_candidate_set_for_primitive(pmos, currentmirror, "xcm", currentmirror_input)
             .map_err(|error| format!("{error:?}"))?;
     let currentmirror_candidate_set_time = stage_start.elapsed();
+    let currentmirror_filter_report = retain_candidate_set(
+        &mut currentmirror_candidate_set,
+        &[CandidateFilter::at_most(
+            CURRENT_MIRROR_WIDTH_COLUMN,
+            MAX_CURRENT_MIRROR_WIDTH,
+        )?],
+    )?;
     println!(
         "Current Mirror candidate set took: {:?}",
         currentmirror_candidate_set_time
@@ -313,6 +333,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         &diffpair_candidate_set,
         &currentmirror_candidate_set,
     )?;
+    println!("Diff-pair candidates rejected by width: {}",
+        diffpair_filter_report.rejected_count()
+    );
+    println!("Current-mirror candidates rejected by width: {}",
+        currentmirror_filter_report.rejected_count()
+    );
     println!("Candidate pairs: {possible_pairs}");
     println!("Compatible candidate pairs: {compatible_pairs}");
     println!(

@@ -361,7 +361,9 @@ mod tests {
         CandidateFilter, CandidateFilterError, CandidateFilterReport, InvalidCandidateFilter,
         retain_candidate_set,
     };
-    use crate::exploration::candidate::{CandidatePoint, CandidateSet};
+    use crate::exploration::candidate::{
+        CandidateEquality, CandidatePairJoin, CandidatePairSelection, CandidatePoint, CandidateSet,
+    };
 
     fn candidate(width: f64, length: f64) -> CandidatePoint {
         CandidatePoint::new(vec![
@@ -597,5 +599,71 @@ mod tests {
             })
         );
         assert_eq!(candidates, original);
+    }
+
+    #[test]
+    fn filtered_candidate_indices_are_used_by_the_indexed_join() {
+        let point = |voltage_column: &str, voltage: f64, width: f64| {
+            CandidatePoint::new(vec![
+                (voltage_column.to_string(), voltage),
+                ("width".to_string(), width),
+            ])
+        };
+        let mut left = CandidateSet::new(
+            "xdp",
+            vec![
+                point("xdp.voutp", 0.8, 12.0),
+                point("xdp.voutp", 0.8, 5.0),
+                point("xdp.voutp", 0.9, 6.0),
+                point("xdp.voutp", 1.0, 15.0),
+            ],
+        );
+        let mut right = CandidateSet::new(
+            "xcm",
+            vec![
+                point("xcm.voutp", 0.7, 4.0),
+                point("xcm.voutp", 0.8, 11.0),
+                point("xcm.voutp", 0.8, 8.0),
+                point("xcm.voutp", 0.9, 9.0),
+            ],
+        );
+
+        let maximum_width = CandidateFilter::at_most("width", 10.0).unwrap();
+        assert_eq!(
+            retain_candidate_set(&mut left, std::slice::from_ref(&maximum_width))
+                .unwrap()
+                .retained_count(),
+            2
+        );
+        assert_eq!(
+            retain_candidate_set(&mut right, &[maximum_width])
+                .unwrap()
+                .retained_count(),
+            3
+        );
+
+        let selections = CandidatePairJoin::new(
+            &left,
+            &right,
+            &[CandidateEquality::new("xdp.voutp", "xcm.voutp")],
+        )
+        .unwrap()
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            selections,
+            vec![
+                CandidatePairSelection::new(0, 1),
+                CandidatePairSelection::new(1, 2),
+            ]
+        );
+        for selection in selections {
+            assert_eq!(
+                left.points[selection.left_index].get("xdp.voutp"),
+                right.points[selection.right_index].get("xcm.voutp")
+            );
+            assert!(left.points[selection.left_index].get("width").unwrap() <= 10.0);
+            assert!(right.points[selection.right_index].get("width").unwrap() <= 10.0);
+        }
     }
 }
