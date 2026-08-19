@@ -60,11 +60,14 @@ const DIFF_PAIR_RO_COLUMN: &str = "ro__xdp__m1";
 const CURRENT_MIRROR_GM_COLUMN: &str = "gm__xcm__m1";
 const CURRENT_MIRROR_RO_COLUMN: &str = "ro__xcm__m1";
 const DIFF_PAIR_VOUT_COLUMN: &str = "xdp.voutp";
+const DIFF_PAIR_VBIAS_COLUMN: &str = "xdp.vtail";
 const CURRENT_MIRROR_VOUT_COLUMN: &str = "xcm.voutp";
 const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
 const DIFF_PAIR_LENGTH_COLUMN: &str = "length__xdp__m1";
+const DIFF_PAIR_NF_COLUMN: &str = "nf__xdp__m1";
 const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
 const CURRENT_MIRROR_LENGTH_COLUMN: &str = "length__xcm__m1";
+const CURRENT_MIRROR_NF_COLUMN: &str = "nf__xcm__m1";
 const DIFF_PAIR_MOS_CONNECTIONS: [[(&str, &str); 4]; 2] = [
     [("G", "VINP"), ("D", "VOUT"), ("S", "IBIAS"), ("B", "VSS")],
     [("G", "VINN"), ("D", "N1"), ("S", "IBIAS"), ("B", "VSS")],
@@ -473,14 +476,17 @@ fn print_results(
 ) -> Result<(), io::Error> {
     println!("\nOTA AC results");
     println!(
-        "{:<8} {:<8} {:>9} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12} {:>12} {:>10}",
+        "{:<8} {:<8} {:>9} {:>9} {:>10} {:>10} {:>6} {:>10} {:>10} {:>6} {:>12} {:>12} {:>12} {:>10}",
         "dp_idx",
         "cm_idx",
         "vout_v",
+        "vbias_v",
         "w_dp_um",
         "l_dp_um",
+        "nf_dp",
         "w_cm_um",
         "l_cm_um",
+        "nf_cm",
         "dc_gain_db",
         "f3db_hz",
         "ugf_hz",
@@ -509,14 +515,17 @@ fn print_results(
         let vout = diff_value(DIFF_PAIR_VOUT_COLUMN)?;
         debug_assert_eq!(vout, mirror_value(CURRENT_MIRROR_VOUT_COLUMN)?);
         println!(
-            "{:<8} {:<8} {:>9.4} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>12.6e} {:>12.6e} {:>10.6}",
+            "{:<8} {:<8} {:>9.4} {:>9.4} {:>10.4} {:>10.4} {:>6.0} {:>10.4} {:>10.4} {:>6.0} {:>12.6} {:>12.6e} {:>12.6e} {:>10.6}",
             result.selection.left_index,
             result.selection.right_index,
             vout,
+            diff_value(DIFF_PAIR_VBIAS_COLUMN)?,
             diff_value(DIFF_PAIR_WIDTH_COLUMN)? * 1.0e6,
             diff_value(DIFF_PAIR_LENGTH_COLUMN)? * 1.0e6,
+            diff_value(DIFF_PAIR_NF_COLUMN)?,
             mirror_value(CURRENT_MIRROR_WIDTH_COLUMN)? * 1.0e6,
             mirror_value(CURRENT_MIRROR_LENGTH_COLUMN)? * 1.0e6,
+            mirror_value(CURRENT_MIRROR_NF_COLUMN)?,
             metrics.dc_gain_db.unwrap_or(f64::NAN),
             metrics.bandwidth_3db_hz.unwrap_or(f64::NAN),
             metrics.unity_gain_hz.unwrap_or(f64::NAN),

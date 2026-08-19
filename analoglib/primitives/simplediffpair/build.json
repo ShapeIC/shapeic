@@ -28,6 +28,8 @@
     { "name": "length__m2", "expr": "length__m1" },
     { "name": "width__m1", "expr": "lut.m1.total_width" },
     { "name": "width__m2", "expr": "width__m1" },
+    { "name": "nf__m1", "expr": "lut.m1.nf" },
+    { "name": "nf__m2", "expr": "nf__m1" },
     { "name": "gm__m1", "expr": "lut.m1.gmid * (id_m1)" },
     { "name": "gm__m2", "expr": "gm__m1" },
     { "name": "gds__m1", "expr": "lut.m1.gdsid * (id_m1)" },
