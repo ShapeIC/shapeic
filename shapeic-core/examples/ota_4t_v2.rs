@@ -69,16 +69,6 @@ const CURRENT_MIRROR_MOS_CONNECTIONS: [[(&str, &str); 4]; 2] = [
     [("G", "N1"), ("D", "VOUT"), ("S", "VDD"), ("B", "VDD")],
     [("G", "N1"), ("D", "N1"), ("S", "VDD"), ("B", "VDD")],
 ];
-const ANALYSIS_POLICY: AdaptiveAcPolicy = AdaptiveAcPolicy {
-    mode: AnalysisMode::Prune,
-    targets: AnalysisTargets {
-        min_dc_gain_db: Some(MIN_DC_GAIN_DB),
-        min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
-        min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
-        min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
-    },
-    metrics: AcMetricSet::ALL,
-};
 
 #[derive(Clone, Debug, PartialEq)]
 struct PrimitiveCandidate {
@@ -133,12 +123,15 @@ impl AcRejectionCounts {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+    //Some paths definitions
     let total_start = Instant::now();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let testbench_path = manifest.join("examples/ota_4t/ota_4t.spice");
     let primitives_dir = manifest.join("../analoglib/primitives/");
     let (nmos_path, pmos_path, _physical_path) = lut_paths()?;
 
+    //Load the LUTs and the models
     let stage_start = Instant::now();
     let nmos_table = LookupTable::open(nmos_path)?;
     let pmos_table = LookupTable::open(pmos_path)?;
@@ -147,6 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nmos = nmos_table.model(NMOS_MODEL)?;
     let pmos = pmos_table.model(PMOS_MODEL)?;
 
+    //Load the primitives catalog
     let catalog = load_primitive_catalog(&primitives_dir).map_err(|error| format!("{error:?}"))?;
     for primitive in &catalog.list() {
         println!(
@@ -155,12 +149,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    //Configure de AC analysis
     let stage_start = Instant::now();
+    let adaptive_ac_config = AdaptiveAcConfig {
+        min_frequency_hz: AC_MIN_HZ,
+        max_frequency_hz: AC_MAX_HZ,
+        coarse_points_per_decade: AC_COARSE_POINTS_PER_DECADE,
+        crossing_relative_tolerance: AC_CROSSING_RELATIVE_TOLERANCE,
+        max_refinement_steps: AC_MAX_REFINEMENT_STEPS,
+        retain_samples: false,
+    };
+    let adaptive_ac_policy = AdaptiveAcPolicy {
+    mode: AnalysisMode::Prune,
+    targets: AnalysisTargets {
+        min_dc_gain_db: Some(MIN_DC_GAIN_DB),
+        min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
+        min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
+        min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
+    },
+    metrics: AcMetricSet::ALL,
+    };
     let analysis = AcAnalysis::new(
-        ota_transfer_function(),
-        adaptive_ac_config(),
-        ANALYSIS_POLICY,
+        TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Negative),
+        adaptive_ac_config,
+        adaptive_ac_policy,
     );
+
+    //Define the Testbench
     let mut testbench =
         PreparedAcTestbench::from_spice_file(&testbench_path, &MNA_PARAMETER_ORDER, analysis)
             .map_err(|error| {
@@ -168,6 +183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             })?;
     let testbench_preparation = stage_start.elapsed();
 
+    //Define the primitives
     let diffpair = catalog
         .get("simplediffpair")
         .ok_or_else(|| "missing simplediffpair primitive".to_string())?;
@@ -175,6 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .get("simplecurrentmirror")
         .ok_or_else(|| "missing simplecurrentmirror primitive".to_string())?;
 
+    //Define the primtiives input
     let diffpair_input = PrimitiveBuildInput::new(HashMap::from([
         (
             "current".to_string(),
@@ -202,6 +219,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         ("VDD".to_string(), PrimitiveBuildValue::Scalar(VDD)),
     ]));
+
+    //Generate the Candidates
     let stage_start = Instant::now();
     let diffpair_candidate_set =
         build_candidate_set_for_primitive(nmos, diffpair, "xdp", diffpair_input)
@@ -243,6 +262,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         ota_candidate_pairs(&diffpair_candidate_set, &currentmirror_candidate_set)
             .map_err(|error| io::Error::other(format!("could not join OTA candidates: {error}")))?;
     let compatible_pairs = candidate_pairs.len();
+
+    //Evaluation
     let mut results = Vec::with_capacity(compatible_pairs);
     let stage_start = Instant::now();
     let mut frequency_evaluations = 0;
@@ -312,21 +333,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let total = total_start.elapsed();
     println!("Total time: {total:?}");
     Ok(())
-}
-
-fn ota_transfer_function() -> TransferFunction {
-    TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Negative)
-}
-
-fn adaptive_ac_config() -> AdaptiveAcConfig {
-    AdaptiveAcConfig {
-        min_frequency_hz: AC_MIN_HZ,
-        max_frequency_hz: AC_MAX_HZ,
-        coarse_points_per_decade: AC_COARSE_POINTS_PER_DECADE,
-        crossing_relative_tolerance: AC_CROSSING_RELATIVE_TOLERANCE,
-        max_refinement_steps: AC_MAX_REFINEMENT_STEPS,
-        retain_samples: false,
-    }
 }
 
 fn primitive_candidates(
