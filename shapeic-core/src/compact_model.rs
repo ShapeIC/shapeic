@@ -1,10 +1,14 @@
 //! Compact-model data and numerical MNA stamping utilities.
 
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
 
 use ndarray::Array2;
 use shapeic_lut::{LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_mna::numeric::{NumericMnaError, NumericMnaSystem};
+
+use crate::macro_model::ResolvedPrimitiveBranch;
 
 /// Complete intrinsic and extrinsic capacitance data for one sized MOS device.
 ///
@@ -73,6 +77,89 @@ impl MosDeviceCapacitances {
     }
 }
 
+/// Stamps complete MOS capacitances using resolved hierarchical branch nodes.
+///
+/// `capacitances` must follow `branches` exactly. The count is checked before
+/// the MNA system is modified.
+pub fn stamp_resolved_mos_capacitances(
+    system: &mut NumericMnaSystem,
+    branches: &[ResolvedPrimitiveBranch],
+    capacitances: &[MosDeviceCapacitances],
+) -> Result<(), ResolvedCapacitanceStampError> {
+    if branches.len() != capacitances.len() {
+        return Err(ResolvedCapacitanceStampError::CountMismatch {
+            branches: branches.len(),
+            capacitances: capacitances.len(),
+        });
+    }
+
+    for (branch, capacitances) in branches.iter().zip(capacitances) {
+        capacitances
+            .stamp(
+                system,
+                [
+                    ("G", branch.gate_node()),
+                    ("D", branch.drain_node()),
+                    ("S", branch.source_node()),
+                    ("B", branch.bulk_node()),
+                ],
+            )
+            .map_err(|source| ResolvedCapacitanceStampError::Branch {
+                instance_path: branch.instance_path().to_owned(),
+                branch: branch.branch_name().to_owned(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+/// Errors produced while stamping capacitances for resolved primitive branches.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvedCapacitanceStampError {
+    /// Branch topology and capacitance values have different lengths.
+    CountMismatch {
+        branches: usize,
+        capacitances: usize,
+    },
+    /// A branch could not be stamped into the numerical MNA system.
+    Branch {
+        instance_path: String,
+        branch: String,
+        source: NumericMnaError,
+    },
+}
+
+impl fmt::Display for ResolvedCapacitanceStampError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CountMismatch {
+                branches,
+                capacitances,
+            } => write!(
+                formatter,
+                "resolved topology contains {branches} branches but {capacitances} capacitance values were provided"
+            ),
+            Self::Branch {
+                instance_path,
+                branch,
+                source,
+            } => write!(
+                formatter,
+                "could not stamp capacitances for '{instance_path}.{branch}': {source}"
+            ),
+        }
+    }
+}
+
+impl Error for ResolvedCapacitanceStampError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Branch { source, .. } => Some(source),
+            Self::CountMismatch { .. } => None,
+        }
+    }
+}
+
 fn add_passive_capacitance(
     matrix: &mut [[f64; 4]; 4],
     positive: usize,
@@ -106,6 +193,18 @@ mod tests {
     fn capacitances() -> MosDeviceCapacitances {
         MosDeviceCapacitances::from_total_parameters(&INTRINSIC, EXTRINSIC)
             .expect("valid total capacitances")
+    }
+
+    fn branch(instance: &str, branch: &str, nodes: [&str; 4]) -> ResolvedPrimitiveBranch {
+        ResolvedPrimitiveBranch::new(
+            instance.to_owned(),
+            "mos_primitive".to_owned(),
+            branch.to_owned(),
+            nodes[0].to_owned(),
+            nodes[1].to_owned(),
+            nodes[2].to_owned(),
+            nodes[3].to_owned(),
+        )
     }
 
     #[test]
@@ -146,7 +245,8 @@ mod tests {
     #[test]
     fn stamps_only_the_capacitance_part_of_the_numeric_mna() {
         let mna = mna_from_spice(
-            "Vg G_NODE VSS 0\nVd D_NODE VSS 0\nVs S_NODE VSS 0\nVb B_NODE VSS 0\n.end",
+            "Vg G_NODE VSS 0\nVd D_NODE VSS 0\nVs S_NODE VSS 0\nVb B_NODE VSS 0\n\
+             Vg2 G2 VSS 0\nVd2 D2 VSS 0\nVs2 S2 VSS 0\nVb2 B2 VSS 0\n.end",
         )
         .expect("four-terminal test circuit should parse");
         let node_indices = ["G_NODE", "D_NODE", "S_NODE", "B_NODE"].map(|node| {
@@ -182,5 +282,66 @@ mod tests {
                 );
             }
         }
+
+        let mut resolved_system = prepared.instantiate(&[]).unwrap();
+        let mut expected_system = prepared.instantiate(&[]).unwrap();
+        let branches = [
+            branch("xdp", "m1", ["G_NODE", "D_NODE", "S_NODE", "B_NODE"]),
+            branch("xcm", "m2", ["G2", "D2", "S2", "B2"]),
+        ];
+        let values = [capacitances(), capacitances()];
+
+        stamp_resolved_mos_capacitances(&mut resolved_system, &branches, &values).unwrap();
+        values[0]
+            .stamp(
+                &mut expected_system,
+                [
+                    ("G", "G_NODE"),
+                    ("D", "D_NODE"),
+                    ("S", "S_NODE"),
+                    ("B", "B_NODE"),
+                ],
+            )
+            .unwrap();
+        values[1]
+            .stamp(
+                &mut expected_system,
+                [("G", "G2"), ("D", "D2"), ("S", "S2"), ("B", "B2")],
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolved_system.capacitance_matrix(),
+            expected_system.capacitance_matrix()
+        );
+
+        assert_eq!(
+            stamp_resolved_mos_capacitances(
+                &mut resolved_system,
+                std::slice::from_ref(&branches[0]),
+                &[]
+            ),
+            Err(ResolvedCapacitanceStampError::CountMismatch {
+                branches: 1,
+                capacitances: 0,
+            })
+        );
+        let missing_bulk = branch(
+            "xmissing",
+            "m3",
+            ["G_NODE", "D_NODE", "S_NODE", "MISSING_BULK"],
+        );
+        assert!(matches!(
+            stamp_resolved_mos_capacitances(
+                &mut resolved_system,
+                &[missing_bulk],
+                &[capacitances()]
+            ),
+            Err(ResolvedCapacitanceStampError::Branch {
+                instance_path,
+                branch,
+                source: NumericMnaError::MissingNode(node),
+            }) if instance_path == "xmissing" && branch == "m3" && node == "MISSING_BULK"
+        ));
     }
 }
