@@ -107,6 +107,12 @@ pub enum MacroCandidateCombinationError {
         primitive: String,
         port: String,
     },
+    UnknownMacroInterfacePort {
+        macro_name: String,
+        instance_path: String,
+        referenced_macro: String,
+        port: String,
+    },
     IntraInstanceSharedNet {
         macro_name: String,
         instance_path: String,
@@ -160,6 +166,15 @@ impl fmt::Display for MacroCandidateCombinationError {
             } => write!(
                 formatter,
                 "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' declares port-voltage input '{port}' without a matching circuit connection"
+            ),
+            Self::UnknownMacroInterfacePort {
+                macro_name,
+                instance_path,
+                referenced_macro,
+                port,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance_path}' projected from '{referenced_macro}' exposes interface port '{port}' without a matching circuit connection"
             ),
             Self::IntraInstanceSharedNet {
                 macro_name,
@@ -253,12 +268,36 @@ pub fn plan_macro_candidate_combinations(
                         });
                 }
             }
-            BlockRef::Macro(_) => ensure_instance_kind(
-                macro_,
-                instance_path,
-                MacroExplorationInstanceKind::CompactMacro,
-                instance_candidates.kind(),
-            )?,
+            BlockRef::Macro(referenced_macro) => {
+                ensure_instance_kind(
+                    macro_,
+                    instance_path,
+                    MacroExplorationInstanceKind::CompactMacro,
+                    instance_candidates.kind(),
+                )?;
+                for port in instance_candidates.interface_ports() {
+                    let net = instance.net_for_port(port).ok_or_else(|| {
+                        MacroCandidateCombinationError::UnknownMacroInterfacePort {
+                            macro_name: macro_.name().to_owned(),
+                            instance_path: instance_path.to_owned(),
+                            referenced_macro: referenced_macro.clone(),
+                            port: port.clone(),
+                        }
+                    })?;
+                    ports_by_net
+                        .entry(net.to_owned())
+                        .or_default()
+                        .push(PortVoltageColumn {
+                            set_index,
+                            instance_path: instance_path.to_owned(),
+                            port: port.clone(),
+                            column: candidate_column_name(
+                                instance_path,
+                                &port.to_ascii_lowercase(),
+                            ),
+                        });
+                }
+            }
             BlockRef::Element(_) => {
                 return Err(
                     MacroCandidateCombinationError::CandidateInstanceKindMismatch {
@@ -394,6 +433,7 @@ mod tests {
             kind: MacroExplorationInstanceKind::Primitive,
             candidates: CandidateSet::new(name, points),
             filter_report: CandidateFilterReport::default(),
+            compact_provenance: None,
         }
     }
 

@@ -8,6 +8,7 @@ mod explore;
 mod input;
 mod model;
 mod prepare;
+mod projection;
 mod render;
 mod validation;
 
@@ -36,10 +37,14 @@ pub use input::{
     validate_macro_exploration_input,
 };
 pub use model::{
-    Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole, MacroTestbenchSource,
+    Macro, MacroAcTestbench, MacroCompactOutputBinding, MacroExploration, MacroInterfaceBinding,
+    MacroOutputSource, MacroPort, MacroPortRole, MacroTestbenchSource,
 };
 pub use prepare::{
     MacroTestbenchPrepareError, PreparedMacroAcTestbench, prepare_macro_ac_testbench,
+};
+pub use projection::{
+    MacroCandidateProjection, MacroCandidateProjectionError, MacroOutputResolutionError,
 };
 pub use render::{
     ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode, ResolvedPrimitiveBranch,

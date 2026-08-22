@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use shapeic_lut::DeviceLut;
 
@@ -10,7 +11,7 @@ use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::PrimitiveBuildInput;
 
-use super::Macro;
+use super::{Macro, MacroCandidateProjection, MacroExplorationResult};
 
 /// Build data and local pre-exploration filters for one primitive instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +45,14 @@ impl PrimitiveInstanceExplorationInput {
 pub struct CompactMacroInstanceExplorationInput {
     pub(super) candidates: CandidateSet,
     pub(super) filters: Vec<CandidateFilter>,
+    pub(super) provenance: Option<CompactMacroCandidateProvenance>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CompactMacroCandidateProvenance {
+    pub(super) interface_ports: Vec<String>,
+    pub(super) source_result: Arc<MacroExplorationResult>,
+    pub(super) accepted_indices: Vec<usize>,
 }
 
 impl CompactMacroInstanceExplorationInput {
@@ -52,6 +61,25 @@ impl CompactMacroInstanceExplorationInput {
         Self {
             candidates,
             filters,
+            provenance: None,
+        }
+    }
+
+    /// Creates input from an explored child projection with recursive provenance.
+    pub fn from_projection(
+        projection: MacroCandidateProjection,
+        filters: Vec<CandidateFilter>,
+    ) -> Self {
+        let (candidates, interface_ports, source_result, accepted_indices) =
+            projection.into_parts();
+        Self {
+            candidates,
+            filters,
+            provenance: Some(CompactMacroCandidateProvenance {
+                interface_ports,
+                source_result,
+                accepted_indices,
+            }),
         }
     }
 

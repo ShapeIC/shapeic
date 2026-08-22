@@ -263,8 +263,28 @@ pub fn retain_candidate_set(
     candidates: &mut CandidateSet,
     filters: &[CandidateFilter],
 ) -> Result<CandidateFilterReport, CandidateFilterError> {
+    retain_candidate_set_impl(candidates, filters, None)
+}
+
+pub(crate) fn retain_candidate_set_with_indices(
+    candidates: &mut CandidateSet,
+    filters: &[CandidateFilter],
+) -> Result<(CandidateFilterReport, Vec<usize>), CandidateFilterError> {
+    let mut retained_indices = Vec::with_capacity(candidates.points.len());
+    let report = retain_candidate_set_impl(candidates, filters, Some(&mut retained_indices))?;
+    Ok((report, retained_indices))
+}
+
+fn retain_candidate_set_impl(
+    candidates: &mut CandidateSet,
+    filters: &[CandidateFilter],
+    mut retained_indices: Option<&mut Vec<usize>>,
+) -> Result<CandidateFilterReport, CandidateFilterError> {
     let input_count = candidates.points.len();
     if input_count == 0 || filters.is_empty() {
+        if let Some(indices) = &mut retained_indices {
+            indices.extend(0..input_count);
+        }
         return Ok(CandidateFilterReport {
             input_count,
             retained_count: input_count,
@@ -302,11 +322,17 @@ pub fn retain_candidate_set(
         }
     }
 
+    let mut original_index = 0;
     candidates.points.retain(|point| {
-        filters
+        let accepted = filters
             .iter()
             .zip(&offsets)
-            .all(|(filter, offset)| filter.accepts_value(point.values[*offset].1))
+            .all(|(filter, offset)| filter.accepts_value(point.values[*offset].1));
+        if accepted && let Some(indices) = &mut retained_indices {
+            indices.push(original_index);
+        }
+        original_index += 1;
+        accepted
     });
     Ok(CandidateFilterReport {
         input_count,

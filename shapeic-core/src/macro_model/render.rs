@@ -6,7 +6,9 @@ use std::fmt;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::{BlockRef, CircuitInstance, CircuitValue, LinearElement};
-use crate::netlist::names::{small_signal_element_name, small_signal_param_name};
+use crate::netlist::names::{
+    compact_model_param_name, small_signal_element_name, small_signal_param_name,
+};
 
 use super::{Macro, MacroCatalog, MacroValidationError, validate_macro};
 
@@ -581,7 +583,7 @@ fn scoped_parameter_name(parameter: &str, scope: &[String]) -> String {
     if scope.is_empty() {
         sanitize(parameter)
     } else {
-        format!("{}__{}", sanitize(parameter), sanitized_path(scope))
+        compact_model_param_name(parameter, &sanitized_path(scope))
     }
 }
 
@@ -600,7 +602,10 @@ fn sanitize(value: &str) -> String {
 mod tests {
     use crate::catalog::primitive_catalog::PrimitiveCatalog;
     use crate::circuit::Circuit;
-    use crate::macro_model::{Macro, MacroCatalog, MacroPort, MacroPortRole};
+    use crate::macro_model::{
+        Macro, MacroCatalog, MacroCompactOutputBinding, MacroOutputSource, MacroPort, MacroPortRole,
+    };
+    use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use shapeic_mna::spice2cir::spice2cir_text;
@@ -673,7 +678,15 @@ mod tests {
         } else {
             circuit.resistor("rout", output_net, "VOUT", 1.0)
         };
-        Macro::new(name, ports(), circuit.build(), compact_model())
+        Macro::new(name, ports(), circuit.build(), compact_model()).with_compact_output(
+            MacroCompactOutputBinding::new(
+                "gm_eq",
+                MacroOutputSource::candidate_column(
+                    "xcore",
+                    small_signal_param_name("gm", "xcore", "m1"),
+                ),
+            ),
+        )
     }
 
     #[test]
@@ -735,7 +748,11 @@ mod tests {
                 )
                 .build(),
             compact_model(),
-        );
+        )
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column("xa", compact_model_param_name("gm_eq", "xa")),
+        ));
         let macros = MacroCatalog::from_macros([leaf, parent.clone()]).unwrap();
 
         let rendered =
@@ -804,7 +821,11 @@ mod tests {
                 )
                 .build(),
             compact_model(),
-        );
+        )
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column("xa", compact_model_param_name("gm_eq", "xa")),
+        ));
         let macros = MacroCatalog::from_macros([leaf, parent.clone()]).unwrap();
 
         let rendered = render_small_signal_netlist(

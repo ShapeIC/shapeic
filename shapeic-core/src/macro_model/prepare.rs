@@ -177,8 +177,9 @@ mod tests {
     use crate::circuit::Circuit;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
     use crate::macro_model::{
-        Macro, MacroAcTestbench, MacroCatalog, MacroPort, MacroPortRole, MacroRenderMode,
-        MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
+        Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroOutputSource,
+        MacroPort, MacroPortRole, MacroRenderMode, MacroTestbenchPrepareError,
+        PreparedMacroAcCandidateEvaluator,
     };
     use crate::netlist::names::small_signal_param_name;
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
@@ -264,6 +265,13 @@ mod tests {
                 .vccs("gm", "VOUT", "VSS", "VIN", "VSS", "gm_eq")
                 .build(),
         )
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column(
+                "xcore",
+                small_signal_param_name("gm", "xcore", "m1"),
+            ),
+        ))
     }
 
     #[test]

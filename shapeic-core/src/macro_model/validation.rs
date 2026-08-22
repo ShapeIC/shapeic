@@ -5,7 +5,7 @@ use std::fmt;
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::{BlockRef, Circuit, CircuitValue, LinearElement};
 
-use super::{Macro, MacroCatalog, MacroTestbenchSource};
+use super::{Macro, MacroCatalog, MacroOutputSource, MacroTestbenchSource};
 
 /// Identifies which circuit of a macro contains a validation error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +173,37 @@ pub enum MacroValidationError {
     InvalidAcPolicy {
         macro_name: String,
         testbench: String,
+    },
+    EmptyCompactOutputParameter {
+        macro_name: String,
+    },
+    DuplicateCompactOutputParameter {
+        macro_name: String,
+        parameter: String,
+    },
+    UnknownCompactOutputParameter {
+        macro_name: String,
+        parameter: String,
+    },
+    MissingCompactOutputBinding {
+        macro_name: String,
+        parameter: String,
+    },
+    EmptyInterfacePort {
+        macro_name: String,
+    },
+    DuplicateInterfacePort {
+        macro_name: String,
+        port: String,
+    },
+    UnknownInterfacePort {
+        macro_name: String,
+        port: String,
+    },
+    InvalidOutputSource {
+        macro_name: String,
+        target: String,
+        reason: String,
     },
     CyclicDependency {
         path: Vec<String>,
@@ -405,6 +436,51 @@ impl fmt::Display for MacroValidationError {
                 formatter,
                 "macro '{macro_name}' testbench '{testbench}' has an invalid AC policy"
             ),
+            Self::EmptyCompactOutputParameter { macro_name } => write!(
+                formatter,
+                "macro '{macro_name}' has a compact output with an empty parameter"
+            ),
+            Self::DuplicateCompactOutputParameter {
+                macro_name,
+                parameter,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' binds compact parameter '{parameter}' more than once"
+            ),
+            Self::UnknownCompactOutputParameter {
+                macro_name,
+                parameter,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' binds undeclared compact parameter '{parameter}'"
+            ),
+            Self::MissingCompactOutputBinding {
+                macro_name,
+                parameter,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' compact parameter '{parameter}' has no output binding"
+            ),
+            Self::EmptyInterfacePort { macro_name } => write!(
+                formatter,
+                "macro '{macro_name}' has an interface binding with an empty port"
+            ),
+            Self::DuplicateInterfacePort { macro_name, port } => write!(
+                formatter,
+                "macro '{macro_name}' binds interface port '{port}' more than once"
+            ),
+            Self::UnknownInterfacePort { macro_name, port } => write!(
+                formatter,
+                "macro '{macro_name}' binds unknown interface port '{port}'"
+            ),
+            Self::InvalidOutputSource {
+                macro_name,
+                target,
+                reason,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' output binding '{target}' has an invalid source: {reason}"
+            ),
             Self::CyclicDependency { path } => {
                 write!(formatter, "cyclic macro dependency: {}", path.join(" -> "))
             }
@@ -459,6 +535,7 @@ pub fn validate_macro(
         &mut errors,
     );
     validate_testbenches(macro_, &mut errors);
+    validate_output_bindings(macro_, &mut errors);
     errors
 }
 
@@ -840,6 +917,158 @@ fn validate_testbenches(macro_: &Macro, errors: &mut Vec<MacroValidationError>) 
     }
 }
 
+pub(super) fn validate_output_bindings(macro_: &Macro, errors: &mut Vec<MacroValidationError>) {
+    let macro_name = macro_.name().to_owned();
+    let compact_parameters = macro_
+        .compact_model()
+        .instances()
+        .iter()
+        .filter_map(|instance| match instance.block() {
+            BlockRef::Element(element) => match element_value(element) {
+                CircuitValue::Parameter(parameter) if !parameter.trim().is_empty() => {
+                    Some(parameter.as_str())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut bound_parameters = HashSet::new();
+
+    for binding in macro_.exploration().compact_outputs() {
+        let parameter = binding.parameter();
+        if parameter.trim().is_empty() {
+            errors.push(MacroValidationError::EmptyCompactOutputParameter {
+                macro_name: macro_name.clone(),
+            });
+        } else {
+            if !bound_parameters.insert(parameter) {
+                errors.push(MacroValidationError::DuplicateCompactOutputParameter {
+                    macro_name: macro_name.clone(),
+                    parameter: parameter.to_owned(),
+                });
+            }
+            if !compact_parameters.contains(parameter) {
+                errors.push(MacroValidationError::UnknownCompactOutputParameter {
+                    macro_name: macro_name.clone(),
+                    parameter: parameter.to_owned(),
+                });
+            }
+        }
+        validate_output_source(
+            macro_,
+            &format!("compact parameter '{parameter}'"),
+            binding.source(),
+            errors,
+        );
+    }
+    for parameter in compact_parameters {
+        if !bound_parameters.contains(parameter) {
+            errors.push(MacroValidationError::MissingCompactOutputBinding {
+                macro_name: macro_name.clone(),
+                parameter: parameter.to_owned(),
+            });
+        }
+    }
+
+    let public_ports = macro_
+        .ports()
+        .iter()
+        .map(|port| port.name())
+        .collect::<HashSet<_>>();
+    let mut bound_ports = HashSet::new();
+    for binding in macro_.exploration().interface_bindings() {
+        let port = binding.port();
+        if port.trim().is_empty() {
+            errors.push(MacroValidationError::EmptyInterfacePort {
+                macro_name: macro_name.clone(),
+            });
+        } else {
+            if !bound_ports.insert(port) {
+                errors.push(MacroValidationError::DuplicateInterfacePort {
+                    macro_name: macro_name.clone(),
+                    port: port.to_owned(),
+                });
+            }
+            if !public_ports.contains(port) {
+                errors.push(MacroValidationError::UnknownInterfacePort {
+                    macro_name: macro_name.clone(),
+                    port: port.to_owned(),
+                });
+            }
+        }
+        validate_output_source(
+            macro_,
+            &format!("interface port '{port}'"),
+            binding.source(),
+            errors,
+        );
+    }
+}
+
+fn validate_output_source(
+    macro_: &Macro,
+    target: &str,
+    source: &MacroOutputSource,
+    errors: &mut Vec<MacroValidationError>,
+) {
+    let reason = match source {
+        MacroOutputSource::CandidateColumn {
+            instance_path,
+            column,
+        } => {
+            if instance_path.trim().is_empty() {
+                Some("candidate instance path is empty".to_owned())
+            } else if column.trim().is_empty() {
+                Some("candidate column is empty".to_owned())
+            } else {
+                match macro_.circuit().instance(instance_path) {
+                    None => Some(format!(
+                        "candidate instance '{instance_path}' is not in the implementation circuit"
+                    )),
+                    Some(instance) if matches!(instance.block(), BlockRef::Element(_)) => Some(
+                        format!("implementation instance '{instance_path}' has no candidates"),
+                    ),
+                    Some(_) => None,
+                }
+            }
+        }
+        MacroOutputSource::AcMetric { testbench, metric } => {
+            if testbench.trim().is_empty() {
+                Some("AC testbench name is empty".to_owned())
+            } else {
+                match macro_.exploration().testbench(testbench) {
+                    None => Some(format!("AC testbench '{testbench}' is not declared")),
+                    Some(definition) if !definition.analysis().policy.metrics.contains(*metric) => {
+                        Some(format!(
+                            "AC testbench '{testbench}' does not request metric {}",
+                            metric.label()
+                        ))
+                    }
+                    Some(_) => None,
+                }
+            }
+        }
+    };
+    if let Some(reason) = reason {
+        errors.push(MacroValidationError::InvalidOutputSource {
+            macro_name: macro_.name().to_owned(),
+            target: target.to_owned(),
+            reason,
+        });
+    }
+}
+
+fn element_value(element: &LinearElement) -> &CircuitValue {
+    match element {
+        LinearElement::Resistor { resistance } => resistance,
+        LinearElement::Capacitor { capacitance } => capacitance,
+        LinearElement::CurrentSource { current } => current,
+        LinearElement::VoltageSource { voltage } => voltage,
+        LinearElement::VoltageControlledCurrentSource { transconductance } => transconductance,
+    }
+}
+
 fn validate_dependency_graph(macro_catalog: &MacroCatalog, errors: &mut Vec<MacroValidationError>) {
     let mut completed = HashSet::new();
     let mut active = Vec::new();
@@ -900,7 +1129,11 @@ mod tests {
     };
     use crate::catalog::primitive_catalog::PrimitiveCatalog;
     use crate::circuit::Circuit;
-    use crate::macro_model::{Macro, MacroAcTestbench, MacroCatalog, MacroPort, MacroPortRole};
+    use crate::macro_model::{
+        Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroInterfaceBinding,
+        MacroOutputSource, MacroPort, MacroPortRole,
+    };
+    use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use crate::testbench::{AcAnalysis, TransferFunction};
@@ -971,6 +1204,13 @@ mod tests {
                 .build(),
             compact_model(),
         )
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column(
+                "xcore",
+                small_signal_param_name("gm", "xcore", "m1"),
+            ),
+        ))
     }
 
     #[test]
@@ -987,10 +1227,82 @@ mod tests {
                 )
                 .build(),
             compact_model(),
-        );
+        )
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column(
+                "xleaf",
+                compact_model_param_name("gm_eq", "xleaf"),
+            ),
+        ));
         let catalog = MacroCatalog::from_macros([leaf, parent]).unwrap();
 
         assert!(validate_macro_catalog(&catalog, &primitive_catalog()).is_empty());
+    }
+
+    #[test]
+    fn validates_compact_output_and_interface_bindings() {
+        let unbound = Macro::new(
+            "unbound",
+            ports(),
+            Circuit::builder()
+                .primitive(
+                    "xcore",
+                    "stage_primitive",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .build(),
+            compact_model(),
+        );
+        let errors = validate_macro_catalog(
+            &MacroCatalog::from_macros([unbound]).unwrap(),
+            &primitive_catalog(),
+        );
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::MissingCompactOutputBinding { parameter, .. }
+                if parameter == "gm_eq"
+        )));
+
+        let invalid = leaf_macro()
+            .with_compact_output(MacroCompactOutputBinding::new(
+                "gm_eq",
+                MacroOutputSource::candidate_column("missing", ""),
+            ))
+            .with_compact_output(MacroCompactOutputBinding::new(
+                "unknown",
+                MacroOutputSource::candidate_column("xcore", "xcore.value"),
+            ))
+            .with_interface_binding(MacroInterfaceBinding::new(
+                "UNKNOWN_PORT",
+                MacroOutputSource::ac_metric("missing", crate::analysis::AcMetric::DcGainDb),
+            ));
+        let errors = validate_macro_catalog(
+            &MacroCatalog::from_macros([invalid]).unwrap(),
+            &primitive_catalog(),
+        );
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::DuplicateCompactOutputParameter { parameter, .. }
+                if parameter == "gm_eq"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::UnknownCompactOutputParameter { parameter, .. }
+                if parameter == "unknown"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::UnknownInterfacePort { port, .. }
+                if port == "UNKNOWN_PORT"
+        )));
+        assert!(
+            errors
+                .iter()
+                .filter(|error| matches!(error, MacroValidationError::InvalidOutputSource { .. }))
+                .count()
+                >= 2
+        );
     }
 
     #[test]

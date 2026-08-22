@@ -6,9 +6,11 @@ use crate::circuit::BlockRef;
 use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::{
     CandidateFilterError, CandidateFilterReport, retain_candidate_set,
+    retain_candidate_set_with_indices,
 };
 use crate::primitive::build::{PrimitiveBuildError, build_candidate_set_for_primitive};
 
+use super::input::CompactMacroCandidateProvenance;
 use super::{
     Macro, MacroExplorationInput, MacroExplorationInputValidationError,
     MacroExplorationInstanceKind, validate_macro_exploration_input,
@@ -21,6 +23,7 @@ pub struct MacroInstanceCandidateSet {
     pub(super) kind: MacroExplorationInstanceKind,
     pub(super) candidates: CandidateSet,
     pub(super) filter_report: CandidateFilterReport,
+    pub(super) compact_provenance: Option<CompactMacroCandidateProvenance>,
 }
 
 impl MacroInstanceCandidateSet {
@@ -42,6 +45,13 @@ impl MacroInstanceCandidateSet {
     /// Returns the local filtering counts for this instance.
     pub const fn filter_report(&self) -> CandidateFilterReport {
         self.filter_report
+    }
+
+    /// Returns projected public interface ports for a compact submacro.
+    pub fn interface_ports(&self) -> &[String] {
+        self.compact_provenance
+            .as_ref()
+            .map_or(&[], |provenance| provenance.interface_ports.as_slice())
     }
 }
 
@@ -164,7 +174,7 @@ pub fn build_macro_candidate_sets(
 
     let mut instances = Vec::new();
     for instance in macro_.circuit().instances() {
-        let (kind, mut candidates, filters) = match instance.block() {
+        let (kind, mut candidates, filters, mut compact_provenance) = match instance.block() {
             BlockRef::Primitive(primitive_name) => {
                 let primitive = primitive_catalog
                     .get(primitive_name)
@@ -198,6 +208,7 @@ pub fn build_macro_candidate_sets(
                     MacroExplorationInstanceKind::Primitive,
                     candidates,
                     primitive_input.filters,
+                    None,
                 )
             }
             BlockRef::Macro(_) => {
@@ -209,23 +220,36 @@ pub fn build_macro_candidate_sets(
                     MacroExplorationInstanceKind::CompactMacro,
                     compact_input.candidates,
                     compact_input.filters,
+                    compact_input.provenance,
                 )
             }
             BlockRef::Element(_) => continue,
         };
 
-        let filter_report = retain_candidate_set(&mut candidates, &filters).map_err(|error| {
-            MacroCandidateBuildError::CandidateFilter {
-                macro_name: macro_.name().to_owned(),
-                instance_path: instance.name().to_owned(),
-                error,
-            }
-        })?;
+        let filter_error = |error| MacroCandidateBuildError::CandidateFilter {
+            macro_name: macro_.name().to_owned(),
+            instance_path: instance.name().to_owned(),
+            error,
+        };
+        let filter_report = if let Some(provenance) = &mut compact_provenance {
+            debug_assert_eq!(provenance.accepted_indices.len(), candidates.points.len());
+            let (report, retained_indices) =
+                retain_candidate_set_with_indices(&mut candidates, &filters)
+                    .map_err(filter_error)?;
+            provenance.accepted_indices = retained_indices
+                .into_iter()
+                .map(|index| provenance.accepted_indices[index])
+                .collect();
+            report
+        } else {
+            retain_candidate_set(&mut candidates, &filters).map_err(filter_error)?
+        };
         instances.push(MacroInstanceCandidateSet {
             instance_path: instance.name().to_owned(),
             kind,
             candidates,
             filter_report,
+            compact_provenance,
         });
     }
 

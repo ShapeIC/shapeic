@@ -228,6 +228,25 @@ impl MacroExplorationResult {
             .get(candidate_index)
     }
 
+    /// Resolves the selected child result and accepted candidate for a compact
+    /// submacro instance.
+    pub fn selected_submacro<'a>(
+        &'a self,
+        accepted: &MacroAcceptedCandidate,
+        instance_path: &str,
+    ) -> Option<(&'a MacroExplorationResult, &'a MacroAcceptedCandidate)> {
+        let candidate_index = self.selected_candidate_index(accepted, instance_path)?;
+        let provenance = self
+            .candidate_sets
+            .instance(instance_path)?
+            .compact_provenance
+            .as_ref()?;
+        let child_accepted_index = *provenance.accepted_indices.get(candidate_index)?;
+        let child_result = provenance.source_result.as_ref();
+        let child_accepted = child_result.accepted.get(child_accepted_index)?;
+        Some((child_result, child_accepted))
+    }
+
     /// Finds one accepted AC outcome by its macro-local testbench name.
     pub fn ac_outcome<'a>(
         &self,
@@ -529,17 +548,22 @@ fn rejection_metric(outcome: &AdaptiveAcOutcome) -> Result<Option<AcMetric>, &'s
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::analysis::{
         AcMetricSet, AcMetrics, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
         TargetAssessment,
     };
     use crate::circuit::Circuit;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
+    use crate::exploration::filter::CandidateFilter;
     use crate::exploration::filter::CandidateFilterReport;
     use crate::macro_model::{
-        MacroAcTestbench, MacroInstanceCandidateSet, MacroPort, MacroPortRole,
+        CompactMacroInstanceExplorationInput, MacroAcTestbench, MacroCompactOutputBinding,
+        MacroExplorationInput, MacroInstanceCandidateSet, MacroInterfaceBinding, MacroOutputSource,
+        MacroPort, MacroPortRole, build_macro_candidate_sets,
     };
-    use crate::netlist::names::small_signal_param_name;
+    use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::{PrimitiveBuildSpec, SweepMode};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
@@ -633,6 +657,7 @@ mod tests {
                 .build(),
             Circuit::builder()
                 .vccs("gm", "VOUT", "VSS", "VIN", "VSS", "gm_eq")
+                .resistor("gain", "VOUT", "VSS", "gain_eq")
                 .build(),
         )
         .with_ac_testbench(MacroAcTestbench::from_spice(
@@ -640,12 +665,29 @@ mod tests {
             "Vinput VIN VSS 1\n.end\n",
             analysis(),
         ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column(
+                "xcore",
+                small_signal_param_name("gm", "xcore", "m1"),
+            ),
+        ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gain_eq",
+            MacroOutputSource::ac_metric("gain", AcMetric::DcGainDb),
+        ))
+        .with_interface_binding(MacroInterfaceBinding::new(
+            "VOUT",
+            MacroOutputSource::candidate_column("xcore", "xcore.vout"),
+        ))
     }
 
     fn candidate(gm: f64) -> CandidatePoint {
         let mut values = vec![
             (small_signal_param_name("gm", "xcore", "m1"), gm),
             (small_signal_param_name("ro", "xcore", "m1"), 1.0e5),
+            ("xcore.vout".to_owned(), 1.0),
+            ("xcore.width_m1".to_owned(), gm * 1.0e6),
         ];
         values.extend(
             MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
@@ -663,6 +705,7 @@ mod tests {
                 kind: super::super::MacroExplorationInstanceKind::Primitive,
                 candidates: CandidateSet::new("xcore", vec![candidate(1.0e-3), candidate(1.0e-5)]),
                 filter_report: CandidateFilterReport::default(),
+                compact_provenance: None,
             }],
         }
     }
@@ -833,5 +876,144 @@ mod tests {
         };
 
         assert!(rejection_metric(&outcome).is_err());
+    }
+
+    #[test]
+    fn projects_explicit_outputs_and_preserves_filtered_child_provenance() {
+        let child_macro = macro_();
+        let mut first_outcome = passing_outcome(0);
+        first_outcome.metrics.dc_gain_db = Some(40.0);
+        let mut second_outcome = passing_outcome(0);
+        second_outcome.metrics.dc_gain_db = Some(20.0);
+        let child_result = Arc::new(MacroExplorationResult {
+            macro_name: child_macro.name().to_owned(),
+            candidate_sets: candidates(),
+            accepted: vec![
+                MacroAcceptedCandidate {
+                    candidate_indices: vec![0],
+                    ac_outcomes: vec![MacroAcTestbenchOutcome {
+                        testbench_index: 0,
+                        outcome: first_outcome,
+                    }],
+                },
+                MacroAcceptedCandidate {
+                    candidate_indices: vec![1],
+                    ac_outcomes: vec![MacroAcTestbenchOutcome {
+                        testbench_index: 0,
+                        outcome: second_outcome,
+                    }],
+                },
+            ],
+            statistics: MacroExplorationStatistics {
+                compatible_candidates: 2,
+                accepted_candidates: 2,
+                testbenches: vec![MacroAcTestbenchStatistics::new("gain")],
+            },
+        });
+
+        let projection = child_result.project(&child_macro, "xchild").unwrap();
+        assert_eq!(projection.candidates().points.len(), 2);
+        assert_eq!(
+            projection.candidates().points[0].get(&compact_model_param_name("gm_eq", "xchild")),
+            Some(1.0e-3)
+        );
+        assert_eq!(
+            projection.candidates().points[1].get(&compact_model_param_name("gain_eq", "xchild")),
+            Some(20.0)
+        );
+        assert_eq!(
+            projection.candidates().points[0].get("xchild.vout"),
+            Some(1.0)
+        );
+        assert!(
+            projection.candidates().points[0]
+                .get("xcore.width_m1")
+                .is_none()
+        );
+        assert_eq!(projection.interface_ports(), ["VOUT"]);
+
+        let parent = Macro::new(
+            "parent",
+            vec![
+                MacroPort::new("VIN", MacroPortRole::Input),
+                MacroPort::new("VOUT", MacroPortRole::Output),
+                MacroPort::new("VSS", MacroPortRole::Ground),
+            ],
+            Circuit::builder()
+                .macro_instance(
+                    "xchild",
+                    child_macro.name(),
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .macro_instance(
+                    "xother",
+                    child_macro.name(),
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .build(),
+            Circuit::builder()
+                .resistor("constant", "VOUT", "VSS", 1.0)
+                .build(),
+        );
+        let mut input = MacroExplorationInput::new();
+        input
+            .register_compact_macro_instance(
+                "xchild",
+                CompactMacroInstanceExplorationInput::from_projection(
+                    projection,
+                    vec![
+                        CandidateFilter::at_most(
+                            compact_model_param_name("gm_eq", "xchild"),
+                            1.0e-4,
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            )
+            .unwrap();
+        input
+            .register_compact_macro_instance(
+                "xother",
+                CompactMacroInstanceExplorationInput::from_projection(
+                    child_result.project(&child_macro, "xother").unwrap(),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+        let parent_sets =
+            build_macro_candidate_sets(&parent, &PrimitiveCatalog::new(), input).unwrap();
+        let combination_plan =
+            MacroCandidateCombinationJoin::new(&parent, &PrimitiveCatalog::new(), &parent_sets)
+                .unwrap();
+        assert_eq!(combination_plan.plan().equalities().len(), 1);
+        let parent_result = MacroExplorationResult {
+            macro_name: parent.name().to_owned(),
+            candidate_sets: parent_sets,
+            accepted: vec![MacroAcceptedCandidate {
+                candidate_indices: vec![0, 0],
+                ac_outcomes: Vec::new(),
+            }],
+            statistics: MacroExplorationStatistics {
+                compatible_candidates: 1,
+                accepted_candidates: 1,
+                testbenches: Vec::new(),
+            },
+        };
+
+        let (resolved_child, resolved_accepted) = parent_result
+            .selected_submacro(&parent_result.accepted()[0], "xchild")
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            parent_result.candidate_sets.instances[0]
+                .compact_provenance
+                .as_ref()
+                .map(|provenance| &provenance.source_result)
+                .unwrap(),
+            &child_result
+        ));
+        assert_eq!(
+            resolved_child.selected_candidate_index(resolved_accepted, "xcore"),
+            Some(1)
+        );
     }
 }

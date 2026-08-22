@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::analysis::AcMetric;
 use crate::circuit::Circuit;
 use crate::testbench::AcAnalysis;
 
@@ -34,6 +35,18 @@ impl Macro {
     /// Attaches one unprepared AC testbench to the macro.
     pub fn with_ac_testbench(mut self, testbench: MacroAcTestbench) -> Self {
         self.exploration.testbenches.push(testbench);
+        self
+    }
+
+    /// Exposes one accepted result value as a compact-model parameter.
+    pub fn with_compact_output(mut self, binding: MacroCompactOutputBinding) -> Self {
+        self.exploration.compact_outputs.push(binding);
+        self
+    }
+
+    /// Exposes one accepted result value as a public interface variable.
+    pub fn with_interface_binding(mut self, binding: MacroInterfaceBinding) -> Self {
+        self.exploration.interface_bindings.push(binding);
         self
     }
 
@@ -113,6 +126,8 @@ pub enum MacroPortRole {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MacroExploration {
     testbenches: Vec<MacroAcTestbench>,
+    compact_outputs: Vec<MacroCompactOutputBinding>,
+    interface_bindings: Vec<MacroInterfaceBinding>,
 }
 
 impl MacroExploration {
@@ -127,6 +142,18 @@ impl MacroExploration {
         self
     }
 
+    /// Adds an explicit compact-model parameter binding.
+    pub fn with_compact_output(mut self, binding: MacroCompactOutputBinding) -> Self {
+        self.compact_outputs.push(binding);
+        self
+    }
+
+    /// Adds an explicit public interface-variable binding.
+    pub fn with_interface_binding(mut self, binding: MacroInterfaceBinding) -> Self {
+        self.interface_bindings.push(binding);
+        self
+    }
+
     /// Returns the AC testbenches in evaluation order.
     pub fn testbenches(&self) -> &[MacroAcTestbench] {
         &self.testbenches
@@ -137,6 +164,100 @@ impl MacroExploration {
         self.testbenches
             .iter()
             .find(|testbench| testbench.name == name)
+    }
+
+    /// Returns compact-model output bindings in projected column order.
+    pub fn compact_outputs(&self) -> &[MacroCompactOutputBinding] {
+        &self.compact_outputs
+    }
+
+    /// Returns public interface bindings in projected column order.
+    pub fn interface_bindings(&self) -> &[MacroInterfaceBinding] {
+        &self.interface_bindings
+    }
+}
+
+/// Explicit source of one value projected from an accepted macro candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MacroOutputSource {
+    /// One exact column from the selected candidate of a circuit instance.
+    CandidateColumn {
+        instance_path: String,
+        column: String,
+    },
+    /// One metric produced by a named AC testbench.
+    AcMetric { testbench: String, metric: AcMetric },
+}
+
+impl MacroOutputSource {
+    /// Selects one exact candidate column from an implementation instance.
+    pub fn candidate_column(instance_path: impl Into<String>, column: impl Into<String>) -> Self {
+        Self::CandidateColumn {
+            instance_path: instance_path.into(),
+            column: column.into(),
+        }
+    }
+
+    /// Selects one AC metric from a macro-local testbench.
+    pub fn ac_metric(testbench: impl Into<String>, metric: AcMetric) -> Self {
+        Self::AcMetric {
+            testbench: testbench.into(),
+            metric,
+        }
+    }
+}
+
+/// Maps one accepted result value to a symbolic compact-model parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroCompactOutputBinding {
+    parameter: String,
+    source: MacroOutputSource,
+}
+
+impl MacroCompactOutputBinding {
+    /// Creates one compact-model parameter binding.
+    pub fn new(parameter: impl Into<String>, source: MacroOutputSource) -> Self {
+        Self {
+            parameter: parameter.into(),
+            source,
+        }
+    }
+
+    /// Returns the unscoped compact-model parameter name.
+    pub fn parameter(&self) -> &str {
+        &self.parameter
+    }
+
+    /// Returns the accepted-result source.
+    pub const fn source(&self) -> &MacroOutputSource {
+        &self.source
+    }
+}
+
+/// Maps one accepted result value to a public macro port variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroInterfaceBinding {
+    port: String,
+    source: MacroOutputSource,
+}
+
+impl MacroInterfaceBinding {
+    /// Creates one public interface-variable binding.
+    pub fn new(port: impl Into<String>, source: MacroOutputSource) -> Self {
+        Self {
+            port: port.into(),
+            source,
+        }
+    }
+
+    /// Returns the public macro port represented by this value.
+    pub fn port(&self) -> &str {
+        &self.port
+    }
+
+    /// Returns the accepted-result source.
+    pub const fn source(&self) -> &MacroOutputSource {
+        &self.source
     }
 }
 
