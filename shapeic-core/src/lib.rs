@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod catalog;
+pub mod circuit;
 pub mod compact_model;
 pub mod exploration;
 pub mod netlist;
