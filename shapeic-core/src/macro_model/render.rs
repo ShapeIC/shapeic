@@ -23,6 +23,26 @@ pub struct ResolvedPrimitiveBranch {
 }
 
 impl ResolvedPrimitiveBranch {
+    pub(crate) fn new(
+        instance_path: String,
+        primitive_name: String,
+        branch_name: String,
+        gate_node: String,
+        drain_node: String,
+        source_node: String,
+        bulk_node: String,
+    ) -> Self {
+        Self {
+            instance_path,
+            primitive_name,
+            branch_name,
+            gate_node,
+            drain_node,
+            source_node,
+            bulk_node,
+        }
+    }
+
     /// Returns the sanitized hierarchical path of the primitive instance.
     pub fn instance_path(&self) -> &str {
         &self.instance_path
@@ -383,15 +403,15 @@ impl Renderer {
                 "{} {drain} {source} {ro}",
                 small_signal_element_name("R", "ro", &path, branch.name())
             ));
-            self.primitive_branches.push(ResolvedPrimitiveBranch {
-                instance_path: path.clone(),
-                primitive_name: primitive_name.to_owned(),
-                branch_name: branch.name().to_owned(),
-                gate_node: gate,
-                drain_node: drain,
-                source_node: source,
-                bulk_node: bulk,
-            });
+            self.primitive_branches.push(ResolvedPrimitiveBranch::new(
+                path.clone(),
+                primitive_name.to_owned(),
+                branch.name().to_owned(),
+                gate,
+                drain,
+                source,
+                bulk,
+            ));
         }
         Ok(())
     }

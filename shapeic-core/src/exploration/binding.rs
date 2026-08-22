@@ -4,7 +4,16 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
+use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
+
+use crate::compact_model::MosDeviceCapacitances;
+use crate::macro_model::ResolvedPrimitiveBranch;
+use crate::netlist::names::small_signal_param_name;
+
 use super::candidate::{CandidateSchemaError, CandidateSet, candidate_column_indices};
+
+const MOS_CAPACITANCE_PARAMETER_COUNT: usize =
+    MosCapacitanceMatrix::INDEPENDENT_PARAMETERS.len() + MosExtrinsicCapacitances::PARAMETERS.len();
 
 /// Resolves numerical parameters from one selected point per candidate set.
 ///
@@ -329,10 +338,185 @@ impl fmt::Display for CandidateParameterBindingError {
 
 impl Error for CandidateParameterBindingError {}
 
+/// Precomputed binding from candidate columns to per-branch MOS capacitances.
+///
+/// Branch topology and column lookup are resolved once during construction.
+/// Bound capacitances follow [`Self::branches`] in the same deterministic order.
+#[derive(Debug)]
+pub struct CandidateCapacitanceBinder<'a> {
+    branches: &'a [ResolvedPrimitiveBranch],
+    parameters: CandidateParameterBinder<'a>,
+}
+
+impl<'a> CandidateCapacitanceBinder<'a> {
+    /// Resolves all intrinsic and extrinsic candidate columns for each branch.
+    pub fn new(
+        branches: &'a [ResolvedPrimitiveBranch],
+        candidate_sets: &[&'a CandidateSet],
+    ) -> Result<Self, CandidateCapacitanceBindingError> {
+        let mut parameter_order =
+            Vec::with_capacity(branches.len() * MOS_CAPACITANCE_PARAMETER_COUNT);
+        for branch in branches {
+            parameter_order.extend(
+                MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                    .into_iter()
+                    .chain(MosExtrinsicCapacitances::PARAMETERS)
+                    .map(|parameter| {
+                        small_signal_param_name(
+                            parameter,
+                            branch.instance_path(),
+                            branch.branch_name(),
+                        )
+                    }),
+            );
+        }
+        let parameters = CandidateParameterBinder::new(&parameter_order, candidate_sets)?;
+        Ok(Self {
+            branches,
+            parameters,
+        })
+    }
+
+    /// Returns the resolved branches in capacitance output order.
+    pub fn branches(&self) -> &[ResolvedPrimitiveBranch] {
+        self.branches
+    }
+
+    /// Returns the number of scalar values required by [`Self::bind_into`].
+    pub fn scratch_len(&self) -> usize {
+        self.parameters.parameter_names().len()
+    }
+
+    /// Allocates and constructs one complete capacitance value per branch.
+    pub fn bind(
+        &self,
+        candidate_indices: &[usize],
+    ) -> Result<Vec<MosDeviceCapacitances>, CandidateCapacitanceBindingError> {
+        let values = self.parameters.bind(candidate_indices)?;
+        self.decode(&values).collect()
+    }
+
+    /// Updates reusable scalar and capacitance buffers without allocating.
+    pub fn bind_into(
+        &self,
+        candidate_indices: &[usize],
+        scratch: &mut [f64],
+        output: &mut [MosDeviceCapacitances],
+    ) -> Result<(), CandidateCapacitanceBindingError> {
+        if scratch.len() != self.scratch_len() {
+            return Err(CandidateCapacitanceBindingError::ScratchLengthMismatch {
+                expected: self.scratch_len(),
+                actual: scratch.len(),
+            });
+        }
+        if output.len() != self.branches.len() {
+            return Err(CandidateCapacitanceBindingError::OutputLengthMismatch {
+                expected: self.branches.len(),
+                actual: output.len(),
+            });
+        }
+        self.parameters.bind_into(candidate_indices, scratch)?;
+        for (destination, capacitances) in output.iter_mut().zip(self.decode(scratch)) {
+            *destination = capacitances?;
+        }
+        Ok(())
+    }
+
+    fn decode<'b>(
+        &'b self,
+        values: &'b [f64],
+    ) -> impl Iterator<Item = Result<MosDeviceCapacitances, CandidateCapacitanceBindingError>> + 'b
+    {
+        self.branches
+            .iter()
+            .zip(values.chunks_exact(MOS_CAPACITANCE_PARAMETER_COUNT))
+            .map(|(branch, values)| {
+                let extrinsic_offset = MosCapacitanceMatrix::INDEPENDENT_PARAMETERS.len();
+                let extrinsic = MosExtrinsicCapacitances {
+                    cgsol: values[extrinsic_offset],
+                    cgdol: values[extrinsic_offset + 1],
+                    cjs: values[extrinsic_offset + 2],
+                    cjd: values[extrinsic_offset + 3],
+                };
+                MosDeviceCapacitances::from_total_parameters(&values[..extrinsic_offset], extrinsic)
+                    .map_err(
+                        |error| CandidateCapacitanceBindingError::InvalidCapacitances {
+                            instance_path: branch.instance_path().to_owned(),
+                            branch: branch.branch_name().to_owned(),
+                            reason: error.to_string(),
+                        },
+                    )
+            })
+    }
+}
+
+/// Errors produced while preparing or applying a capacitance binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateCapacitanceBindingError {
+    /// A required candidate column could not be bound or evaluated.
+    Parameter(CandidateParameterBindingError),
+    /// The reusable scalar buffer has the wrong length.
+    ScratchLengthMismatch { expected: usize, actual: usize },
+    /// The reusable capacitance buffer has the wrong length.
+    OutputLengthMismatch { expected: usize, actual: usize },
+    /// Bound values do not form valid complete MOS capacitances.
+    InvalidCapacitances {
+        instance_path: String,
+        branch: String,
+        reason: String,
+    },
+}
+
+impl From<CandidateParameterBindingError> for CandidateCapacitanceBindingError {
+    fn from(error: CandidateParameterBindingError) -> Self {
+        Self::Parameter(error)
+    }
+}
+
+impl fmt::Display for CandidateCapacitanceBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parameter(error) => write!(formatter, "could not bind capacitances: {error}"),
+            Self::ScratchLengthMismatch { expected, actual } => write!(
+                formatter,
+                "capacitance binding expected a scratch buffer of length {expected}, received {actual}"
+            ),
+            Self::OutputLengthMismatch { expected, actual } => write!(
+                formatter,
+                "capacitance binding expected an output buffer of length {expected}, received {actual}"
+            ),
+            Self::InvalidCapacitances {
+                instance_path,
+                branch,
+                reason,
+            } => write!(
+                formatter,
+                "candidate capacitances for '{instance_path}.{branch}' are invalid: {reason}"
+            ),
+        }
+    }
+}
+
+impl Error for CandidateCapacitanceBindingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Parameter(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CandidateParameterBinder, CandidateParameterBindingError};
+    use super::{
+        CandidateCapacitanceBinder, CandidateCapacitanceBindingError, CandidateParameterBinder,
+        CandidateParameterBindingError,
+    };
+    use crate::compact_model::MosDeviceCapacitances;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
+    use crate::macro_model::ResolvedPrimitiveBranch;
+    use crate::netlist::names::small_signal_param_name;
+    use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 
     fn point(values: &[(&str, f64)]) -> CandidatePoint {
         CandidatePoint::new(
@@ -345,6 +529,62 @@ mod tests {
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn branch(instance: &str, branch: &str) -> ResolvedPrimitiveBranch {
+        ResolvedPrimitiveBranch::new(
+            instance.to_owned(),
+            "mos_primitive".to_owned(),
+            branch.to_owned(),
+            format!("{instance}_G"),
+            format!("{instance}_D"),
+            format!("{instance}_S"),
+            format!("{instance}_B"),
+        )
+    }
+
+    fn capacitances(scale: f64) -> MosDeviceCapacitances {
+        let intrinsic =
+            [10.0, 2.0, 3.0, 1.0, 8.0, 2.0, 1.5, 2.5, 7.0].map(|value| value * scale * 1.0e-15);
+        MosDeviceCapacitances::from_total_parameters(
+            &intrinsic,
+            MosExtrinsicCapacitances {
+                cgsol: scale * 1.0e-15,
+                cgdol: scale * 2.0e-15,
+                cjs: scale * 3.0e-15,
+                cjd: scale * 4.0e-15,
+            },
+        )
+        .unwrap()
+    }
+
+    fn capacitance_point(instance: &str, branch: &str, scale: f64) -> CandidatePoint {
+        let device = capacitances(scale);
+        let intrinsic = device.intrinsic.to_ngspice_parameters();
+        let independent = [
+            intrinsic[0],
+            intrinsic[1],
+            intrinsic[2],
+            intrinsic[4],
+            intrinsic[5],
+            intrinsic[6],
+            intrinsic[8],
+            intrinsic[9],
+            intrinsic[10],
+        ];
+        let extrinsic = device.extrinsic;
+        let values = MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+            .into_iter()
+            .zip(independent)
+            .chain(MosExtrinsicCapacitances::PARAMETERS.into_iter().zip([
+                extrinsic.cgsol,
+                extrinsic.cgdol,
+                extrinsic.cjs,
+                extrinsic.cjd,
+            ]))
+            .map(|(parameter, value)| (small_signal_param_name(parameter, instance, branch), value))
+            .collect();
+        CandidatePoint::new(values)
     }
 
     #[test]
@@ -418,6 +658,61 @@ mod tests {
         assert!(matches!(
             binder.bind_into(&[0], &mut []),
             Err(CandidateParameterBindingError::OutputLengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binds_complete_capacitances_in_resolved_branch_order() {
+        let diff_pair = CandidateSet::new(
+            "xdp",
+            vec![
+                capacitance_point("xdp", "m1", 1.0),
+                capacitance_point("xdp", "m1", 2.0),
+            ],
+        );
+        let mirror = CandidateSet::new("xcm", vec![capacitance_point("xcm", "m2", 3.0)]);
+        let branches = vec![branch("xdp", "m1"), branch("xcm", "m2")];
+        let binder = CandidateCapacitanceBinder::new(&branches, &[&diff_pair, &mirror]).unwrap();
+
+        assert_eq!(binder.branches(), branches);
+        assert_eq!(
+            binder.bind(&[1, 0]).unwrap(),
+            [capacitances(2.0), capacitances(3.0)]
+        );
+
+        let mut scratch = vec![0.0; binder.scratch_len()];
+        let mut output = binder.bind(&[1, 0]).unwrap();
+        binder
+            .bind_into(&[0, 0], &mut scratch, &mut output)
+            .unwrap();
+        assert_eq!(output, [capacitances(1.0), capacitances(3.0)]);
+    }
+
+    #[test]
+    fn reports_missing_capacitance_columns_and_invalid_reusable_buffers() {
+        let mut incomplete = capacitance_point("xdp", "m1", 1.0);
+        incomplete.values.pop();
+        let candidates = CandidateSet::new("xdp", vec![incomplete]);
+        let branches = vec![branch("xdp", "m1")];
+
+        assert!(matches!(
+            CandidateCapacitanceBinder::new(&branches, &[&candidates]),
+            Err(CandidateCapacitanceBindingError::Parameter(
+                CandidateParameterBindingError::MissingParameter { parameter }
+            )) if parameter == "cjd__xdp__m1"
+        ));
+
+        let complete = CandidateSet::new("xdp", vec![capacitance_point("xdp", "m1", 1.0)]);
+        let binder = CandidateCapacitanceBinder::new(&branches, &[&complete]).unwrap();
+        let mut scratch = vec![0.0; binder.scratch_len()];
+        let mut output = binder.bind(&[0]).unwrap();
+        assert!(matches!(
+            binder.bind_into(&[0], &mut scratch[..1], &mut output),
+            Err(CandidateCapacitanceBindingError::ScratchLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            binder.bind_into(&[0], &mut scratch, &mut []),
+            Err(CandidateCapacitanceBindingError::OutputLengthMismatch { .. })
         ));
     }
 }
