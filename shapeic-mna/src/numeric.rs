@@ -1004,4 +1004,14 @@ mod tests {
 
         assert_eq!(system.capacitance_matrix()[(1, 1)], 0.0);
     }
+
+    #[test]
+    fn accumulates_multiple_capacitance_stamps_on_a_shared_node() {
+        let mut system = two_node_numeric_system(DMatrix::zeros(2, 2), [0.0, 0.0]);
+
+        stamp_output_capacitance(&mut system, 2.0).unwrap();
+        stamp_output_capacitance(&mut system, 3.0).unwrap();
+
+        assert_eq!(system.capacitance_matrix()[(1, 1)], 5.0);
+    }
 }
