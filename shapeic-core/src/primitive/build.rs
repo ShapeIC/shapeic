@@ -105,6 +105,21 @@ impl PrimitiveBuildOutput {
             .collect::<Vec<_>>();
         candidate_set_from_columns(instance_name, &columns)
     }
+
+    fn into_candidate_set(
+        self,
+        instance_name: &str,
+    ) -> Result<CandidateSet, CandidateSetBuildError> {
+        let columns = self
+            .columns
+            .into_iter()
+            .map(|column| ExplorationColumn {
+                name: primitive_build_candidate_column_name(instance_name, &column.name),
+                values: column.values,
+            })
+            .collect::<Vec<_>>();
+        candidate_set_from_columns(instance_name, &columns)
+    }
 }
 
 fn primitive_build_candidate_column_name(instance_name: &str, column_name: &str) -> String {
@@ -179,13 +194,15 @@ pub fn build_candidate_set_for_primitive(
     let build_spec = primitive.build.as_ref()
         .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
             primitive: primitive.name.clone(),
-        }).unwrap();
+        })?;
 
-    let mut input = input.clone();
+    let mut input = input;
     if input.lut_config.is_none() {
         input.lut_config = primitive.lut_config.clone();
     }
-    build(model, build_spec, &input)?.to_candidate_set(instance_name).map_err(PrimitiveBuildError::CandidateSet)
+    build(model, build_spec, &input)?
+        .into_candidate_set(instance_name)
+        .map_err(PrimitiveBuildError::CandidateSet)
 }
 
 fn build(
