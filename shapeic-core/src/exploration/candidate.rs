@@ -601,7 +601,7 @@ fn candidate_join_key_unchecked(point: &CandidatePoint, offsets: &[usize]) -> Bo
         .into_boxed_slice()
 }
 
-fn canonical_join_value(value: f64) -> Option<u64> {
+pub(crate) fn canonical_join_value(value: f64) -> Option<u64> {
     value
         .is_finite()
         .then(|| if value == 0.0 { 0 } else { value.to_bits() })
