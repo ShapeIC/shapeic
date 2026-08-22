@@ -36,6 +36,108 @@ impl CandidatePoint {
     }
 }
 
+/// Allocation-free Cartesian traversal over any number of candidate sets.
+///
+/// The first set is the outermost dimension and the last set changes fastest.
+/// [`Self::next_selection`] returns a slice backed by the iterator itself, so
+/// callers can pass it directly to candidate binders without allocating a
+/// selection vector.
+#[derive(Debug)]
+pub struct CandidateCombinationIter {
+    candidate_counts: Vec<usize>,
+    selection: Vec<usize>,
+    remaining: usize,
+    started: bool,
+}
+
+impl CandidateCombinationIter {
+    /// Prepares Cartesian traversal for the supplied candidate sets.
+    pub fn new(candidate_sets: &[&CandidateSet]) -> Result<Self, CandidateCombinationError> {
+        let mut candidate_counts = Vec::with_capacity(candidate_sets.len());
+        let mut remaining = 1usize;
+        for (set_index, candidates) in candidate_sets.iter().enumerate() {
+            let candidate_count = candidates.points.len();
+            if candidate_count == 0 {
+                return Err(CandidateCombinationError::EmptyCandidateSet {
+                    set_index,
+                    set: candidates.name.clone(),
+                });
+            }
+            candidate_counts.push(candidate_count);
+            remaining = remaining.checked_mul(candidate_count).ok_or_else(|| {
+                CandidateCombinationError::CombinationCountOverflow {
+                    candidate_counts: candidate_counts.clone(),
+                }
+            })?;
+        }
+        Ok(Self {
+            selection: vec![0; candidate_counts.len()],
+            candidate_counts,
+            remaining,
+            started: false,
+        })
+    }
+
+    /// Returns the next reusable selection slice, or `None` when exhausted.
+    pub fn next_selection(&mut self) -> Option<&[usize]> {
+        if self.remaining == 0 {
+            return None;
+        }
+        if self.started {
+            self.increment();
+        } else {
+            self.started = true;
+        }
+        self.remaining -= 1;
+        Some(&self.selection)
+    }
+
+    /// Returns the number of combinations that have not yet been yielded.
+    pub const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Returns the number of candidate-set indices in each selection.
+    pub fn selection_len(&self) -> usize {
+        self.selection.len()
+    }
+
+    fn increment(&mut self) {
+        for dimension in (0..self.selection.len()).rev() {
+            self.selection[dimension] += 1;
+            if self.selection[dimension] < self.candidate_counts[dimension] {
+                return;
+            }
+            self.selection[dimension] = 0;
+        }
+    }
+}
+
+/// Errors produced while preparing generic candidate combinations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateCombinationError {
+    /// One of the supplied candidate sets has no points.
+    EmptyCandidateSet { set_index: usize, set: String },
+    /// The Cartesian combination count cannot be represented by `usize`.
+    CombinationCountOverflow { candidate_counts: Vec<usize> },
+}
+
+impl fmt::Display for CandidateCombinationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyCandidateSet { set_index, set } => {
+                write!(formatter, "candidate set {set_index} ('{set}') is empty")
+            }
+            Self::CombinationCountOverflow { candidate_counts } => write!(
+                formatter,
+                "candidate combination count overflows usize for dimensions {candidate_counts:?}"
+            ),
+        }
+    }
+}
+
+impl Error for CandidateCombinationError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CandidatePairSelection {
     pub left_index: usize,
@@ -640,8 +742,9 @@ pub fn candidate_column_name(prefix: &str, column: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateEquality, CandidateJoinError, CandidatePairJoin, CandidatePairSelection,
-        CandidatePoint, CandidateSchemaError, CandidateSet, candidate_column_indices,
+        CandidateCombinationError, CandidateCombinationIter, CandidateEquality, CandidateJoinError,
+        CandidatePairJoin, CandidatePairSelection, CandidatePoint, CandidateSchemaError,
+        CandidateSet, candidate_column_indices,
     };
 
     fn point(values: &[(&str, f64)]) -> CandidatePoint {
@@ -689,6 +792,62 @@ mod tests {
 
         assert_eq!(selection.left_index, 3);
         assert_eq!(selection.right_index, 7);
+    }
+
+    #[test]
+    fn streams_generic_cartesian_combinations_without_reallocating_selection() {
+        let first = CandidateSet::new("first", vec![point(&[("a", 0.0)]); 2]);
+        let second = CandidateSet::new("second", vec![point(&[("b", 0.0)]); 3]);
+        let third = CandidateSet::new("third", vec![point(&[("c", 0.0)]); 2]);
+        let mut combinations = CandidateCombinationIter::new(&[&first, &second, &third]).unwrap();
+
+        assert_eq!(combinations.selection_len(), 3);
+        assert_eq!(combinations.remaining(), 12);
+        let first_pointer = combinations.next_selection().unwrap().as_ptr();
+        let mut selections = vec![vec![0, 0, 0]];
+        while let Some(selection) = combinations.next_selection() {
+            assert_eq!(selection.as_ptr(), first_pointer);
+            selections.push(selection.to_vec());
+        }
+
+        assert_eq!(
+            selections,
+            vec![
+                vec![0, 0, 0],
+                vec![0, 0, 1],
+                vec![0, 1, 0],
+                vec![0, 1, 1],
+                vec![0, 2, 0],
+                vec![0, 2, 1],
+                vec![1, 0, 0],
+                vec![1, 0, 1],
+                vec![1, 1, 0],
+                vec![1, 1, 1],
+                vec![1, 2, 0],
+                vec![1, 2, 1],
+            ]
+        );
+        assert_eq!(combinations.remaining(), 0);
+        assert_eq!(combinations.next_selection(), None);
+        assert_eq!(combinations.next_selection(), None);
+    }
+
+    #[test]
+    fn treats_zero_sets_as_one_empty_combination_and_rejects_empty_sets() {
+        let mut combinations = CandidateCombinationIter::new(&[]).unwrap();
+        assert_eq!(combinations.remaining(), 1);
+        assert_eq!(combinations.next_selection(), Some([].as_slice()));
+        assert_eq!(combinations.next_selection(), None);
+
+        let valid = CandidateSet::new("valid", vec![point(&[("value", 1.0)])]);
+        let empty = CandidateSet::new("empty", Vec::new());
+        assert_eq!(
+            CandidateCombinationIter::new(&[&valid, &empty]).unwrap_err(),
+            CandidateCombinationError::EmptyCandidateSet {
+                set_index: 1,
+                set: "empty".to_owned(),
+            }
+        );
     }
 
     #[test]
