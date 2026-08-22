@@ -344,14 +344,14 @@ impl Error for CandidateParameterBindingError {}
 /// Bound capacitances follow [`Self::branches`] in the same deterministic order.
 #[derive(Debug)]
 pub struct CandidateCapacitanceBinder<'a> {
-    branches: &'a [ResolvedPrimitiveBranch],
+    branches: Vec<ResolvedPrimitiveBranch>,
     parameters: CandidateParameterBinder<'a>,
 }
 
 impl<'a> CandidateCapacitanceBinder<'a> {
     /// Resolves all intrinsic and extrinsic candidate columns for each branch.
     pub fn new(
-        branches: &'a [ResolvedPrimitiveBranch],
+        branches: &[ResolvedPrimitiveBranch],
         candidate_sets: &[&'a CandidateSet],
     ) -> Result<Self, CandidateCapacitanceBindingError> {
         let mut parameter_order =
@@ -372,14 +372,14 @@ impl<'a> CandidateCapacitanceBinder<'a> {
         }
         let parameters = CandidateParameterBinder::new(&parameter_order, candidate_sets)?;
         Ok(Self {
-            branches,
+            branches: branches.to_vec(),
             parameters,
         })
     }
 
     /// Returns the resolved branches in capacitance output order.
     pub fn branches(&self) -> &[ResolvedPrimitiveBranch] {
-        self.branches
+        &self.branches
     }
 
     /// Returns the number of scalar values required by [`Self::bind_into`].

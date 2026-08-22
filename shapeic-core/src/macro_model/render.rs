@@ -103,8 +103,8 @@ impl ExpandedSmallSignalNetlist {
         &self.primitive_branches
     }
 
-    pub(crate) fn into_parts(self) -> (String, Vec<String>) {
-        (self.source, self.parameter_order)
+    pub(crate) fn into_parts(self) -> (String, Vec<String>, Vec<ResolvedPrimitiveBranch>) {
+        (self.source, self.parameter_order, self.primitive_branches)
     }
 }
 

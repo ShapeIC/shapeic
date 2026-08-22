@@ -6,13 +6,47 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
+use shapeic_mna::numeric::NumericMnaError;
+
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
-use crate::testbench::{AcTestbenchBuildError, PreparedAcTestbench};
+use crate::testbench::{AcAnalysis, AcTestbench, AcTestbenchBuildError, PreparedAcTestbench};
 
 use super::{
     Macro, MacroAcTestbench, MacroCatalog, MacroRenderError, MacroRenderMode, MacroTestbenchSource,
-    render_small_signal_netlist,
+    ResolvedPrimitiveBranch, render_small_signal_netlist,
 };
+
+/// Compiled macro AC testbench and its resolved expanded primitive topology.
+#[derive(Clone, Debug)]
+pub struct PreparedMacroAcTestbench {
+    testbench: PreparedAcTestbench,
+    primitive_branches: Vec<ResolvedPrimitiveBranch>,
+}
+
+impl PreparedMacroAcTestbench {
+    /// Returns the numerical parameter names in candidate binding order.
+    pub fn parameter_names(&self) -> &[String] {
+        self.testbench.parameter_names()
+    }
+
+    /// Returns the AC analysis attached to the macro testbench.
+    pub const fn analysis(&self) -> &AcAnalysis {
+        self.testbench.analysis()
+    }
+
+    /// Returns the primitive branches materialized by the selected render mode.
+    pub fn primitive_branches(&self) -> &[ResolvedPrimitiveBranch] {
+        &self.primitive_branches
+    }
+
+    /// Instantiates the compiled MNA for one candidate parameter vector.
+    pub fn instantiate(
+        &mut self,
+        parameter_values: &[f64],
+    ) -> Result<AcTestbench, NumericMnaError> {
+        self.testbench.instantiate(parameter_values)
+    }
+}
 
 /// Errors produced while preparing a macro-owned AC testbench.
 #[derive(Debug)]
@@ -56,15 +90,16 @@ impl Error for MacroTestbenchPrepareError {
 ///
 /// The symbolic MNA and its numerical evaluator are prepared once. The
 /// returned testbench can then be instantiated repeatedly using values in its
-/// reported [`PreparedAcTestbench::parameter_names`] order.
+/// reported [`PreparedMacroAcTestbench::parameter_names`] order. Expanded
+/// primitive topology is retained for candidate-dependent numerical stamps.
 pub fn prepare_macro_ac_testbench(
     macro_: &Macro,
     testbench: &MacroAcTestbench,
     primitive_catalog: &PrimitiveCatalog,
     macro_catalog: &MacroCatalog,
     render_mode: MacroRenderMode,
-) -> Result<PreparedAcTestbench, MacroTestbenchPrepareError> {
-    let (source, parameter_order) = compose_macro_ac_testbench(
+) -> Result<PreparedMacroAcTestbench, MacroTestbenchPrepareError> {
+    let (source, parameter_order, primitive_branches) = compose_macro_ac_testbench(
         macro_,
         testbench,
         primitive_catalog,
@@ -76,8 +111,13 @@ pub fn prepare_macro_ac_testbench(
         .map(String::as_str)
         .collect::<Vec<_>>();
 
-    PreparedAcTestbench::from_spice(&source, &parameter_order, testbench.analysis().clone())
-        .map_err(MacroTestbenchPrepareError::Build)
+    let testbench =
+        PreparedAcTestbench::from_spice(&source, &parameter_order, testbench.analysis().clone())
+            .map_err(MacroTestbenchPrepareError::Build)?;
+    Ok(PreparedMacroAcTestbench {
+        testbench,
+        primitive_branches,
+    })
 }
 
 fn compose_macro_ac_testbench(
@@ -86,14 +126,14 @@ fn compose_macro_ac_testbench(
     primitive_catalog: &PrimitiveCatalog,
     macro_catalog: &MacroCatalog,
     render_mode: MacroRenderMode,
-) -> Result<(String, Vec<String>), MacroTestbenchPrepareError> {
+) -> Result<(String, Vec<String>, Vec<ResolvedPrimitiveBranch>), MacroTestbenchPrepareError> {
     let rendered =
         render_small_signal_netlist(macro_, primitive_catalog, macro_catalog, render_mode)
             .map_err(MacroTestbenchPrepareError::Render)?;
     let testbench_source = read_testbench_source(testbench.source())?;
-    let (macro_source, parameter_order) = rendered.into_parts();
+    let (macro_source, parameter_order, primitive_branches) = rendered.into_parts();
     let source = compose_sources(macro_source, testbench.name(), &testbench_source);
-    Ok((source, parameter_order))
+    Ok((source, parameter_order, primitive_branches))
 }
 
 fn read_testbench_source(
@@ -237,7 +277,7 @@ mod tests {
         let catalog = MacroCatalog::from_macros([macro_.clone()]).unwrap();
         let testbench = MacroAcTestbench::from_spice("gain", "Vinput VIN VSS 1\n", analysis());
 
-        let (source, parameter_order) = compose_macro_ac_testbench(
+        let (source, parameter_order, primitive_branches) = compose_macro_ac_testbench(
             &macro_,
             &testbench,
             &primitive_catalog(),
@@ -252,6 +292,15 @@ mod tests {
         );
         assert!(source.contains("G_gm__xcore__m1 VOUT VSS VIN VSS gm__xcore__m1"));
         assert!(source.contains("* testbench gain\nVinput VIN VSS 1\n"));
+        let [branch] = primitive_branches.as_slice() else {
+            panic!("expected one resolved primitive branch");
+        };
+        assert_eq!(branch.instance_path(), "xcore");
+        assert_eq!(branch.branch_name(), "m1");
+        assert_eq!(branch.gate_node(), "VIN");
+        assert_eq!(branch.drain_node(), "VOUT");
+        assert_eq!(branch.source_node(), "VSS");
+        assert_eq!(branch.bulk_node(), "VSS");
     }
 
     #[test]
