@@ -4,6 +4,7 @@ mod catalog;
 mod candidates;
 mod combination;
 mod evaluate;
+mod explore;
 mod input;
 mod model;
 mod prepare;
@@ -22,6 +23,11 @@ pub use combination::{
 pub use evaluate::{
     MacroAcCandidateAnalysisError, PreparedMacroAcCandidateEvaluator,
     PreparedMacroAcCandidateEvaluatorError,
+};
+pub use explore::{
+    MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
+    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationResult,
+    MacroExplorationStatistics, explore_macro_ac_candidates,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

@@ -1,0 +1,837 @@
+use std::error::Error;
+use std::fmt;
+
+use crate::analysis::{AcCompletion, AcMetric, AdaptiveAcOutcome};
+use crate::catalog::primitive_catalog::PrimitiveCatalog;
+use crate::exploration::candidate::CandidatePoint;
+
+use super::{
+    Macro, MacroAcCandidateAnalysisError, MacroCandidateCombinationError,
+    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroRenderMode,
+    MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
+    PreparedMacroAcCandidateEvaluatorError, prepare_macro_ac_testbench,
+};
+
+/// One accepted macro candidate and all AC outcomes evaluated for it.
+#[derive(Debug, PartialEq)]
+pub struct MacroAcceptedCandidate {
+    candidate_indices: Vec<usize>,
+    ac_outcomes: Vec<MacroAcTestbenchOutcome>,
+}
+
+impl MacroAcceptedCandidate {
+    /// Returns one candidate index per explorable instance, in circuit order.
+    pub fn candidate_indices(&self) -> &[usize] {
+        &self.candidate_indices
+    }
+
+    /// Returns the successful testbench outcomes in macro declaration order.
+    pub fn ac_outcomes(&self) -> &[MacroAcTestbenchOutcome] {
+        &self.ac_outcomes
+    }
+}
+
+/// Indexed AC outcome retained for an accepted macro candidate.
+#[derive(Debug, PartialEq)]
+pub struct MacroAcTestbenchOutcome {
+    testbench_index: usize,
+    outcome: AdaptiveAcOutcome,
+}
+
+impl MacroAcTestbenchOutcome {
+    /// Returns the testbench position in macro declaration order.
+    pub const fn testbench_index(&self) -> usize {
+        self.testbench_index
+    }
+
+    /// Returns the complete adaptive AC result.
+    pub const fn outcome(&self) -> &AdaptiveAcOutcome {
+        &self.outcome
+    }
+}
+
+/// AC rejection counts separated by the first failed specification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MacroAcRejectionCounts {
+    dc_gain: usize,
+    bandwidth_3db: usize,
+    unity_gain: usize,
+    phase_margin: usize,
+}
+
+impl MacroAcRejectionCounts {
+    /// Returns the number rejected by the requested AC metric.
+    pub const fn count(self, metric: AcMetric) -> usize {
+        match metric {
+            AcMetric::DcGainDb => self.dc_gain,
+            AcMetric::Bandwidth3DbHz => self.bandwidth_3db,
+            AcMetric::UnityGainHz => self.unity_gain,
+            AcMetric::PhaseMarginDeg => self.phase_margin,
+        }
+    }
+
+    /// Returns the total candidates rejected by this testbench.
+    pub const fn total(self) -> usize {
+        self.dc_gain + self.bandwidth_3db + self.unity_gain + self.phase_margin
+    }
+
+    fn record(&mut self, metric: AcMetric) {
+        match metric {
+            AcMetric::DcGainDb => self.dc_gain += 1,
+            AcMetric::Bandwidth3DbHz => self.bandwidth_3db += 1,
+            AcMetric::UnityGainHz => self.unity_gain += 1,
+            AcMetric::PhaseMarginDeg => self.phase_margin += 1,
+        }
+    }
+}
+
+/// Evaluation and rejection statistics for one macro AC testbench.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroAcTestbenchStatistics {
+    testbench: String,
+    evaluated_candidates: usize,
+    frequency_evaluations: usize,
+    rejections: MacroAcRejectionCounts,
+}
+
+impl MacroAcTestbenchStatistics {
+    fn new(testbench: impl Into<String>) -> Self {
+        Self {
+            testbench: testbench.into(),
+            evaluated_candidates: 0,
+            frequency_evaluations: 0,
+            rejections: MacroAcRejectionCounts::default(),
+        }
+    }
+
+    /// Returns the macro-local testbench name.
+    pub fn testbench(&self) -> &str {
+        &self.testbench
+    }
+
+    /// Returns how many compatible candidates reached this testbench.
+    pub const fn evaluated_candidates(&self) -> usize {
+        self.evaluated_candidates
+    }
+
+    /// Returns the total numerical frequency evaluations spent here.
+    pub const fn frequency_evaluations(&self) -> usize {
+        self.frequency_evaluations
+    }
+
+    /// Returns rejection counts classified by the first failed AC metric.
+    pub const fn rejections(&self) -> MacroAcRejectionCounts {
+        self.rejections
+    }
+}
+
+/// Aggregate statistics for one macro candidate exploration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MacroExplorationStatistics {
+    compatible_candidates: usize,
+    accepted_candidates: usize,
+    testbenches: Vec<MacroAcTestbenchStatistics>,
+}
+
+impl MacroExplorationStatistics {
+    /// Returns the number of connectivity-compatible selections evaluated.
+    pub const fn compatible_candidates(&self) -> usize {
+        self.compatible_candidates
+    }
+
+    /// Returns the number of selections accepted by every testbench.
+    pub const fn accepted_candidates(&self) -> usize {
+        self.accepted_candidates
+    }
+
+    /// Returns the number rejected by the first failing testbench.
+    pub const fn rejected_candidates(&self) -> usize {
+        self.compatible_candidates - self.accepted_candidates
+    }
+
+    /// Returns per-testbench statistics in evaluation order.
+    pub fn testbenches(&self) -> &[MacroAcTestbenchStatistics] {
+        &self.testbenches
+    }
+
+    /// Finds statistics for one macro-local testbench.
+    pub fn testbench(&self, name: &str) -> Option<&MacroAcTestbenchStatistics> {
+        self.testbenches
+            .iter()
+            .find(|testbench| testbench.testbench == name)
+    }
+
+    /// Returns all numerical frequency evaluations across every testbench.
+    pub fn frequency_evaluations(&self) -> usize {
+        self.testbenches
+            .iter()
+            .map(MacroAcTestbenchStatistics::frequency_evaluations)
+            .sum()
+    }
+}
+
+/// Immutable accepted results, candidate provenance, and exploration statistics.
+#[derive(Debug, PartialEq)]
+pub struct MacroExplorationResult {
+    macro_name: String,
+    candidate_sets: MacroCandidateSets,
+    accepted: Vec<MacroAcceptedCandidate>,
+    statistics: MacroExplorationStatistics,
+}
+
+impl MacroExplorationResult {
+    /// Returns the explored macro name.
+    pub fn macro_name(&self) -> &str {
+        &self.macro_name
+    }
+
+    /// Returns the filtered candidate sets retained for provenance lookup.
+    pub const fn candidate_sets(&self) -> &MacroCandidateSets {
+        &self.candidate_sets
+    }
+
+    /// Returns candidates accepted by every configured testbench.
+    pub fn accepted(&self) -> &[MacroAcceptedCandidate] {
+        &self.accepted
+    }
+
+    /// Returns aggregate and per-testbench exploration statistics.
+    pub const fn statistics(&self) -> &MacroExplorationStatistics {
+        &self.statistics
+    }
+
+    /// Resolves the selected candidate index for one instance path.
+    pub fn selected_candidate_index(
+        &self,
+        accepted: &MacroAcceptedCandidate,
+        instance_path: &str,
+    ) -> Option<usize> {
+        let instance_position = self
+            .candidate_sets
+            .instances()
+            .iter()
+            .position(|instance| instance.instance_path() == instance_path)?;
+        accepted.candidate_indices.get(instance_position).copied()
+    }
+
+    /// Resolves the complete selected candidate point for sizing and voltage lookup.
+    pub fn selected_candidate(
+        &self,
+        accepted: &MacroAcceptedCandidate,
+        instance_path: &str,
+    ) -> Option<&CandidatePoint> {
+        let candidate_index = self.selected_candidate_index(accepted, instance_path)?;
+        self.candidate_sets
+            .instance(instance_path)?
+            .candidates()
+            .points
+            .get(candidate_index)
+    }
+
+    /// Finds one accepted AC outcome by its macro-local testbench name.
+    pub fn ac_outcome<'a>(
+        &self,
+        accepted: &'a MacroAcceptedCandidate,
+        testbench: &str,
+    ) -> Option<&'a AdaptiveAcOutcome> {
+        let testbench_index = self
+            .statistics
+            .testbenches
+            .iter()
+            .position(|statistics| statistics.testbench == testbench)?;
+        accepted
+            .ac_outcomes
+            .iter()
+            .find(|outcome| outcome.testbench_index == testbench_index)
+            .map(MacroAcTestbenchOutcome::outcome)
+    }
+}
+
+/// Errors produced while preparing or executing macro-wide AC exploration.
+#[derive(Debug)]
+pub enum MacroAcExplorationError {
+    CandidateCombination(MacroCandidateCombinationError),
+    PrepareTestbench {
+        testbench: String,
+        error: MacroTestbenchPrepareError,
+    },
+    PrepareCandidateEvaluator {
+        testbench: String,
+        error: Box<PreparedMacroAcCandidateEvaluatorError>,
+    },
+    AnalyzeCandidate {
+        testbench: String,
+        candidate_indices: Vec<usize>,
+        error: Box<MacroAcCandidateAnalysisError>,
+    },
+    InconsistentOutcome {
+        testbench: String,
+        candidate_indices: Vec<usize>,
+        reason: &'static str,
+    },
+}
+
+impl fmt::Display for MacroAcExplorationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CandidateCombination(error) => error.fmt(formatter),
+            Self::PrepareTestbench { testbench, error } => write!(
+                formatter,
+                "could not prepare macro AC testbench '{testbench}': {error}"
+            ),
+            Self::PrepareCandidateEvaluator { testbench, error } => write!(
+                formatter,
+                "could not prepare candidate bindings for AC testbench '{testbench}': {error}"
+            ),
+            Self::AnalyzeCandidate {
+                testbench,
+                candidate_indices,
+                error,
+            } => write!(
+                formatter,
+                "could not analyze candidate selection {candidate_indices:?} with AC testbench '{testbench}': {error}"
+            ),
+            Self::InconsistentOutcome {
+                testbench,
+                candidate_indices,
+                reason,
+            } => write!(
+                formatter,
+                "AC testbench '{testbench}' returned an inconsistent outcome for candidate selection {candidate_indices:?}: {reason}"
+            ),
+        }
+    }
+}
+
+impl Error for MacroAcExplorationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::CandidateCombination(error) => Some(error),
+            Self::PrepareTestbench { error, .. } => Some(error),
+            Self::PrepareCandidateEvaluator { error, .. } => Some(error.as_ref()),
+            Self::AnalyzeCandidate { error, .. } => Some(error.as_ref()),
+            Self::InconsistentOutcome { .. } => None,
+        }
+    }
+}
+
+/// Executes all macro-owned AC testbenches over connectivity-compatible candidates.
+///
+/// Testbenches are prepared once in declaration order. A candidate rejected by
+/// one testbench is not evaluated by later testbenches, and only candidates
+/// accepted by every testbench retain their outcomes.
+pub fn explore_macro_ac_candidates(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    candidate_sets: MacroCandidateSets,
+) -> Result<MacroExplorationResult, MacroAcExplorationError> {
+    let testbench_names = macro_
+        .exploration()
+        .testbenches()
+        .iter()
+        .map(|testbench| testbench.name().to_owned())
+        .collect::<Vec<_>>();
+    let (accepted, statistics) = {
+        let mut combinations =
+            MacroCandidateCombinationJoin::new(macro_, primitive_catalog, &candidate_sets)
+                .map_err(MacroAcExplorationError::CandidateCombination)?;
+        let has_empty_candidate_set = candidate_sets
+            .candidate_sets()
+            .any(|candidates| candidates.points.is_empty());
+
+        if has_empty_candidate_set {
+            (
+                Vec::new(),
+                MacroExplorationStatistics::new(&testbench_names),
+            )
+        } else {
+            let candidate_refs = candidate_sets.candidate_sets().collect::<Vec<_>>();
+            let mut evaluators = Vec::with_capacity(macro_.exploration().testbenches().len());
+            for testbench in macro_.exploration().testbenches() {
+                let prepared = prepare_macro_ac_testbench(
+                    macro_,
+                    testbench,
+                    primitive_catalog,
+                    macro_catalog,
+                    MacroRenderMode::CompactSubmacros,
+                )
+                .map_err(|error| MacroAcExplorationError::PrepareTestbench {
+                    testbench: testbench.name().to_owned(),
+                    error,
+                })?;
+                let evaluator = PreparedMacroAcCandidateEvaluator::new(prepared, &candidate_refs)
+                    .map_err(|error| {
+                    MacroAcExplorationError::PrepareCandidateEvaluator {
+                        testbench: testbench.name().to_owned(),
+                        error: Box::new(error),
+                    }
+                })?;
+                evaluators.push(evaluator);
+            }
+            evaluate_candidate_combinations(
+                &mut combinations,
+                &testbench_names,
+                |testbench_index, candidate_indices| {
+                    evaluators[testbench_index].analyze(candidate_indices)
+                },
+            )
+            .map_err(|error| match error {
+                CandidateEvaluationLoopError::Analysis {
+                    testbench_index,
+                    candidate_indices,
+                    error,
+                } => MacroAcExplorationError::AnalyzeCandidate {
+                    testbench: testbench_names[testbench_index].clone(),
+                    candidate_indices,
+                    error: Box::new(error),
+                },
+                CandidateEvaluationLoopError::InconsistentOutcome {
+                    testbench_index,
+                    candidate_indices,
+                    reason,
+                } => MacroAcExplorationError::InconsistentOutcome {
+                    testbench: testbench_names[testbench_index].clone(),
+                    candidate_indices,
+                    reason,
+                },
+            })?
+        }
+    };
+
+    Ok(MacroExplorationResult {
+        macro_name: macro_.name().to_owned(),
+        candidate_sets,
+        accepted,
+        statistics,
+    })
+}
+
+impl MacroExplorationStatistics {
+    fn new(testbench_names: &[String]) -> Self {
+        Self {
+            testbenches: testbench_names
+                .iter()
+                .cloned()
+                .map(MacroAcTestbenchStatistics::new)
+                .collect(),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CandidateEvaluationLoopError<E> {
+    Analysis {
+        testbench_index: usize,
+        candidate_indices: Vec<usize>,
+        error: E,
+    },
+    InconsistentOutcome {
+        testbench_index: usize,
+        candidate_indices: Vec<usize>,
+        reason: &'static str,
+    },
+}
+
+fn evaluate_candidate_combinations<E>(
+    combinations: &mut MacroCandidateCombinationJoin<'_>,
+    testbench_names: &[String],
+    mut analyze: impl FnMut(usize, &[usize]) -> Result<AdaptiveAcOutcome, E>,
+) -> Result<
+    (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
+    CandidateEvaluationLoopError<E>,
+> {
+    let mut statistics = MacroExplorationStatistics::new(testbench_names);
+    let mut accepted = Vec::new();
+
+    while let Some(candidate_indices) = combinations.next_selection() {
+        statistics.compatible_candidates += 1;
+        let mut ac_outcomes = Vec::with_capacity(testbench_names.len());
+        let mut rejected = false;
+
+        for testbench_index in 0..testbench_names.len() {
+            let outcome = analyze(testbench_index, candidate_indices).map_err(|error| {
+                CandidateEvaluationLoopError::Analysis {
+                    testbench_index,
+                    candidate_indices: candidate_indices.to_vec(),
+                    error,
+                }
+            })?;
+            let testbench_statistics = &mut statistics.testbenches[testbench_index];
+            testbench_statistics.evaluated_candidates += 1;
+            testbench_statistics.frequency_evaluations += outcome.frequency_evaluations;
+
+            if let Some(metric) = rejection_metric(&outcome).map_err(|reason| {
+                CandidateEvaluationLoopError::InconsistentOutcome {
+                    testbench_index,
+                    candidate_indices: candidate_indices.to_vec(),
+                    reason,
+                }
+            })? {
+                testbench_statistics.rejections.record(metric);
+                rejected = true;
+                break;
+            }
+            ac_outcomes.push(MacroAcTestbenchOutcome {
+                testbench_index,
+                outcome,
+            });
+        }
+
+        if !rejected {
+            accepted.push(MacroAcceptedCandidate {
+                candidate_indices: candidate_indices.to_vec(),
+                ac_outcomes,
+            });
+        }
+    }
+
+    statistics.accepted_candidates = accepted.len();
+    debug_assert_eq!(
+        statistics.compatible_candidates,
+        statistics.accepted_candidates
+            + statistics
+                .testbenches
+                .iter()
+                .map(|testbench| testbench.rejections.total())
+                .sum::<usize>()
+    );
+    Ok((accepted, statistics))
+}
+
+fn rejection_metric(outcome: &AdaptiveAcOutcome) -> Result<Option<AcMetric>, &'static str> {
+    match (outcome.completion, outcome.targets.passed()) {
+        (AcCompletion::Complete, true) => Ok(None),
+        (AcCompletion::PrunedAfter(_), true) => {
+            Err("analysis was pruned although all evaluated targets passed")
+        }
+        (AcCompletion::PrunedAfter(metric), false) => {
+            if outcome
+                .targets
+                .failures()
+                .iter()
+                .any(|failure| failure.metric == metric)
+            {
+                Ok(Some(metric))
+            } else {
+                Err("pruning metric is not present in the target failures")
+            }
+        }
+        (AcCompletion::Complete, false) => outcome
+            .targets
+            .failures()
+            .first()
+            .map(|failure| Some(failure.metric))
+            .ok_or("failed target assessment contains no failures"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::analysis::{
+        AcMetricSet, AcMetrics, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
+        TargetAssessment,
+    };
+    use crate::circuit::Circuit;
+    use crate::exploration::candidate::{CandidatePoint, CandidateSet};
+    use crate::exploration::filter::CandidateFilterReport;
+    use crate::macro_model::{
+        MacroAcTestbench, MacroInstanceCandidateSet, MacroPort, MacroPortRole,
+    };
+    use crate::netlist::names::small_signal_param_name;
+    use crate::primitive::build::{PrimitiveBuildSpec, SweepMode};
+    use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
+    use crate::testbench::{AcAnalysis, TransferFunction};
+    use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
+
+    use super::*;
+
+    fn analysis() -> AcAnalysis {
+        AcAnalysis::new(
+            TransferFunction::new("VIN", "VOUT"),
+            AdaptiveAcConfig {
+                min_frequency_hz: 1.0,
+                max_frequency_hz: 1.0e6,
+                coarse_points_per_decade: 4,
+                crossing_relative_tolerance: 1.0e-4,
+                max_refinement_steps: 16,
+                retain_samples: false,
+            },
+            AdaptiveAcPolicy {
+                mode: AnalysisMode::Prune,
+                targets: AnalysisTargets {
+                    min_dc_gain_db: Some(10.0),
+                    min_bandwidth_3db_hz: None,
+                    min_unity_gain_hz: None,
+                    min_phase_margin_deg: None,
+                },
+                metrics: AcMetricSet::from_metric(AcMetric::DcGainDb),
+            },
+        )
+    }
+
+    fn primitive_catalog() -> PrimitiveCatalog {
+        let mut catalog = PrimitiveCatalog::new();
+        catalog.register(PrimitiveManifest {
+            name: "gain".to_owned(),
+            version: "1.0".to_owned(),
+            description: None,
+            subckt_name: "gain".to_owned(),
+            pins: vec![
+                Pin {
+                    name: "VIN".to_owned(),
+                    role: PinRole::Input,
+                },
+                Pin {
+                    name: "VOUT".to_owned(),
+                    role: PinRole::Output,
+                },
+                Pin {
+                    name: "VSS".to_owned(),
+                    role: PinRole::Supply,
+                },
+            ],
+            files: PrimitiveFiles {
+                netlist: "gain.spice".to_owned(),
+                build: None,
+                symbol: None,
+            },
+            small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
+                "m1", "VOUT", "VIN", "VSS", "VSS",
+            )])),
+            transistor_type: Some("nmos".to_owned()),
+            layout_params: None,
+            lut_config: None,
+            build: Some(PrimitiveBuildSpec {
+                inputs: Vec::new(),
+                sweep_mode: SweepMode::Aligned,
+                derived: Vec::new(),
+                lut: Vec::new(),
+                columns: Vec::new(),
+            }),
+        });
+        catalog
+    }
+
+    fn macro_() -> Macro {
+        Macro::new(
+            "gain_stage",
+            vec![
+                MacroPort::new("VIN", MacroPortRole::Input),
+                MacroPort::new("VOUT", MacroPortRole::Output),
+                MacroPort::new("VSS", MacroPortRole::Ground),
+            ],
+            Circuit::builder()
+                .primitive(
+                    "xcore",
+                    "gain",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .resistor("rload", "VOUT", "VSS", 1.0e4)
+                .build(),
+            Circuit::builder()
+                .vccs("gm", "VOUT", "VSS", "VIN", "VSS", "gm_eq")
+                .build(),
+        )
+        .with_ac_testbench(MacroAcTestbench::from_spice(
+            "gain",
+            "Vinput VIN VSS 1\n.end\n",
+            analysis(),
+        ))
+    }
+
+    fn candidate(gm: f64) -> CandidatePoint {
+        let mut values = vec![
+            (small_signal_param_name("gm", "xcore", "m1"), gm),
+            (small_signal_param_name("ro", "xcore", "m1"), 1.0e5),
+        ];
+        values.extend(
+            MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .chain(MosExtrinsicCapacitances::PARAMETERS)
+                .map(|parameter| (small_signal_param_name(parameter, "xcore", "m1"), 1.0e-15)),
+        );
+        CandidatePoint::new(values)
+    }
+
+    fn candidates() -> MacroCandidateSets {
+        MacroCandidateSets {
+            instances: vec![MacroInstanceCandidateSet {
+                instance_path: "xcore".to_owned(),
+                kind: super::super::MacroExplorationInstanceKind::Primitive,
+                candidates: CandidateSet::new("xcore", vec![candidate(1.0e-3), candidate(1.0e-5)]),
+                filter_report: CandidateFilterReport::default(),
+            }],
+        }
+    }
+
+    #[test]
+    fn evaluates_testbenches_in_order_and_stops_after_the_first_rejection() {
+        let macro_ = macro_();
+        let primitives = primitive_catalog();
+        let candidates = candidates();
+        let mut combinations =
+            MacroCandidateCombinationJoin::new(&macro_, &primitives, &candidates).unwrap();
+        let testbench_names = vec!["first".to_owned(), "second".to_owned()];
+        let mut calls = Vec::new();
+
+        let (accepted, statistics) = evaluate_candidate_combinations(
+            &mut combinations,
+            &testbench_names,
+            |testbench_index, candidate_indices| {
+                calls.push((testbench_index, candidate_indices.to_vec()));
+                if testbench_index == 0 && candidate_indices[0] == 1 {
+                    Ok::<_, ()>(rejected_outcome(AcMetric::DcGainDb, 2))
+                } else {
+                    Ok::<_, ()>(passing_outcome(3))
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, [(0, vec![0]), (1, vec![0]), (0, vec![1]),]);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].candidate_indices(), [0]);
+        assert_eq!(accepted[0].ac_outcomes().len(), 2);
+        assert_eq!(statistics.compatible_candidates(), 2);
+        assert_eq!(statistics.accepted_candidates(), 1);
+        assert_eq!(statistics.rejected_candidates(), 1);
+        assert_eq!(statistics.testbenches()[0].evaluated_candidates(), 2);
+        assert_eq!(
+            statistics.testbenches()[0]
+                .rejections()
+                .count(AcMetric::DcGainDb),
+            1
+        );
+        assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
+        assert_eq!(statistics.frequency_evaluations(), 8);
+    }
+
+    fn passing_outcome(frequency_evaluations: usize) -> AdaptiveAcOutcome {
+        AdaptiveAcOutcome {
+            metrics: AcMetrics::default(),
+            requested_metrics: AcMetricSet::ALL,
+            evaluated_metrics: AcMetricSet::ALL,
+            targets: TargetAssessment::default(),
+            completion: AcCompletion::Complete,
+            samples: Vec::new(),
+            frequency_evaluations,
+        }
+    }
+
+    fn rejected_outcome(metric: AcMetric, frequency_evaluations: usize) -> AdaptiveAcOutcome {
+        let targets = match metric {
+            AcMetric::DcGainDb => AnalysisTargets {
+                min_dc_gain_db: Some(1.0),
+                min_bandwidth_3db_hz: None,
+                min_unity_gain_hz: None,
+                min_phase_margin_deg: None,
+            },
+            AcMetric::Bandwidth3DbHz => AnalysisTargets {
+                min_dc_gain_db: None,
+                min_bandwidth_3db_hz: Some(1.0),
+                min_unity_gain_hz: None,
+                min_phase_margin_deg: None,
+            },
+            AcMetric::UnityGainHz => AnalysisTargets {
+                min_dc_gain_db: None,
+                min_bandwidth_3db_hz: None,
+                min_unity_gain_hz: Some(1.0),
+                min_phase_margin_deg: None,
+            },
+            AcMetric::PhaseMarginDeg => AnalysisTargets {
+                min_dc_gain_db: None,
+                min_bandwidth_3db_hz: None,
+                min_unity_gain_hz: None,
+                min_phase_margin_deg: Some(1.0),
+            },
+        }
+        .assess_metric(metric, Some(0.0));
+        AdaptiveAcOutcome {
+            metrics: AcMetrics::default(),
+            requested_metrics: AcMetricSet::ALL,
+            evaluated_metrics: AcMetricSet::ALL,
+            targets,
+            completion: AcCompletion::PrunedAfter(metric),
+            samples: Vec::new(),
+            frequency_evaluations,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the external Symbolica runtime used by numerical MNA preparation"]
+    fn explores_compatible_candidates_and_keeps_only_accepted_provenance() {
+        let macro_ = macro_();
+        let primitives = primitive_catalog();
+        let macros = MacroCatalog::from_macros([macro_.clone()]).unwrap();
+
+        let result =
+            explore_macro_ac_candidates(&macro_, &primitives, &macros, candidates()).unwrap();
+
+        assert_eq!(result.statistics().compatible_candidates(), 2);
+        assert_eq!(result.statistics().accepted_candidates(), 1);
+        assert_eq!(result.statistics().rejected_candidates(), 1);
+        let testbench = result.statistics().testbench("gain").unwrap();
+        assert_eq!(testbench.evaluated_candidates(), 2);
+        assert_eq!(testbench.rejections().count(AcMetric::DcGainDb), 1);
+        let accepted = &result.accepted()[0];
+        assert_eq!(result.selected_candidate_index(accepted, "xcore"), Some(0));
+        assert_eq!(
+            result
+                .selected_candidate(accepted, "xcore")
+                .and_then(|candidate| candidate.get("gm__xcore__m1")),
+            Some(1.0e-3)
+        );
+        assert!(
+            result
+                .ac_outcome(accepted, "gain")
+                .and_then(|outcome| outcome.metrics.dc_gain_db)
+                .is_some_and(|gain| gain >= 10.0)
+        );
+    }
+
+    #[test]
+    fn classifies_complete_full_insight_failures_by_first_metric() {
+        let metrics = AcMetrics {
+            dc_gain_db: Some(0.0),
+            bandwidth_3db_hz: None,
+            unity_gain_hz: None,
+            phase_margin_deg: None,
+        };
+        let targets = AnalysisTargets {
+            min_dc_gain_db: Some(10.0),
+            min_bandwidth_3db_hz: Some(1.0),
+            min_unity_gain_hz: None,
+            min_phase_margin_deg: None,
+        }
+        .assess_all(&metrics);
+        let outcome = AdaptiveAcOutcome {
+            metrics,
+            requested_metrics: AcMetricSet::ALL,
+            evaluated_metrics: AcMetricSet::ALL,
+            targets,
+            completion: AcCompletion::Complete,
+            samples: Vec::new(),
+            frequency_evaluations: 0,
+        };
+
+        assert_eq!(rejection_metric(&outcome), Ok(Some(AcMetric::DcGainDb)));
+    }
+
+    #[test]
+    fn rejects_inconsistent_pruned_outcomes() {
+        let outcome = AdaptiveAcOutcome {
+            metrics: AcMetrics::default(),
+            requested_metrics: AcMetricSet::ALL,
+            evaluated_metrics: AcMetricSet::ALL,
+            targets: TargetAssessment::default(),
+            completion: AcCompletion::PrunedAfter(AcMetric::DcGainDb),
+            samples: Vec::new(),
+            frequency_evaluations: 0,
+        };
+
+        assert!(rejection_metric(&outcome).is_err());
+    }
+}
