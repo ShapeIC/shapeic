@@ -6,6 +6,7 @@ use std::fmt;
 use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_mna::numeric::NumericMnaError;
 
+use crate::analysis::{AdaptiveAcError, AdaptiveAcOutcome};
 use crate::compact_model::{
     MosDeviceCapacitances, ResolvedCapacitanceStampError, stamp_resolved_mos_capacitances,
 };
@@ -14,7 +15,7 @@ use crate::exploration::binding::{
     CandidateParameterBindingError,
 };
 use crate::exploration::candidate::CandidateSet;
-use crate::testbench::AcTestbench;
+use crate::testbench::{AcTestbench, AcTestbenchEvaluationError};
 
 use super::PreparedMacroAcTestbench;
 
@@ -92,6 +93,46 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
             &self.capacitance_values,
         )?;
         Ok(candidate)
+    }
+
+    /// Instantiates and executes the configured AC analysis for one selection.
+    pub fn analyze(
+        &mut self,
+        candidate_indices: &[usize],
+    ) -> Result<AdaptiveAcOutcome, MacroAcCandidateAnalysisError> {
+        let candidate = self
+            .instantiate(candidate_indices)
+            .map_err(MacroAcCandidateAnalysisError::Candidate)?;
+        candidate
+            .analyze()
+            .map_err(MacroAcCandidateAnalysisError::Analysis)
+    }
+}
+
+/// Errors produced while instantiating or analyzing one macro candidate.
+#[derive(Debug)]
+pub enum MacroAcCandidateAnalysisError {
+    /// Candidate values could not be bound, instantiated, or stamped.
+    Candidate(PreparedMacroAcCandidateEvaluatorError),
+    /// AC metric extraction failed after successful candidate instantiation.
+    Analysis(AdaptiveAcError<AcTestbenchEvaluationError>),
+}
+
+impl fmt::Display for MacroAcCandidateAnalysisError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Candidate(error) => error.fmt(formatter),
+            Self::Analysis(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for MacroAcCandidateAnalysisError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Candidate(error) => Some(error),
+            Self::Analysis(error) => Some(error),
+        }
     }
 }
 

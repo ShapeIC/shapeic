@@ -8,7 +8,10 @@ mod render;
 mod validation;
 
 pub use catalog::{MacroCatalog, MacroCatalogError};
-pub use evaluate::{PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError};
+pub use evaluate::{
+    MacroAcCandidateAnalysisError, PreparedMacroAcCandidateEvaluator,
+    PreparedMacroAcCandidateEvaluatorError,
+};
 pub use model::{
     Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole, MacroTestbenchSource,
 };

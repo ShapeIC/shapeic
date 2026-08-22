@@ -329,12 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn instantiates_a_candidate_with_its_resolved_capacitance_stamp() {
+    fn instantiates_and_analyzes_a_candidate_with_resolved_capacitances() {
         let macro_ = macro_();
         let catalog = MacroCatalog::from_macros([macro_.clone()]).unwrap();
         let testbench = MacroAcTestbench::from_spice(
             "gain",
-            "Vinput VIN VSS 1\nVground VSS 0 0\n.end\n",
+            "Vinput VIN VSS 1\n.end\n",
             analysis(),
         );
         let prepared = prepare_macro_ac_testbench(
@@ -375,5 +375,8 @@ mod tests {
                 .iter()
                 .any(|value| *value != 0.0)
         );
+
+        let outcome = evaluator.analyze(&[0]).unwrap();
+        assert!(outcome.metrics.dc_gain_db.is_some());
     }
 }
