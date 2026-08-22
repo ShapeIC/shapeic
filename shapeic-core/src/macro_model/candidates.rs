@@ -17,10 +17,10 @@ use super::{
 /// Candidates and local filtering statistics for one macro circuit instance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacroInstanceCandidateSet {
-    instance_path: String,
-    kind: MacroExplorationInstanceKind,
-    candidates: CandidateSet,
-    filter_report: CandidateFilterReport,
+    pub(super) instance_path: String,
+    pub(super) kind: MacroExplorationInstanceKind,
+    pub(super) candidates: CandidateSet,
+    pub(super) filter_report: CandidateFilterReport,
 }
 
 impl MacroInstanceCandidateSet {
@@ -48,7 +48,7 @@ impl MacroInstanceCandidateSet {
 /// Candidate sets built for all explorable instances in circuit declaration order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MacroCandidateSets {
-    instances: Vec<MacroInstanceCandidateSet>,
+    pub(super) instances: Vec<MacroInstanceCandidateSet>,
 }
 
 impl MacroCandidateSets {

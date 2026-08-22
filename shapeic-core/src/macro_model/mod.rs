@@ -2,6 +2,7 @@
 
 mod catalog;
 mod candidates;
+mod combination;
 mod evaluate;
 mod input;
 mod model;
@@ -13,6 +14,10 @@ pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use candidates::{
     MacroCandidateBuildError, MacroCandidateSets, MacroInstanceCandidateSet,
     build_macro_candidate_sets,
+};
+pub use combination::{
+    MacroCandidateCombinationError, MacroCandidateCombinationJoin,
+    MacroCandidateCombinationPlan, plan_macro_candidate_combinations,
 };
 pub use evaluate::{
     MacroAcCandidateAnalysisError, PreparedMacroAcCandidateEvaluator,
