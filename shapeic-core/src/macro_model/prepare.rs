@@ -191,7 +191,7 @@ mod tests {
                 symbol: None,
             },
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
-                "m1", "VOUT", "VIN", "VSS",
+                "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
             transistor_type: None,
             layout_params: None,

@@ -707,6 +707,7 @@ fn validate_primitive_small_signal(
             ("drain", branch.drain_pin()),
             ("gate", branch.gate_pin()),
             ("source", branch.source_pin()),
+            ("bulk", branch.bulk_pin()),
         ] {
             if pin.trim().is_empty() {
                 let (macro_name, instance, primitive) = context();
@@ -933,7 +934,7 @@ mod tests {
                 symbol: None,
             },
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
-                "m1", "VOUT", "VIN", "VSS",
+                "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
             transistor_type: None,
             layout_params: None,
@@ -1074,8 +1075,8 @@ mod tests {
         let mut primitives = primitive_catalog();
         let mut primitive = primitives.get("stage_primitive").unwrap().clone();
         primitive.small_signal = Some(SmallSignalModel::new(vec![
-            SmallSignalBranch::new("m1", "UNKNOWN", "", "VSS"),
-            SmallSignalBranch::new("m1", "VOUT", "VIN", "VSS"),
+            SmallSignalBranch::new("m1", "UNKNOWN", "", "VSS", ""),
+            SmallSignalBranch::new("m1", "VOUT", "VIN", "VSS", "VSS"),
         ]));
         primitives.register(primitive);
         let macros = MacroCatalog::from_macros([leaf_macro()]).unwrap();
@@ -1094,6 +1095,13 @@ mod tests {
             error,
             MacroValidationError::EmptySmallSignalBranchPin {
                 terminal: "gate",
+                ..
+            }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptySmallSignalBranchPin {
+                terminal: "bulk",
                 ..
             }
         )));

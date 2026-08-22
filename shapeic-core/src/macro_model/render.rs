@@ -19,6 +19,7 @@ pub struct ResolvedPrimitiveBranch {
     gate_node: String,
     drain_node: String,
     source_node: String,
+    bulk_node: String,
 }
 
 impl ResolvedPrimitiveBranch {
@@ -50,6 +51,11 @@ impl ResolvedPrimitiveBranch {
     /// Returns the source node resolved in the expanded netlist namespace.
     pub fn source_node(&self) -> &str {
         &self.source_node
+    }
+
+    /// Returns the bulk node resolved in the expanded netlist namespace.
+    pub fn bulk_node(&self) -> &str {
+        &self.bulk_node
     }
 }
 
@@ -363,6 +369,7 @@ impl Renderer {
             let drain = resolved_connection(macro_, instance, branch.drain_pin(), scope)?;
             let gate = resolved_connection(macro_, instance, branch.gate_pin(), scope)?;
             let source = resolved_connection(macro_, instance, branch.source_pin(), scope)?;
+            let bulk = resolved_connection(macro_, instance, branch.bulk_pin(), scope)?;
             let gm = small_signal_param_name("gm", &path, branch.name());
             let ro = small_signal_param_name("ro", &path, branch.name());
             self.push_parameter(gm.clone(), format!("primitive:{path}:{}:gm", branch.name()))?;
@@ -383,6 +390,7 @@ impl Renderer {
                 gate_node: gate,
                 drain_node: drain,
                 source_node: source,
+                bulk_node: bulk,
             });
         }
         Ok(())
@@ -608,7 +616,7 @@ mod tests {
                 symbol: None,
             },
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
-                "m1", "VOUT", "VIN", "VSS",
+                "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
             transistor_type: None,
             layout_params: None,
@@ -684,6 +692,7 @@ mod tests {
         assert_eq!(branch.gate_node(), "VIN");
         assert_eq!(branch.drain_node(), "VOUT");
         assert_eq!(branch.source_node(), "VSS");
+        assert_eq!(branch.bulk_node(), "VSS");
         assert!(spice2cir_text(rendered.source()).is_ok());
     }
 

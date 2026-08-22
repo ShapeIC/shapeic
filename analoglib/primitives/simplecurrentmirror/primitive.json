@@ -12,13 +12,15 @@
         "name": "m1",
         "vd": "VOUTP",
         "vg": "VINP",
-        "vs": "VDD"
+        "vs": "VDD",
+        "vb": "VDD"
       },
       {
         "name": "m2",
         "vd": "VINP",
         "vg": "VINP",
-        "vs": "VDD"
+        "vs": "VDD",
+        "vb": "VDD"
       }
     ]
   },

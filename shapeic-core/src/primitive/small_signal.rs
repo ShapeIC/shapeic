@@ -39,21 +39,25 @@ pub struct SmallSignalBranch {
     gate_pin: String,
     #[serde(rename = "vs")]
     source_pin: String,
+    #[serde(rename = "vb")]
+    bulk_pin: String,
 }
 
 impl SmallSignalBranch {
-    /// Creates one branch from its name and drain, gate, and source pins.
+    /// Creates one branch from its name and drain, gate, source, and bulk pins.
     pub fn new(
         name: impl Into<String>,
         drain_pin: impl Into<String>,
         gate_pin: impl Into<String>,
         source_pin: impl Into<String>,
+        bulk_pin: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
             drain_pin: drain_pin.into(),
             gate_pin: gate_pin.into(),
             source_pin: source_pin.into(),
+            bulk_pin: bulk_pin.into(),
         }
     }
 
@@ -76,6 +80,11 @@ impl SmallSignalBranch {
     pub fn source_pin(&self) -> &str {
         &self.source_pin
     }
+
+    /// Returns the primitive pin connected to the branch bulk.
+    pub fn bulk_pin(&self) -> &str {
+        &self.bulk_pin
+    }
 }
 
 #[cfg(test)]
@@ -85,8 +94,8 @@ mod tests {
     #[test]
     fn preserves_branch_order_and_resolves_names() {
         let model = SmallSignalModel::new(vec![
-            SmallSignalBranch::new("m1", "VOUTP", "VINP", "VTAIL"),
-            SmallSignalBranch::new("m2", "VOUTN", "VINN", "VTAIL"),
+            SmallSignalBranch::new("m1", "VOUTP", "VINP", "VTAIL", "VSS"),
+            SmallSignalBranch::new("m2", "VOUTN", "VINN", "VTAIL", "VSS"),
         ]);
 
         assert_eq!(model.branches().len(), 2);
@@ -98,11 +107,11 @@ mod tests {
     }
 
     #[test]
-    fn keeps_the_existing_manifest_field_names() {
+    fn keeps_the_manifest_terminal_field_names() {
         let model: SmallSignalModel = serde_json::from_str(
             r#"{
                 "branches": [
-                    { "name": "m1", "vd": "VOUT", "vg": "VIN", "vs": "VSS" }
+                    { "name": "m1", "vd": "VOUT", "vg": "VIN", "vs": "VTAIL", "vb": "VSS" }
                 ]
             }"#,
         )
@@ -111,7 +120,8 @@ mod tests {
 
         assert_eq!(branch.drain_pin(), "VOUT");
         assert_eq!(branch.gate_pin(), "VIN");
-        assert_eq!(branch.source_pin(), "VSS");
+        assert_eq!(branch.source_pin(), "VTAIL");
+        assert_eq!(branch.bulk_pin(), "VSS");
         assert_eq!(
             serde_json::to_value(model).unwrap()["branches"][0]["vd"],
             "VOUT"

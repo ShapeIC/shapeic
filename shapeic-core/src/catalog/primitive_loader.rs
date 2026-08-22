@@ -197,5 +197,6 @@ mod tests {
         assert_eq!(m2.drain_pin(), "VOUTN");
         assert_eq!(m2.gate_pin(), "VINN");
         assert_eq!(m2.source_pin(), "VTAIL");
+        assert_eq!(m2.bulk_pin(), "VSS");
     }
 }

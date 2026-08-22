@@ -4,7 +4,7 @@
   "description": "Simple differential pair — single transistor per branch, NMOS or PMOS",
   "transistor_type": "nmos",
   "subckt_name": "simplediffpair",
-  "pin_order": ["VINP", "VINN", "VOUTP", "VOUTN", "VTAIL"],
+  "pin_order": ["VINP", "VINN", "VOUTP", "VOUTN", "VTAIL", "VSS"],
 
   "small_signal": {
     "branches": [
@@ -12,13 +12,15 @@
         "name": "m1",
         "vd": "VOUTP",
         "vg": "VINP",
-        "vs": "VTAIL"
+        "vs": "VTAIL",
+        "vb": "VSS"
       },
       {
         "name": "m2",
         "vd": "VOUTN",
         "vg": "VINN",
-        "vs": "VTAIL"
+        "vs": "VTAIL",
+        "vb": "VSS"
       }
     ]
   },
@@ -28,7 +30,8 @@
             "VINN":  { "name": "VINN",  "role": "INPUT",  "description": "Negative differential input" },
             "VOUTP": { "name": "VOUTP", "role": "OUTPUT", "description": "Positive output" },
             "VOUTN": { "name": "VOUTN", "role": "OUTPUT", "description": "Negative output" },
-            "VTAIL": { "name": "VTAIL", "role": "BIAS",   "description": "Tail current source node" }
+            "VTAIL": { "name": "VTAIL", "role": "BIAS",   "description": "Tail current source node" },
+            "VSS":   { "name": "VSS",   "role": "SUPPLY", "description": "NMOS bulk connection" }
   },
 
   "ui": {
@@ -38,7 +41,8 @@
 	{ "name": "VINN", "side": "left", "offset": 0.5 },
 	{ "name": "VOUTP", "side": "top", "offset": 0.8 },
 	{ "name": "VOUTN", "side": "top", "offset": 0.2 },
-	{ "name": "VTAIL", "side": "bottom", "offset": 0.5 }
+	{ "name": "VTAIL", "side": "bottom", "offset": 0.5 },
+	{ "name": "VSS", "side": "bottom", "offset": 0.8 }
       ]
     }
   },
