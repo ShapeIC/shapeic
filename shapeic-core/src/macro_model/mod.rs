@@ -2,11 +2,15 @@
 
 mod catalog;
 mod model;
+mod render;
 mod validation;
 
 pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use model::{
     Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole, MacroTestbenchSource,
+};
+pub use render::{
+    ExpandedSmallSignalNetlist, MacroRenderError, render_expanded_small_signal_netlist,
 };
 pub use validation::{
     MacroCircuitKind, MacroValidationError, validate_macro, validate_macro_catalog,
