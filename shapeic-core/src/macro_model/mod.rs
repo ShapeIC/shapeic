@@ -2,6 +2,7 @@
 
 mod catalog;
 mod model;
+mod prepare;
 mod render;
 mod validation;
 
@@ -9,6 +10,7 @@ pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use model::{
     Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole, MacroTestbenchSource,
 };
+pub use prepare::{MacroTestbenchPrepareError, prepare_macro_ac_testbench};
 pub use render::{
     ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
     render_expanded_small_signal_netlist, render_small_signal_netlist,

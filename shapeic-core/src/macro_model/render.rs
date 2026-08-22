@@ -27,6 +27,10 @@ impl ExpandedSmallSignalNetlist {
     pub fn parameter_order(&self) -> &[String] {
         &self.parameter_order
     }
+
+    pub(crate) fn into_parts(self) -> (String, Vec<String>) {
+        (self.source, self.parameter_order)
+    }
 }
 
 /// Selects which macro representation is lowered into the linear netlist.
