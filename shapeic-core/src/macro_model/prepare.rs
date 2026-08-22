@@ -175,15 +175,18 @@ mod tests {
     };
     use crate::catalog::primitive_catalog::PrimitiveCatalog;
     use crate::circuit::Circuit;
+    use crate::exploration::candidate::{CandidatePoint, CandidateSet};
     use crate::macro_model::{
         Macro, MacroAcTestbench, MacroCatalog, MacroPort, MacroPortRole, MacroRenderMode,
-        MacroTestbenchPrepareError,
+        MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
     };
+    use crate::netlist::names::small_signal_param_name;
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use crate::testbench::{AcAnalysis, TransferFunction};
+    use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 
-    use super::{compose_macro_ac_testbench, compose_sources};
+    use super::{compose_macro_ac_testbench, compose_sources, prepare_macro_ac_testbench};
 
     fn analysis() -> AcAnalysis {
         AcAnalysis::new(
@@ -323,5 +326,54 @@ mod tests {
             error,
             MacroTestbenchPrepareError::ReadTestbench { path, .. } if path == missing
         ));
+    }
+
+    #[test]
+    fn instantiates_a_candidate_with_its_resolved_capacitance_stamp() {
+        let macro_ = macro_();
+        let catalog = MacroCatalog::from_macros([macro_.clone()]).unwrap();
+        let testbench = MacroAcTestbench::from_spice(
+            "gain",
+            "Vinput VIN VSS 1\nVground VSS 0 0\n.end\n",
+            analysis(),
+        );
+        let prepared = prepare_macro_ac_testbench(
+            &macro_,
+            &testbench,
+            &primitive_catalog(),
+            &catalog,
+            MacroRenderMode::Expanded,
+        )
+        .unwrap();
+        let mut values = vec![
+            ("gm__xcore__m1".to_owned(), 1.0e-3),
+            ("ro__xcore__m1".to_owned(), 1.0e5),
+            ("load_resistance".to_owned(), 1.0e4),
+        ];
+        values.extend(
+            MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .chain(MosExtrinsicCapacitances::PARAMETERS)
+                .enumerate()
+                .map(|(index, parameter)| {
+                    (
+                        small_signal_param_name(parameter, "xcore", "m1"),
+                        (index + 1) as f64 * 1.0e-15,
+                    )
+                }),
+        );
+        let candidates = CandidateSet::new("xcore", vec![CandidatePoint::new(values)]);
+        let mut evaluator =
+            PreparedMacroAcCandidateEvaluator::new(prepared, &[&candidates]).unwrap();
+
+        let candidate = evaluator.instantiate(&[0]).unwrap();
+
+        assert!(
+            candidate
+                .system()
+                .capacitance_matrix()
+                .iter()
+                .any(|value| *value != 0.0)
+        );
     }
 }

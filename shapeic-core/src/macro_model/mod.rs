@@ -1,12 +1,14 @@
 //! Reusable macros, compact circuit models, and their exploration definitions.
 
 mod catalog;
+mod evaluate;
 mod model;
 mod prepare;
 mod render;
 mod validation;
 
 pub use catalog::{MacroCatalog, MacroCatalogError};
+pub use evaluate::{PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError};
 pub use model::{
     Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole, MacroTestbenchSource,
 };
