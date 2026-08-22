@@ -27,8 +27,8 @@ pub use evaluate::{
 };
 pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
-    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationResult,
-    MacroExplorationStatistics, explore_macro_ac_candidates,
+    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationError,
+    MacroExplorationResult, MacroExplorationStatistics, explore_macro_ac_candidates,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

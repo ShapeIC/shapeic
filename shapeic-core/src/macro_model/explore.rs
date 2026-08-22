@@ -6,10 +6,10 @@ use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::exploration::candidate::CandidatePoint;
 
 use super::{
-    Macro, MacroAcCandidateAnalysisError, MacroCandidateCombinationError,
-    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroRenderMode,
-    MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
-    PreparedMacroAcCandidateEvaluatorError, prepare_macro_ac_testbench,
+    Macro, MacroAcCandidateAnalysisError, MacroCandidateBuildError, MacroCandidateCombinationError,
+    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroExplorationInput,
+    MacroRenderMode, MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
+    PreparedMacroAcCandidateEvaluatorError, build_macro_candidate_sets, prepare_macro_ac_testbench,
 };
 
 /// One accepted macro candidate and all AC outcomes evaluated for it.
@@ -331,6 +331,60 @@ impl Error for MacroAcExplorationError {
             Self::AnalyzeCandidate { error, .. } => Some(error.as_ref()),
             Self::InconsistentOutcome { .. } => None,
         }
+    }
+}
+
+/// Errors produced by the complete macro exploration entry point.
+#[derive(Debug)]
+pub enum MacroExplorationError {
+    /// Primitive or compact-submacro candidate construction failed.
+    BuildCandidates(MacroCandidateBuildError),
+    /// Candidate combination, testbench preparation, or AC evaluation failed.
+    Ac(MacroAcExplorationError),
+}
+
+impl fmt::Display for MacroExplorationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BuildCandidates(error) => error.fmt(formatter),
+            Self::Ac(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for MacroExplorationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::BuildCandidates(error) => Some(error),
+            Self::Ac(error) => Some(error),
+        }
+    }
+}
+
+impl From<MacroCandidateBuildError> for MacroExplorationError {
+    fn from(error: MacroCandidateBuildError) -> Self {
+        Self::BuildCandidates(error)
+    }
+}
+
+impl From<MacroAcExplorationError> for MacroExplorationError {
+    fn from(error: MacroAcExplorationError) -> Self {
+        Self::Ac(error)
+    }
+}
+
+impl Macro {
+    /// Builds local candidate sets, combines them by connectivity, and runs all
+    /// AC testbenches declared by this macro.
+    pub fn explore(
+        &self,
+        primitive_catalog: &PrimitiveCatalog,
+        macro_catalog: &MacroCatalog,
+        input: MacroExplorationInput<'_>,
+    ) -> Result<MacroExplorationResult, MacroExplorationError> {
+        let candidate_sets = build_macro_candidate_sets(self, primitive_catalog, input)?;
+        explore_macro_ac_candidates(self, primitive_catalog, macro_catalog, candidate_sets)
+            .map_err(Into::into)
     }
 }
 
