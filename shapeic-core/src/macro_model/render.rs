@@ -29,6 +29,18 @@ impl ExpandedSmallSignalNetlist {
     }
 }
 
+/// Selects which macro representation is lowered into the linear netlist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MacroRenderMode {
+    /// Expands the implementation of the root macro and every submacro.
+    #[default]
+    Expanded,
+    /// Expands the root implementation and uses compact models for submacros.
+    CompactSubmacros,
+    /// Renders only the compact model of the root macro.
+    Compact,
+}
+
 /// Errors produced while expanding a macro implementation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroRenderError {
@@ -88,7 +100,7 @@ impl fmt::Display for MacroRenderError {
             ),
             Self::DuplicateParameter { parameter } => write!(
                 formatter,
-                "expanded small-signal parameter '{parameter}' has multiple independent origins"
+                "small-signal parameter '{parameter}' has multiple independent origins"
             ),
             Self::CyclicDependency { path } => {
                 write!(formatter, "cyclic macro dependency: {}", path.join(" -> "))
@@ -99,26 +111,52 @@ impl fmt::Display for MacroRenderError {
 
 impl Error for MacroRenderError {}
 
-/// Expands all reachable primitive branches and linear implementation elements.
-///
-/// Submacros are recursively expanded. Compact models, testbench composition,
-/// and candidate-value binding are intentionally handled by later stages.
+/// Fully expands all reachable primitive branches and implementation elements.
 pub fn render_expanded_small_signal_netlist(
     macro_: &Macro,
     primitive_catalog: &PrimitiveCatalog,
     macro_catalog: &MacroCatalog,
 ) -> Result<ExpandedSmallSignalNetlist, MacroRenderError> {
-    let mut renderer = Renderer::default();
-    let root_scope = NetScope::root(macro_);
-    let mut macro_stack = vec![macro_.name().to_owned()];
-    renderer.expand_macro(
+    render_small_signal_netlist(
         macro_,
         primitive_catalog,
         macro_catalog,
-        &root_scope,
-        &mut Vec::new(),
-        &mut macro_stack,
-    )?;
+        MacroRenderMode::Expanded,
+    )
+}
+
+/// Lowers the selected macro representation to an in-memory linear netlist.
+///
+/// Testbench composition and candidate-value binding are intentionally handled
+/// by later preparation stages.
+pub fn render_small_signal_netlist(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    mode: MacroRenderMode,
+) -> Result<ExpandedSmallSignalNetlist, MacroRenderError> {
+    let mut renderer = Renderer::default();
+    let root_scope = NetScope::root(macro_);
+    match mode {
+        MacroRenderMode::Compact => renderer.render_compact_model(
+            macro_,
+            primitive_catalog,
+            macro_catalog,
+            &root_scope,
+            &mut Vec::new(),
+        )?,
+        MacroRenderMode::Expanded | MacroRenderMode::CompactSubmacros => {
+            renderer.expand_macro(
+                macro_,
+                primitive_catalog,
+                macro_catalog,
+                mode,
+                &root_scope,
+                &mut Vec::new(),
+                &mut vec![macro_.name().to_owned()],
+            )?;
+        }
+    }
 
     let source = if renderer.lines.is_empty() {
         String::new()
@@ -144,6 +182,7 @@ impl Renderer {
         macro_: &Macro,
         primitive_catalog: &PrimitiveCatalog,
         macro_catalog: &MacroCatalog,
+        mode: MacroRenderMode,
         scope: &NetScope,
         instance_path: &mut Vec<String>,
         macro_stack: &mut Vec<String>,
@@ -183,21 +222,62 @@ impl Renderer {
                     })?;
                     let nested_scope =
                         NetScope::nested(macro_, instance, nested, scope, instance_path)?;
-                    macro_stack.push(nested_name.clone());
-                    self.expand_macro(
-                        nested,
-                        primitive_catalog,
-                        macro_catalog,
-                        &nested_scope,
-                        instance_path,
-                        macro_stack,
-                    )?;
-                    macro_stack.pop();
+                    match mode {
+                        MacroRenderMode::Expanded => {
+                            macro_stack.push(nested_name.clone());
+                            self.expand_macro(
+                                nested,
+                                primitive_catalog,
+                                macro_catalog,
+                                mode,
+                                &nested_scope,
+                                instance_path,
+                                macro_stack,
+                            )?;
+                            macro_stack.pop();
+                        }
+                        MacroRenderMode::CompactSubmacros | MacroRenderMode::Compact => {
+                            self.render_compact_model(
+                                nested,
+                                primitive_catalog,
+                                macro_catalog,
+                                &nested_scope,
+                                instance_path,
+                            )?;
+                        }
+                    }
                 }
                 BlockRef::Element(element) => {
                     self.render_linear_element(macro_, instance, element, scope, instance_path)?;
                 }
             }
+            instance_path.pop();
+        }
+        Ok(())
+    }
+
+    fn render_compact_model(
+        &mut self,
+        macro_: &Macro,
+        primitive_catalog: &PrimitiveCatalog,
+        macro_catalog: &MacroCatalog,
+        scope: &NetScope,
+        instance_path: &mut Vec<String>,
+    ) -> Result<(), MacroRenderError> {
+        let validation_errors = validate_macro(macro_, primitive_catalog, macro_catalog);
+        if !validation_errors.is_empty() {
+            return Err(MacroRenderError::InvalidMacro {
+                macro_name: macro_.name().to_owned(),
+                errors: validation_errors,
+            });
+        }
+
+        for instance in macro_.compact_model().instances() {
+            instance_path.push(instance.name().to_owned());
+            let BlockRef::Element(element) = instance.block() else {
+                unreachable!("validated compact models contain only linear elements");
+            };
+            self.render_linear_element(macro_, instance, element, scope, instance_path)?;
             instance_path.pop();
         }
         Ok(())
@@ -434,7 +514,9 @@ mod tests {
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use shapeic_mna::spice2cir::spice2cir_text;
 
-    use super::render_expanded_small_signal_netlist;
+    use super::{
+        MacroRenderMode, render_expanded_small_signal_netlist, render_small_signal_netlist,
+    };
 
     fn primitive_catalog() -> PrimitiveCatalog {
         let mut catalog = PrimitiveCatalog::new();
@@ -570,5 +652,68 @@ mod tests {
                 .parameter_order()
                 .contains(&"load_resistance__xb".to_owned())
         );
+    }
+
+    #[test]
+    fn renders_the_root_compact_model_without_expanding_its_implementation() {
+        let macro_ = leaf("leaf", "VOUT");
+        let macros = MacroCatalog::from_macros([macro_.clone()]).unwrap();
+
+        let rendered = render_small_signal_netlist(
+            &macro_,
+            &primitive_catalog(),
+            &macros,
+            MacroRenderMode::Compact,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.source(), "G_gm VOUT VSS VIN VSS gm_eq\n");
+        assert_eq!(rendered.parameter_order(), ["gm_eq"]);
+        assert!(!rendered.source().contains("xcore"));
+    }
+
+    #[test]
+    fn uses_independent_compact_parameters_for_each_submacro_instance() {
+        let leaf = leaf("leaf", "VOUT");
+        let parent = Macro::new(
+            "parent",
+            ports(),
+            Circuit::builder()
+                .macro_instance(
+                    "xa",
+                    "leaf",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .macro_instance(
+                    "xb",
+                    "leaf",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .build(),
+            compact_model(),
+        );
+        let macros = MacroCatalog::from_macros([leaf, parent.clone()]).unwrap();
+
+        let rendered = render_small_signal_netlist(
+            &parent,
+            &primitive_catalog(),
+            &macros,
+            MacroRenderMode::CompactSubmacros,
+        )
+        .unwrap();
+
+        assert!(
+            rendered
+                .source()
+                .contains("G_xa__gm VOUT VSS VIN VSS gm_eq__xa")
+        );
+        assert!(
+            rendered
+                .source()
+                .contains("G_xb__gm VOUT VSS VIN VSS gm_eq__xb")
+        );
+        assert_eq!(rendered.parameter_order(), ["gm_eq__xa", "gm_eq__xb"]);
+        assert!(!rendered.source().contains("gm__xa__xcore__m1"));
+        assert!(spice2cir_text(rendered.source()).is_ok());
     }
 }
