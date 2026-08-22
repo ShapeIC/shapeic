@@ -10,11 +10,55 @@ use crate::netlist::names::{small_signal_element_name, small_signal_param_name};
 
 use super::{Macro, MacroCatalog, MacroValidationError, validate_macro};
 
-/// Expanded SPICE source and its deterministic numerical parameter order.
+/// Resolved identity and terminal topology of an expanded primitive branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPrimitiveBranch {
+    instance_path: String,
+    primitive_name: String,
+    branch_name: String,
+    gate_node: String,
+    drain_node: String,
+    source_node: String,
+}
+
+impl ResolvedPrimitiveBranch {
+    /// Returns the sanitized hierarchical path of the primitive instance.
+    pub fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    /// Returns the primitive definition referenced by the instance.
+    pub fn primitive_name(&self) -> &str {
+        &self.primitive_name
+    }
+
+    /// Returns the primitive small-signal branch name.
+    pub fn branch_name(&self) -> &str {
+        &self.branch_name
+    }
+
+    /// Returns the gate node resolved in the expanded netlist namespace.
+    pub fn gate_node(&self) -> &str {
+        &self.gate_node
+    }
+
+    /// Returns the drain node resolved in the expanded netlist namespace.
+    pub fn drain_node(&self) -> &str {
+        &self.drain_node
+    }
+
+    /// Returns the source node resolved in the expanded netlist namespace.
+    pub fn source_node(&self) -> &str {
+        &self.source_node
+    }
+}
+
+/// Expanded SPICE source, parameter order, and resolved primitive topology.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandedSmallSignalNetlist {
     source: String,
     parameter_order: Vec<String>,
+    primitive_branches: Vec<ResolvedPrimitiveBranch>,
 }
 
 impl ExpandedSmallSignalNetlist {
@@ -26,6 +70,11 @@ impl ExpandedSmallSignalNetlist {
     /// Returns the exact parameter order expected by numerical preparation.
     pub fn parameter_order(&self) -> &[String] {
         &self.parameter_order
+    }
+
+    /// Returns the primitive branches materialized by the selected render mode.
+    pub fn primitive_branches(&self) -> &[ResolvedPrimitiveBranch] {
+        &self.primitive_branches
     }
 
     pub(crate) fn into_parts(self) -> (String, Vec<String>) {
@@ -170,6 +219,7 @@ pub fn render_small_signal_netlist(
     Ok(ExpandedSmallSignalNetlist {
         source,
         parameter_order: renderer.parameter_order,
+        primitive_branches: renderer.primitive_branches,
     })
 }
 
@@ -178,6 +228,7 @@ struct Renderer {
     lines: Vec<String>,
     parameter_order: Vec<String>,
     parameters: HashMap<String, String>,
+    primitive_branches: Vec<ResolvedPrimitiveBranch>,
 }
 
 impl Renderer {
@@ -325,6 +376,14 @@ impl Renderer {
                 "{} {drain} {source} {ro}",
                 small_signal_element_name("R", "ro", &path, branch.name())
             ));
+            self.primitive_branches.push(ResolvedPrimitiveBranch {
+                instance_path: path.clone(),
+                primitive_name: primitive_name.to_owned(),
+                branch_name: branch.name().to_owned(),
+                gate_node: gate,
+                drain_node: drain,
+                source_node: source,
+            });
         }
         Ok(())
     }
@@ -616,6 +675,15 @@ mod tests {
             rendered.parameter_order(),
             ["gm__xcore__m1", "ro__xcore__m1", "load_resistance"]
         );
+        let [branch] = rendered.primitive_branches() else {
+            panic!("expected one expanded primitive branch");
+        };
+        assert_eq!(branch.instance_path(), "xcore");
+        assert_eq!(branch.primitive_name(), "gain_primitive");
+        assert_eq!(branch.branch_name(), "m1");
+        assert_eq!(branch.gate_node(), "VIN");
+        assert_eq!(branch.drain_node(), "VOUT");
+        assert_eq!(branch.source_node(), "VSS");
         assert!(spice2cir_text(rendered.source()).is_ok());
     }
 
@@ -656,6 +724,17 @@ mod tests {
                 .parameter_order()
                 .contains(&"load_resistance__xb".to_owned())
         );
+        assert_eq!(rendered.primitive_branches().len(), 2);
+        assert_eq!(
+            rendered.primitive_branches()[0].instance_path(),
+            "xa__xcore"
+        );
+        assert_eq!(rendered.primitive_branches()[0].drain_node(), "n__xa__NINT");
+        assert_eq!(
+            rendered.primitive_branches()[1].instance_path(),
+            "xb__xcore"
+        );
+        assert_eq!(rendered.primitive_branches()[1].drain_node(), "n__xb__NINT");
     }
 
     #[test]
@@ -673,6 +752,7 @@ mod tests {
 
         assert_eq!(rendered.source(), "G_gm VOUT VSS VIN VSS gm_eq\n");
         assert_eq!(rendered.parameter_order(), ["gm_eq"]);
+        assert!(rendered.primitive_branches().is_empty());
         assert!(!rendered.source().contains("xcore"));
     }
 
@@ -717,6 +797,7 @@ mod tests {
                 .contains("G_xb__gm VOUT VSS VIN VSS gm_eq__xb")
         );
         assert_eq!(rendered.parameter_order(), ["gm_eq__xa", "gm_eq__xb"]);
+        assert!(rendered.primitive_branches().is_empty());
         assert!(!rendered.source().contains("gm__xa__xcore__m1"));
         assert!(spice2cir_text(rendered.source()).is_ok());
     }

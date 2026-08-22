@@ -12,7 +12,7 @@ pub use model::{
 };
 pub use prepare::{MacroTestbenchPrepareError, prepare_macro_ac_testbench};
 pub use render::{
-    ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
+    ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode, ResolvedPrimitiveBranch,
     render_expanded_small_signal_netlist, render_small_signal_netlist,
 };
 pub use validation::{
