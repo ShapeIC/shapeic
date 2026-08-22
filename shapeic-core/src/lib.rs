@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod circuit;
 pub mod compact_model;
 pub mod exploration;
+pub mod macro_model;
 pub mod netlist;
 pub mod primitive;
 pub mod testbench;
