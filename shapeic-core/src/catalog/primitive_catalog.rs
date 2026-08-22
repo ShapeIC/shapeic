@@ -62,6 +62,7 @@ mod tests {
                 build: None,
                 symbol: None,
             },
+            small_signal: None,
             transistor_type: None,
             layout_params: None,
             lut_config: None,

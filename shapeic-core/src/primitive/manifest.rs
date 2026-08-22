@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::build::PrimitiveBuildSpec;
+use super::small_signal::SmallSignalModel;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimitiveManifest {
@@ -10,6 +11,7 @@ pub struct PrimitiveManifest {
     pub subckt_name: String,
     pub pins: Vec<Pin>,
     pub files: PrimitiveFiles,
+    pub small_signal: Option<SmallSignalModel>,
     pub transistor_type: Option<String>,
     pub layout_params: Option<serde_json::Value>,
     pub lut_config: Option<serde_json::Value>,

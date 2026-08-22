@@ -78,6 +78,43 @@ pub enum MacroValidationError {
         instance: String,
         primitive: String,
     },
+    MissingPrimitiveSmallSignalModel {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+    },
+    EmptySmallSignalModel {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+    },
+    EmptySmallSignalBranchName {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        branch_index: usize,
+    },
+    DuplicateSmallSignalBranch {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        branch: String,
+    },
+    EmptySmallSignalBranchPin {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        branch: String,
+        terminal: &'static str,
+    },
+    UnknownSmallSignalBranchPin {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        branch: String,
+        terminal: &'static str,
+        pin: String,
+    },
     UnknownMacro {
         macro_name: String,
         instance: String,
@@ -217,6 +254,61 @@ impl fmt::Display for MacroValidationError {
             } => write!(
                 formatter,
                 "macro '{macro_name}' instance '{instance}' references unknown primitive '{primitive}'"
+            ),
+            Self::MissingPrimitiveSmallSignalModel {
+                macro_name,
+                instance,
+                primitive,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has no small-signal model"
+            ),
+            Self::EmptySmallSignalModel {
+                macro_name,
+                instance,
+                primitive,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has an empty small-signal model"
+            ),
+            Self::EmptySmallSignalBranchName {
+                macro_name,
+                instance,
+                primitive,
+                branch_index,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has an empty small-signal branch name at index {branch_index}"
+            ),
+            Self::DuplicateSmallSignalBranch {
+                macro_name,
+                instance,
+                primitive,
+                branch,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' declares small-signal branch '{branch}' more than once"
+            ),
+            Self::EmptySmallSignalBranchPin {
+                macro_name,
+                instance,
+                primitive,
+                branch,
+                terminal,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' branch '{branch}' has an empty {terminal} pin"
+            ),
+            Self::UnknownSmallSignalBranchPin {
+                macro_name,
+                instance,
+                primitive,
+                branch,
+                terminal,
+                pin,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' branch '{branch}' references unknown {terminal} pin '{pin}'"
             ),
             Self::UnknownMacro {
                 macro_name,
@@ -478,14 +570,17 @@ fn validate_circuit(
                 None
             }
             BlockRef::Primitive(primitive) => match primitive_catalog.get(primitive) {
-                Some(manifest) => Some((
-                    primitive.clone(),
-                    manifest
-                        .pins
-                        .iter()
-                        .map(|pin| pin.name.as_str())
-                        .collect::<Vec<_>>(),
-                )),
+                Some(manifest) => {
+                    validate_primitive_small_signal(macro_, instance.name(), manifest, errors);
+                    Some((
+                        primitive.clone(),
+                        manifest
+                            .pins
+                            .iter()
+                            .map(|pin| pin.name.as_str())
+                            .collect::<Vec<_>>(),
+                    ))
+                }
                 None => {
                     errors.push(MacroValidationError::UnknownPrimitive {
                         macro_name: macro_name.clone(),
@@ -547,6 +642,91 @@ fn validate_circuit(
                         port: port.to_owned(),
                     });
                 }
+            }
+        }
+    }
+}
+
+fn validate_primitive_small_signal(
+    macro_: &Macro,
+    instance: &str,
+    primitive: &crate::primitive::manifest::PrimitiveManifest,
+    errors: &mut Vec<MacroValidationError>,
+) {
+    let context = || {
+        (
+            macro_.name().to_owned(),
+            instance.to_owned(),
+            primitive.name.clone(),
+        )
+    };
+    let Some(model) = primitive.small_signal.as_ref() else {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::MissingPrimitiveSmallSignalModel {
+            macro_name,
+            instance,
+            primitive,
+        });
+        return;
+    };
+    if model.branches().is_empty() {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::EmptySmallSignalModel {
+            macro_name,
+            instance,
+            primitive,
+        });
+    }
+
+    let pins = primitive
+        .pins
+        .iter()
+        .map(|pin| pin.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut branch_names = HashSet::new();
+    for (branch_index, branch) in model.branches().iter().enumerate() {
+        if branch.name().trim().is_empty() {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::EmptySmallSignalBranchName {
+                macro_name,
+                instance,
+                primitive,
+                branch_index,
+            });
+        } else if !branch_names.insert(branch.name()) {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::DuplicateSmallSignalBranch {
+                macro_name,
+                instance,
+                primitive,
+                branch: branch.name().to_owned(),
+            });
+        }
+
+        for (terminal, pin) in [
+            ("drain", branch.drain_pin()),
+            ("gate", branch.gate_pin()),
+            ("source", branch.source_pin()),
+        ] {
+            if pin.trim().is_empty() {
+                let (macro_name, instance, primitive) = context();
+                errors.push(MacroValidationError::EmptySmallSignalBranchPin {
+                    macro_name,
+                    instance,
+                    primitive,
+                    branch: branch.name().to_owned(),
+                    terminal,
+                });
+            } else if !pins.contains(pin) {
+                let (macro_name, instance, primitive) = context();
+                errors.push(MacroValidationError::UnknownSmallSignalBranchPin {
+                    macro_name,
+                    instance,
+                    primitive,
+                    branch: branch.name().to_owned(),
+                    terminal,
+                    pin: pin.to_owned(),
+                });
             }
         }
     }
@@ -721,6 +901,7 @@ mod tests {
     use crate::circuit::Circuit;
     use crate::macro_model::{Macro, MacroAcTestbench, MacroCatalog, MacroPort, MacroPortRole};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use crate::testbench::{AcAnalysis, TransferFunction};
 
     use super::{MacroCircuitKind, MacroValidationError, validate_macro_catalog};
@@ -751,6 +932,9 @@ mod tests {
                 build: None,
                 symbol: None,
             },
+            small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
+                "m1", "VOUT", "VIN", "VSS",
+            )])),
             transistor_type: None,
             layout_params: None,
             lut_config: None,
@@ -882,6 +1066,41 @@ mod tests {
                 circuit: MacroCircuitKind::CompactModel,
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn validates_primitive_small_signal_branches_against_manifest_pins() {
+        let mut primitives = primitive_catalog();
+        let mut primitive = primitives.get("stage_primitive").unwrap().clone();
+        primitive.small_signal = Some(SmallSignalModel::new(vec![
+            SmallSignalBranch::new("m1", "UNKNOWN", "", "VSS"),
+            SmallSignalBranch::new("m1", "VOUT", "VIN", "VSS"),
+        ]));
+        primitives.register(primitive);
+        let macros = MacroCatalog::from_macros([leaf_macro()]).unwrap();
+
+        let errors = validate_macro_catalog(&macros, &primitives);
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::UnknownSmallSignalBranchPin {
+                terminal: "drain",
+                pin,
+                ..
+            } if pin == "UNKNOWN"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptySmallSignalBranchPin {
+                terminal: "gate",
+                ..
+            }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::DuplicateSmallSignalBranch { branch, .. }
+                if branch == "m1"
         )));
     }
 

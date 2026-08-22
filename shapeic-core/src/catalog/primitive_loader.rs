@@ -1,12 +1,13 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::fs;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use super::primitive_catalog::PrimitiveCatalog;
 
 use crate::primitive::build::PrimitiveBuildSpec;
 use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+use crate::primitive::small_signal::SmallSignalModel;
 
 #[derive(Debug)]
 pub enum PrimitiveLoadError {
@@ -90,6 +91,7 @@ struct RawPrimitiveManifest {
     layout_params: Option<serde_json::Value>,
     lut_config: Option<serde_json::Value>,
     files: RawPrimitiveFiles,
+    small_signal: Option<SmallSignalModel>,
     build: Option<PrimitiveBuildSpec>,
 }
 
@@ -139,6 +141,7 @@ impl RawPrimitiveManifest {
             description: self.description,
             pins,
             files,
+            small_signal: self.small_signal,
             transistor_type: self.transistor_type,
             layout_params: self.layout_params,
             lut_config: self.lut_config,
@@ -170,4 +173,29 @@ fn load_external_build_spec(
     serde_json::from_str(&content)
         .map(Some)
         .map_err(|source| PrimitiveLoadError::ExternalBuildJson { path, source })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::load_primitive_manifest;
+
+    #[test]
+    fn loads_the_existing_small_signal_manifest_topology() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir
+            .parent()
+            .unwrap()
+            .join("analoglib/primitives/simplediffpair/primitive.json");
+
+        let primitive = load_primitive_manifest(&path).unwrap();
+        let model = primitive.small_signal.as_ref().unwrap();
+
+        assert_eq!(model.branches().len(), 2);
+        let m2 = model.branch("m2").unwrap();
+        assert_eq!(m2.drain_pin(), "VOUTN");
+        assert_eq!(m2.gate_pin(), "VINN");
+        assert_eq!(m2.source_pin(), "VTAIL");
+    }
 }
