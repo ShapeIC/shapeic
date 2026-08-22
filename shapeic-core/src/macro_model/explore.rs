@@ -615,7 +615,8 @@ mod tests {
     use crate::macro_model::{
         CompactMacroInstanceExplorationInput, MacroAcTestbench, MacroCompactOutputBinding,
         MacroExplorationInput, MacroInstanceCandidateSet, MacroInterfaceBinding, MacroOutputSource,
-        MacroPort, MacroPortRole, build_macro_candidate_sets,
+        MacroPort, MacroPortRole, MacroRenderMode, build_macro_candidate_sets,
+        render_small_signal_netlist,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::{PrimitiveBuildSpec, SweepMode};
@@ -742,6 +743,9 @@ mod tests {
             (small_signal_param_name("ro", "xcore", "m1"), 1.0e5),
             ("xcore.vout".to_owned(), 1.0),
             ("xcore.width_m1".to_owned(), gm * 1.0e6),
+            (small_signal_param_name("width", "xcore", "m1"), 8.0e-6),
+            (small_signal_param_name("length", "xcore", "m1"), 1.0e-6),
+            (small_signal_param_name("nf", "xcore", "m1"), 2.0),
         ];
         values.extend(
             MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
@@ -1068,6 +1072,134 @@ mod tests {
         assert_eq!(
             resolved_child.selected_candidate_index(resolved_accepted, "xcore"),
             Some(1)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the external Symbolica runtime used by numerical MNA preparation"]
+    fn explores_a_child_then_uses_only_its_compact_model_in_the_parent() {
+        let primitives = primitive_catalog();
+        let child = Macro::new(
+            "hierarchical_child",
+            vec![
+                MacroPort::new("VIN", MacroPortRole::Input),
+                MacroPort::new("VOUT", MacroPortRole::Output),
+                MacroPort::new("VSS", MacroPortRole::Ground),
+            ],
+            Circuit::builder()
+                .primitive(
+                    "xcore",
+                    "gain",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .resistor("rload", "VOUT", "VSS", 1.0e4)
+                .build(),
+            Circuit::builder()
+                .vccs("gm", "VOUT", "VSS", "VIN", "VSS", "gm_eq")
+                .resistor("ro", "VOUT", "VSS", "ro_eq")
+                .build(),
+        )
+        .with_ac_testbench(MacroAcTestbench::from_spice(
+            "gain",
+            "Vinput VIN VSS 1\n.end\n",
+            analysis(),
+        ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::candidate_column(
+                "xcore",
+                small_signal_param_name("gm", "xcore", "m1"),
+            ),
+        ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "ro_eq",
+            MacroOutputSource::candidate_column(
+                "xcore",
+                small_signal_param_name("ro", "xcore", "m1"),
+            ),
+        ))
+        .with_interface_binding(MacroInterfaceBinding::new(
+            "VOUT",
+            MacroOutputSource::candidate_column("xcore", "xcore.vout"),
+        ));
+        let parent = Macro::new(
+            "hierarchical_parent",
+            vec![
+                MacroPort::new("VIN", MacroPortRole::Input),
+                MacroPort::new("VOUT", MacroPortRole::Output),
+                MacroPort::new("VSS", MacroPortRole::Ground),
+            ],
+            Circuit::builder()
+                .macro_instance(
+                    "xchild",
+                    child.name(),
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .build(),
+            Circuit::builder()
+                .resistor("rout", "VOUT", "VSS", 1.0)
+                .build(),
+        )
+        .with_ac_testbench(MacroAcTestbench::from_spice(
+            "gain",
+            "Vinput VIN VSS 1\n.end\n",
+            analysis(),
+        ));
+        let macros = MacroCatalog::from_macros([child.clone(), parent.clone()]).unwrap();
+
+        let child_result =
+            explore_macro_ac_candidates(&child, &primitives, &macros, candidates()).unwrap();
+        assert_eq!(child_result.statistics().accepted_candidates(), 1);
+        let projection = child_result.into_projection(&child, "xchild").unwrap();
+
+        let rendered_parent = render_small_signal_netlist(
+            &parent,
+            &primitives,
+            &macros,
+            MacroRenderMode::CompactSubmacros,
+        )
+        .unwrap();
+        assert!(
+            rendered_parent
+                .source()
+                .contains("G_xchild__gm VOUT VSS VIN VSS gm_eq__xchild")
+        );
+        assert!(
+            rendered_parent
+                .source()
+                .contains("R_xchild__ro VOUT VSS ro_eq__xchild")
+        );
+        assert!(rendered_parent.primitive_branches().is_empty());
+        assert!(!rendered_parent.source().contains("xcore"));
+
+        let mut parent_input = MacroExplorationInput::new();
+        parent_input
+            .register_compact_macro_instance(
+                "xchild",
+                CompactMacroInstanceExplorationInput::from_projection(projection, Vec::new()),
+            )
+            .unwrap();
+        let parent_result = parent.explore(&primitives, &macros, parent_input).unwrap();
+        assert_eq!(parent_result.statistics().accepted_candidates(), 1);
+
+        let parent_accepted = &parent_result.accepted()[0];
+        let (resolved_child, child_accepted) = parent_result
+            .selected_submacro(parent_accepted, "xchild")
+            .unwrap();
+        let original = resolved_child
+            .selected_candidate(child_accepted, "xcore")
+            .unwrap();
+        assert_eq!(
+            original.get(&small_signal_param_name("width", "xcore", "m1")),
+            Some(8.0e-6)
+        );
+        assert_eq!(
+            original.get(&small_signal_param_name("length", "xcore", "m1")),
+            Some(1.0e-6)
+        );
+        assert_eq!(
+            original.get(&small_signal_param_name("nf", "xcore", "m1")),
+            Some(2.0)
         );
     }
 }
