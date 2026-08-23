@@ -2,3 +2,7 @@ target/
 __pycache__/
 *.py[cod]
 shapeic-lut/lut_generation/generated/
+shapeic-core/examples/ota_4t_v3/results.csv
+validation/ota_4t/outputs/ngspice.log
+validation/ota_4t/outputs/rendered.spice
+validation/ota_4t/outputs/results.csv
