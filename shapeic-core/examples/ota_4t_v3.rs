@@ -24,7 +24,7 @@ use shapeic_lut::LookupTable;
 
 const TAIL_CURRENT: f64 = 20.0e-6;
 const VOUT: f64 = 1.0;
-const VOUT_START: f64 = 0.9;
+const VOUT_START: f64 = 0.95;
 const VOUT_STOP: f64 = 1.1;
 const VOUT_POINTS: usize = 10;
 const VDD: f64 = 1.5;
@@ -113,6 +113,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stage_start = Instant::now();
     let result = ota.explore(&primitive_catalog, &macro_catalog, input)?;
     let exploration_time = stage_start.elapsed();
+    
+    write_results_csv(&result, manifest.join("examples/ota_4t_v3/results.csv"))?;
 
     print_results(&result)?;
     print_statistics(&result)?;
@@ -133,7 +135,7 @@ fn ota_macro(testbench_path: PathBuf) -> Macro {
                 ("VOUTP", "VOUT"),
                 ("VOUTN", "N1"),
                 ("VTAIL", "IBIAS"),
-                ("VSS", "VSS"),
+                ("VSS", "IBIAS"),
             ],
         )
         .primitive(
@@ -162,7 +164,6 @@ fn ota_macro(testbench_path: PathBuf) -> Macro {
             MacroPort::new("VOUT", MacroPortRole::Output),
             MacroPort::new("IBIAS", MacroPortRole::Bias),
             MacroPort::new("VDD", MacroPortRole::Supply),
-            MacroPort::new("VSS", MacroPortRole::Ground),
         ],
         circuit,
         compact_model,
@@ -464,4 +465,69 @@ mod tests {
                 && branch.bulk_node() == "VDD"
         }));
     }
+}
+
+use std::fs::File;
+use std::io::{BufWriter, Write};
+
+fn write_results_csv(
+    result: &MacroExplorationResult,
+    path: impl AsRef<Path>,
+) -> Result<(), io::Error> {
+    let mut writer = BufWriter::new(File::create(path)?);
+
+    writeln!(
+        writer,
+        "candidate_id,dp_index,cm_index,vin_v,vdd_v,tail_current_a,\
+         vout_v,vbias_v,n1_v,\
+         dp_width_m,dp_length_m,dp_nf,\
+         cm_width_m,cm_length_m,cm_nf,\
+         dc_gain_db,bandwidth_3db_hz,unity_gain_hz,phase_margin_deg"
+    )?;
+
+    for (candidate_id, accepted) in result.accepted().iter().enumerate() {
+        let dp_index = selected_index(result, accepted, DIFF_PAIR_INSTANCE)?;
+        let cm_index = selected_index(result, accepted, CURRENT_MIRROR_INSTANCE)?;
+
+        let dp = |column| {
+            selected_value(result, accepted, DIFF_PAIR_INSTANCE, column)
+        };
+        let cm = |column| {
+            selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column)
+        };
+
+        let metrics = result
+            .ac_outcome(accepted, AC_TESTBENCH)
+            .ok_or_else(|| io::Error::other("missing AC result"))?
+            .metrics;
+
+        writeln!(
+            writer,
+            "{candidate_id},{dp_index},{cm_index},\
+             {VIN:.17e},{VDD:.17e},{TAIL_CURRENT:.17e},\
+             {:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.0},\
+             {:.17e},{:.17e},{:.0},\
+             {:.17e},{:.17e},{:.17e},{:.17e}",
+            dp(DIFF_PAIR_VOUT_COLUMN)?,
+            dp(DIFF_PAIR_VBIAS_COLUMN)?,
+            cm("xcm.vinp")?,
+            dp(DIFF_PAIR_WIDTH_COLUMN)?,
+            dp(DIFF_PAIR_LENGTH_COLUMN)?,
+            dp(DIFF_PAIR_NF_COLUMN)?,
+            cm(CURRENT_MIRROR_WIDTH_COLUMN)?,
+            cm(CURRENT_MIRROR_LENGTH_COLUMN)?,
+            cm(CURRENT_MIRROR_NF_COLUMN)?,
+            required_metric(metrics.dc_gain_db, "DC gain")?,
+            required_metric(metrics.bandwidth_3db_hz, "bandwidth")?,
+            required_metric(metrics.unity_gain_hz, "UGF")?,
+            required_metric(metrics.phase_margin_deg, "phase margin")?,
+        )?;
+    }
+
+    writer.flush()
+}
+
+fn required_metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
+    value.ok_or_else(|| io::Error::other(format!("missing {name}")))
 }
