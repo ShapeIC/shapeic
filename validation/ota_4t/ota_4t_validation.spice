@@ -1,0 +1,38 @@
+**.subckt ota_1stage
+XM1 vout net2 vs vs sg13_lv_nmos w={w_dp}u l={l_dp}u ng={nf_dp} m=1
+XM2 net1 vref vs vs sg13_lv_nmos w={w_dp}u l={l_dp}u ng={nf_dp} m=1
+XM3 vout net1 vdd vdd sg13_lv_pmos w={w_cm}u l={l_cm}u ng={nf_cm} m=1
+XM4 net1 net1 vdd vdd sg13_lv_pmos w={w_cm}u l={l_cm}u ng={nf_cm} m=1
+I0 vs GND 20e-6
+V1 vdd GND {VDD}
+V3 vref GND {VREF}
+V4 net2 vfb dc 0 ac 1
+C1 vfb GND 10 m=1
+R1 vout vfb 100000000 m=1
+R2 vfb GND {R2} m=1
+**** begin user architecture code
+
+.lib {corner_model_path} mos_tt
+
+.control
+
+pre_osdi {psp_osdi}
+pre_osdi {psp_nqs_osdi}
+
+ac dec 20 1 10G
+
+meas ac dc_gain_db find vdb(vout) at=1
+let gain_3db = dc_gain_db-3
+meas ac bandwidth_3db_hz when vdb(vout)=gain_3db fall=1
+meas ac unity_gain_hz when vdb(vout)=0 fall=1
+let phase_deg = phase(vout)*180/PI
+meas ac phase_at_unity find phase_deg at=unity_gain_hz
+let phase_margin_deg = phase_at_unity
+
+wrdata {ac_results_path} dc_gain_db bandwidth_3db_hz unity_gain_hz phase_margin_deg
+.endc
+
+**** end user architecture code
+**.ends
+.GLOBAL GND
+.end
