@@ -17,3 +17,28 @@ magic_binary = "magic"
 magic_rcfile = "${IHP_PDK_ROOT}/libs.tech/magic/ihp-sg13g2.magicrc"
 work_directory = "../work-magic-smoke"
 keep_work = true
+
+[device_capacitance_correction]
+backend = "ngspice"
+nf = [1, 50]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 4
+model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
+library_section = "mos_tt"
+osdi_paths = [
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
+]
+frequencies_hz = [1.0e6, 1.0e7]
+frequency_consistency = 0.01
+
+[device_capacitance_correction.simplediffpair]
+vbs = [-0.65]
+vgs = [0.25]
+vds = [0.35]
+
+[device_capacitance_correction.currentmirror]
+vbs = [0.0]
+vgs = [-0.5]
+vds = [-0.5]

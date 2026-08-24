@@ -28,6 +28,13 @@ class MagicPexResult:
     subcircuit_name: str
 
 
+@dataclass(frozen=True)
+class PrimitiveExtraction:
+    conductance: np.ndarray
+    capacitance: np.ndarray
+    pex: MagicPexResult
+
+
 def run_magic(
     gds_path: Path,
     cell_name: str,
@@ -38,6 +45,28 @@ def run_magic(
     work_directory: Path,
     primitive: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    extraction = extract_primitive(
+        gds_path,
+        cell_name,
+        ports,
+        magic_binary=magic_binary,
+        magic_rcfile=magic_rcfile,
+        work_directory=work_directory,
+        primitive=primitive,
+    )
+    return extraction.conductance, extraction.capacitance
+
+
+def extract_primitive(
+    gds_path: Path,
+    cell_name: str,
+    ports: tuple[str, ...],
+    *,
+    magic_binary: str,
+    magic_rcfile: Path,
+    work_directory: Path,
+    primitive: str | None = None,
+) -> PrimitiveExtraction:
     result = write_magic_pex(
         gds_path,
         cell_name,
@@ -68,7 +97,7 @@ def run_magic(
             raise ValueError(
                 f"extracted port '{port}' is disconnected; check primitive routing and labels"
             )
-    return conductance, capacitance
+    return PrimitiveExtraction(conductance, capacitance, result)
 
 
 def write_magic_pex(

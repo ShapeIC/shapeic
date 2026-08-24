@@ -10,14 +10,25 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from shapeic_layout_generation.config import (
+    DeviceCorrectionBias,
+    DeviceCorrectionConfig,
+    ExtractorConfig,
+    GenerationConfig,
+    load_config,
+)
+from shapeic_layout_generation.device_correction import (
+    validate_device_correction,
+)
 from shapeic_layout_generation.extractor import parse_rc_spice, write_magic_pex
-from shapeic_layout_generation.generator import generate
+from shapeic_layout_generation.generator import _generate_primitive, generate
 from shapeic_layout_generation.ota_pex import (
     normalize_bulk_nodes,
     prepare_ota_pex,
@@ -32,6 +43,7 @@ from shapeic_layout_generation.pcell import (
     write_primitive_gds,
 )
 from shapeic_layout_generation.reducer import reduce_first_order
+from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
@@ -64,11 +76,282 @@ work_directory = "{root / 'work'}"
                 manifest = json.loads(archive.read("manifest.json"))
                 self.assertEqual(manifest["format"], "shapeic-physical-lut")
                 self.assertEqual(manifest["version"], 1)
+                self.assertNotIn("vbs", manifest["units"])
                 self.assertEqual(len(manifest["primitives"]), 2)
+                self.assertNotIn(
+                    "device_capacitance_correction",
+                    manifest["primitives"][0],
+                )
                 with archive.open("primitives/0/conductance.npy") as member:
                     conductance = np.load(member, allow_pickle=False)
                 self.assertEqual(conductance.shape, (2, 2, 3, 6, 6))
                 np.testing.assert_allclose(conductance.sum(axis=-1), 0.0, atol=1e-15)
+
+    def test_synthetic_archive_stores_device_correction_as_version_two(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "correction.toml"
+            output = root / "physical-v2.npz"
+            config.write_text(
+                f'''pdk = "test-pdk"
+layout_policy = "test-policy"
+primitives = ["simplediffpair", "currentmirror"]
+
+[output]
+path = "{output}"
+
+[sweep]
+length = [0.4, 0.8]
+finger_width = [1.0, 2.0]
+nf = [1, 2, 10]
+
+[extraction]
+backend = "synthetic"
+work_directory = "{root / 'work'}"
+
+[device_capacitance_correction]
+backend = "synthetic"
+nf = [1, 10]
+frequencies_hz = [1.0e6, 1.0e7]
+
+[device_capacitance_correction.simplediffpair]
+vbs = [-1.0, 0.0]
+vgs = [0.1, 1.2]
+vds = [0.1, 1.2]
+
+[device_capacitance_correction.currentmirror]
+vbs = [0.0, 1.0]
+vgs = [-1.2, -0.1]
+vds = [-1.2, -0.1]
+''',
+                encoding="ascii",
+            )
+            self.assertEqual(generate(config), output)
+            with zipfile.ZipFile(output) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertEqual(manifest["version"], 2)
+                self.assertEqual(manifest["units"]["vbs"], "V")
+                for primitive in manifest["primitives"]:
+                    correction = primitive["device_capacitance_correction"]
+                    self.assertEqual(
+                        correction["definition"],
+                        "pex_mos_only_minus_aggregate_compact_model",
+                    )
+                    self.assertEqual(
+                        correction["axis_order"],
+                        ["length", "finger_width", "nf", "vbs", "vgs", "vds"],
+                    )
+                    with archive.open(correction["capacitance"]) as member:
+                        values = np.load(member, allow_pickle=False)
+                    ports = len(primitive["port_order"])
+                    self.assertEqual(
+                        values.shape,
+                        (2, 2, 2, 2, 2, 2, ports, ports),
+                    )
+                    np.testing.assert_allclose(
+                        values.sum(axis=-1),
+                        0.0,
+                        atol=1e-30,
+                    )
+                    np.testing.assert_allclose(
+                        values.sum(axis=-2),
+                        0.0,
+                        atol=1e-30,
+                    )
+
+    def test_device_correction_nf_must_reuse_physical_geometries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "invalid-correction.toml"
+            config.write_text(
+                f'''primitives = ["simplediffpair"]
+
+[output]
+path = "{root / 'physical.npz'}"
+
+[sweep]
+length = [0.4]
+finger_width = [1.0]
+nf = [1, 10]
+
+[extraction]
+backend = "synthetic"
+work_directory = "{root / 'work'}"
+
+[device_capacitance_correction]
+backend = "synthetic"
+nf = [1, 2]
+
+[device_capacitance_correction.simplediffpair]
+vbs = [0.0]
+vgs = [0.5]
+vds = [0.5]
+''',
+                encoding="ascii",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "subset of the physical nf sweep",
+            ):
+                load_config(config)
+
+    def test_device_correction_allows_nonsymmetric_charge_conserving_delta(
+        self,
+    ) -> None:
+        values = np.asarray(
+            [
+                [1.0, -1.0, 0.0],
+                [0.0, 1.0, -1.0],
+                [-1.0, 0.0, 1.0],
+            ]
+        )
+        validate_device_correction("test", values)
+        values[0, 0] += 1.0e-3
+        with self.assertRaisesRegex(ValueError, "must conserve charge"):
+            validate_device_correction("test", values)
+
+    def test_invalid_version_two_data_does_not_replace_existing_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "physical-v2.npz"
+            output.write_bytes(b"existing archive")
+            correction = DeviceCorrectionConfig(
+                backend="synthetic",
+                finger_counts=np.asarray([1.0]),
+                biases={
+                    "currentmirror": DeviceCorrectionBias(
+                        vbs=np.asarray([0.0]),
+                        vgs=np.asarray([-0.5]),
+                        vds=np.asarray([-0.5]),
+                    )
+                },
+                binary="ngspice",
+                model_library=None,
+                library_section="mos_tt",
+                osdi_paths=(),
+                temperature_c=27.0,
+                frequencies_hz=(1.0e6, 1.0e7),
+                workers=1,
+                frequency_consistency=0.01,
+            )
+            config = GenerationConfig(
+                source_path=root / "config.toml",
+                output_path=output,
+                pdk="test",
+                layout_policy="test",
+                lengths=np.asarray([0.4e-6]),
+                finger_widths=np.asarray([1.0e-6]),
+                finger_counts=np.asarray([1.0]),
+                primitives=("currentmirror",),
+                extractor=ExtractorConfig(
+                    backend="synthetic",
+                    magic_binary="magic",
+                    magic_rcfile=None,
+                    work_directory=root / "work",
+                    keep_work=True,
+                ),
+                device_correction=correction,
+            )
+            interconnect = np.zeros((1, 1, 1, 4, 4))
+            invalid = np.zeros((1, 1, 1, 1, 1, 1, 4, 4))
+            invalid[..., 0, 0] = 1.0e-15
+            with self.assertRaisesRegex(ValueError, "must conserve charge"):
+                write_archive(
+                    config,
+                    {"currentmirror": (interconnect, interconnect)},
+                    {"currentmirror": invalid},
+                    force=True,
+                )
+            self.assertEqual(output.read_bytes(), b"existing archive")
+            self.assertEqual(
+                list(root.glob(".physical-v2.npz.*.tmp")),
+                [],
+            )
+
+    def test_real_correction_reuses_each_magic_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            correction = DeviceCorrectionConfig(
+                backend="ngspice",
+                finger_counts=np.asarray([1.0]),
+                biases={
+                    "currentmirror": DeviceCorrectionBias(
+                        vbs=np.asarray([0.0]),
+                        vgs=np.asarray([-0.5]),
+                        vds=np.asarray([-0.5]),
+                    )
+                },
+                binary="ngspice",
+                model_library=Path("/model.lib"),
+                library_section="mos_tt",
+                osdi_paths=(),
+                temperature_c=27.0,
+                frequencies_hz=(1.0e6, 1.0e7),
+                workers=1,
+                frequency_consistency=0.01,
+            )
+            config = GenerationConfig(
+                source_path=root / "config.toml",
+                output_path=root / "physical.npz",
+                pdk="ihp-sg13g2",
+                layout_policy="test",
+                lengths=np.asarray([0.4e-6]),
+                finger_widths=np.asarray([1.0e-6]),
+                finger_counts=np.asarray([1.0, 2.0]),
+                primitives=("currentmirror",),
+                extractor=ExtractorConfig(
+                    backend="magic",
+                    magic_binary="magic",
+                    magic_rcfile=Path("/magicrc"),
+                    work_directory=root / "work",
+                    keep_work=True,
+                ),
+                device_correction=correction,
+            )
+            port_matrix = np.zeros((4, 4))
+            extracted_paths = [root / "nf1.pex", root / "nf2.pex"]
+            extractions = [
+                SimpleNamespace(
+                    conductance=port_matrix,
+                    capacitance=port_matrix,
+                    pex=SimpleNamespace(
+                        spice_path=path,
+                        subcircuit_name=f"pex_{index}",
+                    ),
+                )
+                for index, path in enumerate(extracted_paths)
+            ]
+            correction_values = np.zeros((1, 1, 1, 4, 4))
+            with (
+                patch(
+                    "shapeic_layout_generation.generator.write_primitive_gds",
+                    return_value="primitive",
+                ),
+                patch(
+                    "shapeic_layout_generation.generator.extract_primitive",
+                    side_effect=extractions,
+                ) as extract,
+                patch(
+                    "shapeic_layout_generation.generator."
+                    "characterize_geometry_correction",
+                    return_value=(correction_values, 0.0),
+                ) as characterize,
+            ):
+                _, generated_correction = _generate_primitive(
+                    config,
+                    "currentmirror",
+                    SimpleNamespace(),  # type: ignore[arg-type]
+                )
+            self.assertEqual(extract.call_count, 2)
+            characterize.assert_called_once()
+            self.assertEqual(
+                characterize.call_args.args[4],
+                extracted_paths[0],
+            )
+            np.testing.assert_array_equal(
+                generated_correction,
+                np.zeros((1, 1, 1, 1, 1, 1, 4, 4)),
+            )
 
     def test_parses_and_reduces_rc_network(self) -> None:
         network = parse_rc_spice(

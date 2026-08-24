@@ -3,13 +3,13 @@ layout_policy = "symmetric-adjacent-with-edge-dummies-v3"
 primitives = ["simplediffpair", "currentmirror"]
 
 [output]
-path = "../generated/ihp_sg13g2_ota_physical.npz"
+path = "../generated/ihp_sg13g2_ota_physical_v2.npz"
 
 [sweep]
 # Values are expressed in micrometers. The archive stores SI units.
 length = [0.4, 0.8, 1.6, 3.2, 6.4]
 finger_width = [0.15, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
-nf = [1, 2, 4, 8, 12, 16, 20, 25, 30, 40, 50]
+nf = [1, 2, 4, 8, 10, 12, 16, 20, 25, 30, 40, 50]
 
 [extraction]
 backend = "magic"
@@ -17,3 +17,28 @@ magic_binary = "magic"
 magic_rcfile = "${IHP_PDK_ROOT}/libs.tech/magic/ihp-sg13g2.magicrc"
 work_directory = "../work"
 keep_work = false
+
+[device_capacitance_correction]
+backend = "ngspice"
+nf = [1, 2, 10, 20, 50]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 4
+model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
+library_section = "mos_tt"
+osdi_paths = [
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
+]
+frequencies_hz = [1.0e6, 1.0e7]
+frequency_consistency = 0.01
+
+[device_capacitance_correction.simplediffpair]
+vbs = [-1.0, -0.5, 0.0]
+vgs = [0.1, 0.65, 1.2]
+vds = [0.1, 0.65, 1.2]
+
+[device_capacitance_correction.currentmirror]
+vbs = [0.0, 0.5, 1.0]
+vgs = [-1.2, -0.65, -0.1]
+vds = [-1.2, -0.65, -0.1]

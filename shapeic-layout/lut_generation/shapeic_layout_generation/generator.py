@@ -6,7 +6,15 @@ from pathlib import Path
 import numpy as np
 
 from .config import PORTS, GenerationConfig, load_config
-from .extractor import run_magic
+from .device_capacitance import Geometry
+from .device_capacitance_adapter import DeviceCapacitanceAdapter
+from .device_correction import (
+    characterize_geometry_correction,
+    correction_shape,
+    create_device_correction_adapter,
+    synthetic_device_correction,
+)
+from .extractor import extract_primitive
 from .pcell import write_primitive_gds
 from .synthetic import primitive_matrices
 from .writer import write_archive
@@ -14,19 +22,42 @@ from .writer import write_archive
 
 def generate(config_path: Path, *, force: bool = False) -> Path:
     config = load_config(config_path)
-    matrices = {
-        primitive: _generate_primitive(config, primitive)
+    if config.output_path.exists() and not force:
+        raise FileExistsError(
+            f"output already exists: {config.output_path}; use --force to replace it"
+        )
+    adapter = (
+        create_device_correction_adapter(config)
+        if config.device_correction is not None
+        and config.device_correction.backend == "ngspice"
+        else None
+    )
+    generated = {
+        primitive: _generate_primitive(config, primitive, adapter)
         for primitive in config.primitives
     }
-    output = write_archive(config, matrices, force=force)
+    matrices = {primitive: value[0] for primitive, value in generated.items()}
+    corrections = (
+        {primitive: value[1] for primitive, value in generated.items()}
+        if config.device_correction is not None
+        else None
+    )
+    output = write_archive(
+        config,
+        matrices,
+        corrections,
+        force=force,
+    )
     if not config.extractor.keep_work and config.extractor.work_directory.exists():
         shutil.rmtree(config.extractor.work_directory)
     return output
 
 
 def _generate_primitive(
-    config: GenerationConfig, primitive: str
-) -> tuple[np.ndarray, np.ndarray]:
+    config: GenerationConfig,
+    primitive: str,
+    adapter: DeviceCapacitanceAdapter | None,
+) -> tuple[tuple[np.ndarray, np.ndarray], np.ndarray | None]:
     port_count = len(PORTS[primitive])
     shape = (
         config.lengths.size,
@@ -37,6 +68,38 @@ def _generate_primitive(
     )
     conductance = np.empty(shape, dtype=np.float64)
     capacitance = np.empty(shape, dtype=np.float64)
+    correction_config = config.device_correction
+    correction = (
+        synthetic_device_correction(
+            primitive,
+            config.lengths,
+            config.finger_widths,
+            correction_config,
+        )
+        if correction_config is not None
+        and correction_config.backend == "synthetic"
+        else (
+            np.empty(
+                correction_shape(
+                    config.lengths,
+                    config.finger_widths,
+                    correction_config,
+                    primitive,
+                ),
+                dtype=np.float64,
+            )
+            if correction_config is not None
+            else None
+        )
+    )
+    correction_nf_indices = (
+        {
+            int(value): index
+            for index, value in enumerate(correction_config.finger_counts)
+        }
+        if correction_config is not None
+        else {}
+    )
     for li, length in enumerate(config.lengths):
         for wi, finger_width in enumerate(config.finger_widths):
             for ni, nf_value in enumerate(config.finger_counts):
@@ -58,7 +121,7 @@ def _generate_primitive(
                         gds_path,
                     )
                     assert config.extractor.magic_rcfile is not None
-                    g, c = run_magic(
+                    extracted = extract_primitive(
                         gds_path,
                         cell_name,
                         PORTS[primitive],
@@ -67,6 +130,30 @@ def _generate_primitive(
                         work_directory=point_root,
                         primitive=primitive,
                     )
+                    g, c = extracted.conductance, extracted.capacitance
+                    if (
+                        correction_config is not None
+                        and correction_config.backend == "ngspice"
+                        and nf in correction_nf_indices
+                    ):
+                        if adapter is None or correction is None:
+                            raise RuntimeError(
+                                "real device correction adapter was not prepared"
+                            )
+                        values, _ = characterize_geometry_correction(
+                            correction_config,
+                            adapter,
+                            primitive,
+                            Geometry(float(length), float(finger_width), nf),
+                            extracted.pex.spice_path,
+                            extracted.pex.subcircuit_name,
+                            point_root / "device_correction",
+                        )
+                        correction[
+                            li,
+                            wi,
+                            correction_nf_indices[nf],
+                        ] = values
                 conductance[li, wi, ni] = g
                 capacitance[li, wi, ni] = c
-    return conductance, capacitance
+    return (conductance, capacitance), correction

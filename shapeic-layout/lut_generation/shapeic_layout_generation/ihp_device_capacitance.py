@@ -17,6 +17,7 @@ from .extractor import write_magic_pex
 from .ota_pex import validate_primitive_pex
 from .pcell import write_primitive_gds
 
+
 class IhpSg13g2DeviceCapacitanceAdapter:
     """All IHP-specific operations needed by the independent study."""
 
@@ -129,13 +130,30 @@ class IhpSg13g2DeviceCapacitanceAdapter:
             magic_rcfile=self.physical.extractor.magic_rcfile,
             work_directory=output_root / "magic",
         )
-        raw_pex = magic.spice_path.read_text(encoding="utf-8")
+        return self.prepare_extracted_geometry(
+            primitive,
+            geometry,
+            magic.spice_path,
+            magic.subcircuit_name,
+            output_root,
+        )
+
+    def prepare_extracted_geometry(
+        self,
+        primitive: str,
+        geometry: Geometry,
+        raw_pex_path: Path,
+        pex_subcircuit: str,
+        output_root: Path,
+    ) -> PreparedDeviceNetlists:
+        output_root.mkdir(parents=True, exist_ok=True)
+        raw_pex = raw_pex_path.read_text(encoding="utf-8")
         original_path = output_root / "primitive.pex.spice"
         original_path.write_text(raw_pex, encoding="utf-8")
         topology = validate_primitive_pex(
             raw_pex,
             primitive,
-            expected_subcircuit=magic.subcircuit_name,
+            expected_subcircuit=pex_subcircuit,
         )
         pex_path = output_root / "primitive.mos_only.spice"
         pex_path.write_text(

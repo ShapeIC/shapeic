@@ -41,3 +41,12 @@ class DeviceCapacitanceAdapter(Protocol):
         geometry: Geometry,
         output_root: Path,
     ) -> PreparedDeviceNetlists: ...
+
+    def prepare_extracted_geometry(
+        self,
+        primitive: str,
+        geometry: Geometry,
+        raw_pex_path: Path,
+        pex_subcircuit: str,
+        output_root: Path,
+    ) -> PreparedDeviceNetlists: ...
