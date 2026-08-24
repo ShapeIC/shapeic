@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_root = unique_output_root(manifest)?;
     let diff_point = OperatingPoint::new(
         DIFF_LENGTH,
-        -SOURCE_VOLTAGE,
+        0.0,
         VG_DC - SOURCE_VOLTAGE,
         VOUT_DC - SOURCE_VOLTAGE,
     );
@@ -403,6 +403,12 @@ fn validate_finger_width(primitive: &str, sizing: SizingSummary) -> Result<(), i
 }
 
 fn validate_physical_layout_policy(table: &PhysicalLookupTable) -> Result<(), io::Error> {
+    if table.metadata().format_version != 2 {
+        return Err(io::Error::other(format!(
+            "OTA physical verification requires physical LUT format v2, found v{}",
+            table.metadata().format_version
+        )));
+    }
     let found = &table.metadata().layout_policy;
     if found == PHYSICAL_LAYOUT_POLICY {
         return Ok(());
@@ -501,14 +507,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_diff_pair_uses_vss_bulk() {
+    fn configured_diff_pair_ties_bulk_to_source() {
         let point = OperatingPoint::new(
             DIFF_LENGTH,
-            -SOURCE_VOLTAGE,
+            0.0,
             VG_DC - SOURCE_VOLTAGE,
             VOUT_DC - SOURCE_VOLTAGE,
         );
-        assert!((point.vbs + 0.65).abs() < 1.0e-12);
+        assert_eq!(point.vbs, 0.0);
         assert!((point.vgs - 0.25).abs() < 1.0e-12);
         assert!((point.vds - 0.35).abs() < 1.0e-12);
     }
@@ -566,6 +572,7 @@ mod tests {
             manifest.join("examples/ota_4t_physical_verification/ihp_sg13g2_pex.spice"),
         )
         .expect("physical verification template");
+        assert!(template.contains("XOTA VOUT VINP VINN IBIAS VDD IBIAS {{pex_subcircuit}}"));
         assert!(template.contains("let loop_response = -v(VOUT)"));
         assert!(template.contains("let phase_deg = 180 / pi * cph(loop_response)"));
         assert!(optional_ac_measurements(true).contains("180 + phase_at_unity"));

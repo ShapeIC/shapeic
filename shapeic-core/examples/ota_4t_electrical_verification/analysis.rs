@@ -11,7 +11,7 @@ pub use shapeic_core::analysis::AcMetrics;
 use shapeic_core::analysis::{
     AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, analyze_adaptive_ac,
 };
-use shapeic_layout::{PhysicalLookupTable, PhysicalPoint, PortAdmittance};
+use shapeic_layout::{LayoutAwareAdmittance, LayoutAwarePoint, PhysicalLookupTable};
 use shapeic_lut::{
     CurrentSizingResult, DeviceLut, Expr, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
     OperatingPoint,
@@ -198,8 +198,13 @@ pub fn analyze_physical(
 
     let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
     let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
-    let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing)?;
-    let mirror_physical = query_physical(physical, "currentmirror", current_mirror.sizing)?;
+    let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing, diff_point)?;
+    let mirror_physical = query_physical(
+        physical,
+        "currentmirror",
+        current_mirror.sizing,
+        mirror_point,
+    )?;
     let system = mna(spice_dir, mna_output_dir, "ota_4t")
         .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
     let ac = evaluate_physical_ac(
@@ -325,29 +330,22 @@ fn evaluate_physical_ac(
     system: &MnaResult,
     diff_pair: &SizedBlock,
     current_mirror: &SizedBlock,
-    diff_physical: &PortAdmittance,
-    mirror_physical: &PortAdmittance,
+    diff_physical: &LayoutAwareAdmittance,
+    mirror_physical: &LayoutAwareAdmittance,
 ) -> Result<EvaluatedAc, io::Error> {
     let mut matrix = system.a.clone();
-    stamp_device_capacitances(&mut matrix, system, diff_pair, current_mirror, "VSS")?;
+    stamp_device_capacitances(&mut matrix, system, diff_pair, current_mirror, "IBIAS")?;
     stamp_physical_admittance(
         &mut matrix,
         system,
         diff_physical,
-        [
-            ("DP", "VOUT"),
-            ("DN", "N1"),
-            ("GP", "VINP"),
-            ("GN", "VINN"),
-            ("S", "IBIAS"),
-            ("B", "VSS"),
-        ],
+        diff_pair_physical_connections(),
     )?;
     stamp_physical_admittance(
         &mut matrix,
         system,
         mirror_physical,
-        [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")],
+        current_mirror_physical_connections(),
     )?;
     let parameters = diff_pair
         .parameters
@@ -381,12 +379,33 @@ fn query_physical(
     table: &PhysicalLookupTable,
     primitive: &str,
     sizing: SizingSummary,
-) -> Result<PortAdmittance, Box<dyn Error>> {
-    Ok(table.primitive(primitive)?.query(PhysicalPoint::new(
-        sizing.length,
-        sizing.finger_width,
-        sizing.nf,
-    ))?)
+    point: OperatingPoint,
+) -> Result<LayoutAwareAdmittance, Box<dyn Error>> {
+    Ok(table
+        .primitive(primitive)?
+        .query_layout_aware(LayoutAwarePoint::new(
+            sizing.length,
+            sizing.finger_width,
+            sizing.nf,
+            point.vbs,
+            point.vgs,
+            point.vds,
+        ))?)
+}
+
+fn diff_pair_physical_connections() -> [(&'static str, &'static str); 6] {
+    [
+        ("DP", "VOUT"),
+        ("DN", "N1"),
+        ("GP", "VINP"),
+        ("GN", "VINN"),
+        ("S", "IBIAS"),
+        ("B", "IBIAS"),
+    ]
+}
+
+fn current_mirror_physical_connections() -> [(&'static str, &'static str); 4] {
+    [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")]
 }
 
 fn diff_pair_connections<'a>(
@@ -469,7 +488,7 @@ fn stamp_numeric_device_capacitances(
 fn stamp_physical_admittance<const N: usize>(
     matrix: &mut Matrix<symbolica::domains::atom::AtomField>,
     system: &MnaResult,
-    admittance: &PortAdmittance,
+    admittance: &LayoutAwareAdmittance,
     connections: [(&str, &str); N],
 ) -> Result<(), io::Error> {
     let connections = connections
@@ -477,14 +496,14 @@ fn stamp_physical_admittance<const N: usize>(
         .map(|(port, node)| (port.to_owned(), node.to_owned()))
         .collect::<BTreeMap<_, _>>();
     let capacitance = admittance
-        .capacitance
+        .total_capacitance()
         .mapv(|value| value * AC_S_NORMALIZATION);
     stamp_port_admittance(
         matrix,
         &system.nodes,
         &admittance.ports,
         &connections,
-        admittance.conductance.view(),
+        admittance.interconnect_conductance.view(),
         capacitance.view(),
     )
     .map_err(|error| {
@@ -982,10 +1001,29 @@ mod tests {
     }
 
     #[test]
-    fn physical_diff_pair_bulk_is_connected_to_vss() {
-        let connections = diff_pair_connections("VINP", "VOUT", "VSS");
+    fn physical_diff_pair_bulk_is_connected_to_source() {
+        let connections = diff_pair_connections("VINP", "VOUT", "IBIAS");
         assert_eq!(connections[2], ("S", "IBIAS"));
-        assert_eq!(connections[3], ("B", "VSS"));
+        assert_eq!(connections[3], ("B", "IBIAS"));
+    }
+
+    #[test]
+    fn physical_primitive_ports_match_the_validated_ota_connections() {
+        assert_eq!(
+            diff_pair_physical_connections(),
+            [
+                ("DP", "VOUT"),
+                ("DN", "N1"),
+                ("GP", "VINP"),
+                ("GN", "VINN"),
+                ("S", "IBIAS"),
+                ("B", "IBIAS"),
+            ]
+        );
+        assert_eq!(
+            current_mirror_physical_connections(),
+            [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD"),]
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use shapeic_core::analysis::{
     AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
     AnalysisTargets, TargetAssessment, TargetFailure, analyze_adaptive_ac,
 };
-use shapeic_layout::{LayoutError, PhysicalLookupTable, PhysicalPoint, PortAdmittance};
+use shapeic_layout::{LayoutAwareAdmittance, LayoutAwarePoint, LayoutError, PhysicalLookupTable};
 use shapeic_lut::{
     Axis, DeviceLut, Expr, LookupTable, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
     OperatingPoint,
@@ -212,7 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let vds = drain_source_voltages[index];
             let block = simple_diff_pair(
                 nmos,
-                &OperatingPoint::new(length, -source_voltage, vgs, vds),
+                &OperatingPoint::new(length, 0.0, vgs, vds),
                 branch_current,
             )?;
             diff_pairs.push(DiffSweepPoint {
@@ -314,7 +314,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &base_system,
                         table,
                         &diff_point.block,
+                        OperatingPoint::new(diff_point.length, 0.0, diff_point.vgs, diff_point.vds),
                         current_mirror,
+                        OperatingPoint::new(
+                            *mirror_length,
+                            0.0,
+                            VOUT_DC - VDD_DC,
+                            VOUT_DC - VDD_DC,
+                        ),
                     );
                     if let Some(duration) = physical_evaluation.as_mut() {
                         *duration += stage_start.elapsed();
@@ -491,6 +498,12 @@ fn validate_intrinsic_capacitance_parameters(model: &DeviceLut) -> Result<(), io
 }
 
 fn validate_physical_layout_policy(table: &PhysicalLookupTable) -> Result<(), io::Error> {
+    if table.metadata().format_version != 2 {
+        return Err(io::Error::other(format!(
+            "OTA layout-aware analysis requires physical LUT format v2, found v{}",
+            table.metadata().format_version
+        )));
+    }
     let found = &table.metadata().layout_policy;
     if found == PHYSICAL_LAYOUT_POLICY {
         return Ok(());
@@ -587,10 +600,13 @@ fn evaluate_layout_aware(
     base_system: &MnaResult,
     table: &PhysicalLookupTable,
     diff_pair: &SizedBlock,
+    diff_point: OperatingPoint,
     current_mirror: &SizedBlock,
+    mirror_point: OperatingPoint,
 ) -> Result<AdaptiveAcOutcome, LayoutAwareError> {
-    let diff_physical = query_physical(table, "simplediffpair", diff_pair.sizing)?;
-    let mirror_physical = query_physical(table, "currentmirror", current_mirror.sizing)?;
+    let diff_physical = query_physical(table, "simplediffpair", diff_pair.sizing, diff_point)?;
+    let mirror_physical =
+        query_physical(table, "currentmirror", current_mirror.sizing, mirror_point)?;
 
     let mut matrix = base_system.a.clone();
     stamp_physical(
@@ -605,7 +621,7 @@ fn evaluate_layout_aware(
         &mut matrix,
         base_system,
         &mirror_physical,
-        [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")],
+        current_mirror_physical_connections(),
         1.0,
     )
     .map_err(|error| LayoutAwareError::Fatal(Box::new(error)))?;
@@ -651,7 +667,7 @@ fn adaptive_policy(include_dc_target: bool) -> AdaptiveAcPolicy {
 }
 
 fn diff_pair_mos_connections<'a>(gate: &'a str, drain: &'a str) -> [(&'static str, &'a str); 4] {
-    [("G", gate), ("D", drain), ("S", "IBIAS"), ("B", "VSS")]
+    [("G", gate), ("D", drain), ("S", "IBIAS"), ("B", "IBIAS")]
 }
 
 fn diff_pair_physical_connections() -> [(&'static str, &'static str); 6] {
@@ -661,8 +677,12 @@ fn diff_pair_physical_connections() -> [(&'static str, &'static str); 6] {
         ("GP", "VINP"),
         ("GN", "VINN"),
         ("S", "IBIAS"),
-        ("B", "VSS"),
+        ("B", "IBIAS"),
     ]
+}
+
+fn current_mirror_physical_connections() -> [(&'static str, &'static str); 4] {
+    [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")]
 }
 
 fn stamp_compact_model_devices(
@@ -741,14 +761,18 @@ fn query_physical(
     table: &PhysicalLookupTable,
     primitive: &str,
     sizing: SizingSummary,
-) -> Result<PortAdmittance, LayoutAwareError> {
+    point: OperatingPoint,
+) -> Result<LayoutAwareAdmittance, LayoutAwareError> {
     let model = table
         .primitive(primitive)
         .map_err(|error| LayoutAwareError::Fatal(Box::new(error)))?;
-    match model.query(PhysicalPoint::new(
+    match model.query_layout_aware(LayoutAwarePoint::new(
         sizing.length,
         sizing.finger_width,
         sizing.nf,
+        point.vbs,
+        point.vgs,
+        point.vds,
     )) {
         Ok(value) => Ok(value),
         Err(LayoutError::OutOfPhysicalRange { axis, value, .. }) => Err(
@@ -765,7 +789,7 @@ fn query_physical(
 fn stamp_physical<const N: usize>(
     matrix: &mut Matrix<AtomField>,
     system: &MnaResult,
-    admittance: &PortAdmittance,
+    admittance: &LayoutAwareAdmittance,
     connections: [(&str, &str); N],
     capacitance_scale: f64,
 ) -> Result<(), io::Error> {
@@ -774,14 +798,14 @@ fn stamp_physical<const N: usize>(
         .map(|(port, node)| (port.to_owned(), node.to_owned()))
         .collect::<BTreeMap<_, _>>();
     let normalized_capacitance = admittance
-        .capacitance
+        .total_capacitance()
         .mapv(|value| value * capacitance_scale);
     stamp_port_admittance(
         matrix,
         &system.nodes,
         &admittance.ports,
         &connections,
-        admittance.conductance.view(),
+        admittance.interconnect_conductance.view(),
         normalized_capacitance.view(),
     )
     .map_err(|error| io::Error::other(format!("could not stamp physical primitive: {error:?}")))
@@ -1319,7 +1343,7 @@ fn print_electrical_ac_table(results: &[SweepResult]) {
 
 fn print_physical_table(results: &[SweepResult]) {
     print_ac_table_header(
-        "Layout-aware AC (intrinsic + compact-model extrinsic + physical parasitics)",
+        "Layout-aware AC (electrical capacitance + interconnect + device correction)",
     );
     for result in results {
         let Some(physical) = &result.physical else {
@@ -1658,7 +1682,8 @@ mod tests {
         AC_MAX_HZ, AC_MIN_HZ, AC_POINTS_PER_DECADE, ANALYSIS_TARGETS, AcMetrics,
         SOURCE_VOLTAGE_POINTS, SOURCE_VOLTAGE_START, SOURCE_VOLTAGE_STOP, SkipReason, StageCounts,
         StageEvaluation, VG_DC, VOUT_DC, ac_frequencies, ac_metrics_from_responses,
-        combined_capacitance_matrix, count_stage, crossing_frequency, diff_pair_mos_connections,
+        combined_capacitance_matrix, count_stage, crossing_frequency,
+        current_mirror_physical_connections, diff_pair_mos_connections,
         diff_pair_physical_connections, format_target_assessment, gain_db, linspace,
         missing_intrinsic_capacitance_parameters, normalize_voltage, option_difference,
         relative_change_percent, select_dc_response,
@@ -1711,17 +1736,24 @@ mod tests {
     }
 
     #[test]
-    fn compact_model_diff_pair_bulk_is_connected_to_vss() {
+    fn compact_model_diff_pair_bulk_is_connected_to_source() {
         let connections = diff_pair_mos_connections("VINP", "VOUT");
         assert_eq!(connections[2], ("S", "IBIAS"));
-        assert_eq!(connections[3], ("B", "VSS"));
+        assert_eq!(connections[3], ("B", "IBIAS"));
     }
 
     #[test]
-    fn physical_diff_pair_bulk_is_connected_to_vss() {
+    fn physical_diff_pair_bulk_is_connected_to_source() {
         let connections = diff_pair_physical_connections();
         assert_eq!(connections[4], ("S", "IBIAS"));
-        assert_eq!(connections[5], ("B", "VSS"));
+        assert_eq!(connections[5], ("B", "IBIAS"));
+    }
+
+    #[test]
+    fn physical_current_mirror_source_and_bulk_are_connected_to_vdd() {
+        let connections = current_mirror_physical_connections();
+        assert_eq!(connections[2], ("S", "VDD"));
+        assert_eq!(connections[3], ("B", "VDD"));
     }
 
     #[test]

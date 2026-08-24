@@ -11,7 +11,7 @@ ITAIL IBIAS 0 DC={{tail_current}}
 VOUT_BIAS VOUT_BIAS 0 DC={{vout_dc}} AC=0
 LBIAS VOUT_BIAS VOUT {{output_bias_inductance}}
 
-XOTA VOUT VINP VINN IBIAS VDD 0 {{pex_subcircuit}}
+XOTA VOUT VINP VINN IBIAS VDD IBIAS {{pex_subcircuit}}
 
 .options temp=27 tnom=27
 .control
