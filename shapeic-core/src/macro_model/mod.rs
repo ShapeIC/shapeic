@@ -47,8 +47,9 @@ pub use projection::{
     MacroCandidateProjection, MacroCandidateProjectionError, MacroOutputResolutionError,
 };
 pub use render::{
-    ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode, ResolvedPrimitiveBranch,
-    render_expanded_small_signal_netlist, render_small_signal_netlist,
+    ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
+    ResolvedPhysicalCandidateColumns, ResolvedPhysicalPort, ResolvedPhysicalPrimitive,
+    ResolvedPrimitiveBranch, render_expanded_small_signal_netlist, render_small_signal_netlist,
 };
 pub use validation::{
     MacroCircuitKind, MacroValidationError, validate_macro, validate_macro_catalog,

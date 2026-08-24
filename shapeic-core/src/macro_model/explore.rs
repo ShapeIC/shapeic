@@ -680,6 +680,7 @@ mod tests {
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
                 "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
+            physical_model: None,
             transistor_type: Some("nmos".to_owned()),
             layout_params: None,
             lut_config: None,

@@ -25,6 +25,17 @@
     ]
   },
 
+  "physical_model": {
+    "lut_primitive": "currentmirror",
+    "operating_point_branch": "m1",
+    "ports": {
+      "DOUT": "VOUTP",
+      "DREF": "VINP",
+      "S": "VDD",
+      "B": "VDD"
+    }
+  },
+
 
   "ports": {
             "VINP":  { "name": "VINP",  "role": "INPUT",  "description": "Positive input" },

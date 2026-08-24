@@ -492,6 +492,7 @@ mod tests {
                 symbol: None,
             },
             small_signal: None,
+            physical_model: None,
             transistor_type: device_type.map(str::to_owned),
             layout_params: None,
             lut_config: None,

@@ -81,12 +81,129 @@ impl ResolvedPrimitiveBranch {
     }
 }
 
+/// Candidate columns required to query one physical primitive LUT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPhysicalCandidateColumns {
+    length: String,
+    finger_width: String,
+    nf: String,
+    vbs: String,
+    vgs: String,
+    vds: String,
+}
+
+impl ResolvedPhysicalCandidateColumns {
+    fn new(instance_path: &str, branch: &str) -> Self {
+        Self {
+            length: small_signal_param_name("length", instance_path, branch),
+            finger_width: small_signal_param_name("finger_width", instance_path, branch),
+            nf: small_signal_param_name("nf", instance_path, branch),
+            vbs: small_signal_param_name("vbs", instance_path, branch),
+            vgs: small_signal_param_name("vgs", instance_path, branch),
+            vds: small_signal_param_name("vds", instance_path, branch),
+        }
+    }
+
+    /// Returns the total gate-length candidate column.
+    pub fn length(&self) -> &str {
+        &self.length
+    }
+
+    /// Returns the per-finger-width candidate column.
+    pub fn finger_width(&self) -> &str {
+        &self.finger_width
+    }
+
+    /// Returns the integer finger-count candidate column.
+    pub fn nf(&self) -> &str {
+        &self.nf
+    }
+
+    /// Returns the source-referenced bulk-voltage candidate column.
+    pub fn vbs(&self) -> &str {
+        &self.vbs
+    }
+
+    /// Returns the source-referenced gate-voltage candidate column.
+    pub fn vgs(&self) -> &str {
+        &self.vgs
+    }
+
+    /// Returns the source-referenced drain-voltage candidate column.
+    pub fn vds(&self) -> &str {
+        &self.vds
+    }
+}
+
+/// One physical LUT port resolved to an expanded MNA node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPhysicalPort {
+    physical_port: String,
+    node: String,
+}
+
+impl ResolvedPhysicalPort {
+    /// Returns the logical port name expected by the physical LUT.
+    pub fn physical_port(&self) -> &str {
+        &self.physical_port
+    }
+
+    /// Returns the resolved node in the compiled MNA namespace.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+}
+
+/// Physical query and stamp plan for one expanded primitive instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPhysicalPrimitive {
+    instance_path: String,
+    primitive_name: String,
+    lut_primitive: String,
+    operating_point_branch: String,
+    candidate_columns: ResolvedPhysicalCandidateColumns,
+    ports: Vec<ResolvedPhysicalPort>,
+}
+
+impl ResolvedPhysicalPrimitive {
+    /// Returns the sanitized hierarchical primitive-instance path.
+    pub fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    /// Returns the referenced electrical primitive definition.
+    pub fn primitive_name(&self) -> &str {
+        &self.primitive_name
+    }
+
+    /// Returns the primitive key used to query the physical LUT.
+    pub fn lut_primitive(&self) -> &str {
+        &self.lut_primitive
+    }
+
+    /// Returns the branch that supplies geometry and operating-point columns.
+    pub fn operating_point_branch(&self) -> &str {
+        &self.operating_point_branch
+    }
+
+    /// Returns the resolved candidate-column names for physical queries.
+    pub const fn candidate_columns(&self) -> &ResolvedPhysicalCandidateColumns {
+        &self.candidate_columns
+    }
+
+    /// Returns logical physical ports and their resolved MNA nodes.
+    pub fn ports(&self) -> &[ResolvedPhysicalPort] {
+        &self.ports
+    }
+}
+
 /// Expanded SPICE source, parameter order, and resolved primitive topology.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandedSmallSignalNetlist {
     source: String,
     parameter_order: Vec<String>,
     primitive_branches: Vec<ResolvedPrimitiveBranch>,
+    physical_primitives: Vec<ResolvedPhysicalPrimitive>,
 }
 
 impl ExpandedSmallSignalNetlist {
@@ -105,8 +222,25 @@ impl ExpandedSmallSignalNetlist {
         &self.primitive_branches
     }
 
-    pub(crate) fn into_parts(self) -> (String, Vec<String>, Vec<ResolvedPrimitiveBranch>) {
-        (self.source, self.parameter_order, self.primitive_branches)
+    /// Returns physical primitive plans materialized by the selected render mode.
+    pub fn physical_primitives(&self) -> &[ResolvedPhysicalPrimitive] {
+        &self.physical_primitives
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        Vec<String>,
+        Vec<ResolvedPrimitiveBranch>,
+        Vec<ResolvedPhysicalPrimitive>,
+    ) {
+        (
+            self.source,
+            self.parameter_order,
+            self.primitive_branches,
+            self.physical_primitives,
+        )
     }
 }
 
@@ -248,6 +382,7 @@ pub fn render_small_signal_netlist(
         source,
         parameter_order: renderer.parameter_order,
         primitive_branches: renderer.primitive_branches,
+        physical_primitives: renderer.physical_primitives,
     })
 }
 
@@ -257,6 +392,7 @@ struct Renderer {
     parameter_order: Vec<String>,
     parameters: HashMap<String, String>,
     primitive_branches: Vec<ResolvedPrimitiveBranch>,
+    physical_primitives: Vec<ResolvedPhysicalPrimitive>,
 }
 
 impl Renderer {
@@ -386,6 +522,35 @@ impl Renderer {
             }
         })?;
         let path = sanitized_path(instance_path);
+
+        if let Some(physical) = primitive.physical_model.as_ref() {
+            let ports = physical
+                .ports()
+                .iter()
+                .map(|mapping| {
+                    Ok(ResolvedPhysicalPort {
+                        physical_port: mapping.physical_port().to_owned(),
+                        node: resolved_connection(
+                            macro_,
+                            instance,
+                            mapping.primitive_pin(),
+                            scope,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, MacroRenderError>>()?;
+            self.physical_primitives.push(ResolvedPhysicalPrimitive {
+                instance_path: path.clone(),
+                primitive_name: primitive_name.to_owned(),
+                lut_primitive: physical.lut_primitive().to_owned(),
+                operating_point_branch: physical.operating_point_branch().to_owned(),
+                candidate_columns: ResolvedPhysicalCandidateColumns::new(
+                    &path,
+                    physical.operating_point_branch(),
+                ),
+                ports,
+            });
+        }
 
         for branch in model.branches() {
             let drain = resolved_connection(macro_, instance, branch.drain_pin(), scope)?;
@@ -600,13 +765,18 @@ fn sanitize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::catalog::primitive_catalog::PrimitiveCatalog;
     use crate::circuit::Circuit;
     use crate::macro_model::{
         Macro, MacroCatalog, MacroCompactOutputBinding, MacroOutputSource, MacroPort, MacroPortRole,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
-    use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::primitive::build::{LutBuildSpec, LutLengths, PrimitiveBuildSpec, SweepMode};
+    use crate::primitive::manifest::{
+        Pin, PinRole, PrimitiveFiles, PrimitiveManifest, PrimitivePhysicalModel,
+    };
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use shapeic_mna::spice2cir::spice2cir_text;
 
@@ -643,10 +813,27 @@ mod tests {
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
                 "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
+            physical_model: Some(PrimitivePhysicalModel::new(
+                "gain_physical",
+                "m1",
+                [("IN", "VIN"), ("OUT", "VOUT"), ("GND", "VSS")],
+            )),
             transistor_type: None,
             layout_params: None,
             lut_config: None,
-            build: None,
+            build: Some(PrimitiveBuildSpec {
+                inputs: Vec::new(),
+                sweep_mode: SweepMode::Aligned,
+                derived: Vec::new(),
+                lut: vec![LutBuildSpec {
+                    name: "m1".to_owned(),
+                    device: "nmos".to_owned(),
+                    current: "current".to_owned(),
+                    dof: HashMap::new(),
+                    lengths: Some(LutLengths::Values(vec![1.0])),
+                }],
+                columns: Vec::new(),
+            }),
         });
         catalog
     }
@@ -726,6 +913,26 @@ mod tests {
         assert_eq!(branch.drain_node(), "VOUT");
         assert_eq!(branch.source_node(), "VSS");
         assert_eq!(branch.bulk_node(), "VSS");
+        let [physical] = rendered.physical_primitives() else {
+            panic!("expected one resolved physical primitive");
+        };
+        assert_eq!(physical.instance_path(), "xcore");
+        assert_eq!(physical.primitive_name(), "gain_primitive");
+        assert_eq!(physical.lut_primitive(), "gain_physical");
+        assert_eq!(physical.operating_point_branch(), "m1");
+        assert_eq!(physical.candidate_columns().length(), "length__xcore__m1");
+        assert_eq!(
+            physical.candidate_columns().finger_width(),
+            "finger_width__xcore__m1"
+        );
+        assert_eq!(physical.candidate_columns().nf(), "nf__xcore__m1");
+        assert_eq!(physical.candidate_columns().vbs(), "vbs__xcore__m1");
+        assert_eq!(physical.candidate_columns().vgs(), "vgs__xcore__m1");
+        assert_eq!(physical.candidate_columns().vds(), "vds__xcore__m1");
+        assert_eq!(physical.ports()[0].physical_port(), "IN");
+        assert_eq!(physical.ports()[0].node(), "VIN");
+        assert_eq!(physical.ports()[1].physical_port(), "OUT");
+        assert_eq!(physical.ports()[1].node(), "VOUT");
         assert!(spice2cir_text(rendered.source()).is_ok());
     }
 
@@ -771,6 +978,23 @@ mod tests {
                 .contains(&"load_resistance__xb".to_owned())
         );
         assert_eq!(rendered.primitive_branches().len(), 2);
+        assert_eq!(rendered.physical_primitives().len(), 2);
+        assert_eq!(
+            rendered.physical_primitives()[0].instance_path(),
+            "xa__xcore"
+        );
+        assert_eq!(
+            rendered.physical_primitives()[0].ports()[1].node(),
+            "n__xa__NINT"
+        );
+        assert_eq!(
+            rendered.physical_primitives()[1].instance_path(),
+            "xb__xcore"
+        );
+        assert_eq!(
+            rendered.physical_primitives()[1].ports()[1].node(),
+            "n__xb__NINT"
+        );
         assert_eq!(
             rendered.primitive_branches()[0].instance_path(),
             "xa__xcore"
@@ -799,6 +1023,7 @@ mod tests {
         assert_eq!(rendered.source(), "G_gm VOUT VSS VIN VSS gm_eq\n");
         assert_eq!(rendered.parameter_order(), ["gm_eq"]);
         assert!(rendered.primitive_branches().is_empty());
+        assert!(rendered.physical_primitives().is_empty());
         assert!(!rendered.source().contains("xcore"));
     }
 
@@ -848,6 +1073,7 @@ mod tests {
         );
         assert_eq!(rendered.parameter_order(), ["gm_eq__xa", "gm_eq__xb"]);
         assert!(rendered.primitive_branches().is_empty());
+        assert!(rendered.physical_primitives().is_empty());
         assert!(!rendered.source().contains("gm__xa__xcore__m1"));
         assert!(spice2cir_text(rendered.source()).is_ok());
     }

@@ -7,6 +7,7 @@ use super::primitive_catalog::PrimitiveCatalog;
 
 use crate::primitive::build::PrimitiveBuildSpec;
 use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+use crate::primitive::manifest::PrimitivePhysicalModel;
 use crate::primitive::small_signal::SmallSignalModel;
 
 #[derive(Debug)]
@@ -92,6 +93,7 @@ struct RawPrimitiveManifest {
     lut_config: Option<serde_json::Value>,
     files: RawPrimitiveFiles,
     small_signal: Option<SmallSignalModel>,
+    physical_model: Option<PrimitivePhysicalModel>,
     build: Option<PrimitiveBuildSpec>,
 }
 
@@ -142,6 +144,7 @@ impl RawPrimitiveManifest {
             pins,
             files,
             small_signal: self.small_signal,
+            physical_model: self.physical_model,
             transistor_type: self.transistor_type,
             layout_params: self.layout_params,
             lut_config: self.lut_config,
@@ -191,6 +194,7 @@ mod tests {
 
         let primitive = load_primitive_manifest(&path).unwrap();
         let model = primitive.small_signal.as_ref().unwrap();
+        let physical = primitive.physical_model.as_ref().unwrap();
 
         assert_eq!(model.branches().len(), 2);
         let m2 = model.branch("m2").unwrap();
@@ -198,5 +202,44 @@ mod tests {
         assert_eq!(m2.gate_pin(), "VINN");
         assert_eq!(m2.source_pin(), "VTAIL");
         assert_eq!(m2.bulk_pin(), "VSS");
+        assert_eq!(physical.lut_primitive(), "simplediffpair");
+        assert_eq!(physical.operating_point_branch(), "m1");
+        assert_eq!(physical.ports().len(), 6);
+        assert_eq!(
+            physical
+                .ports()
+                .iter()
+                .find(|mapping| mapping.physical_port() == "B")
+                .map(|mapping| mapping.primitive_pin()),
+            Some("VSS")
+        );
+    }
+
+    #[test]
+    fn loads_the_current_mirror_physical_port_mapping() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir
+            .parent()
+            .unwrap()
+            .join("analoglib/primitives/simplecurrentmirror/primitive.json");
+
+        let primitive = load_primitive_manifest(&path).unwrap();
+        let physical = primitive.physical_model.as_ref().unwrap();
+
+        assert_eq!(physical.lut_primitive(), "currentmirror");
+        assert_eq!(physical.operating_point_branch(), "m1");
+        assert_eq!(
+            physical
+                .ports()
+                .iter()
+                .map(|mapping| (mapping.physical_port(), mapping.primitive_pin()))
+                .collect::<Vec<_>>(),
+            [
+                ("DOUT", "VOUTP"),
+                ("DREF", "VINP"),
+                ("S", "VDD"),
+                ("B", "VDD"),
+            ]
+        );
     }
 }

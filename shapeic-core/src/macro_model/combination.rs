@@ -397,6 +397,7 @@ mod tests {
                 symbol: None,
             },
             small_signal: None,
+            physical_model: None,
             transistor_type: Some("nmos".to_owned()),
             layout_params: None,
             lut_config: None,

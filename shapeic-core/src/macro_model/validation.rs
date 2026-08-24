@@ -115,6 +115,58 @@ pub enum MacroValidationError {
         terminal: &'static str,
         pin: String,
     },
+    EmptyPhysicalLutPrimitive {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+    },
+    EmptyPhysicalOperatingPointBranch {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+    },
+    UnknownPhysicalOperatingPointBranch {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        branch: String,
+    },
+    EmptyPhysicalPortMap {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+    },
+    EmptyPhysicalPort {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        mapping_index: usize,
+    },
+    DuplicatePhysicalPort {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        port: String,
+    },
+    EmptyPhysicalPin {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        port: String,
+    },
+    UnknownPhysicalPin {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        port: String,
+        pin: String,
+    },
+    MissingPhysicalPinMapping {
+        macro_name: String,
+        instance: String,
+        primitive: String,
+        pin: String,
+    },
     UnknownMacro {
         macro_name: String,
         instance: String,
@@ -340,6 +392,85 @@ impl fmt::Display for MacroValidationError {
             } => write!(
                 formatter,
                 "macro '{macro_name}' instance '{instance}' primitive '{primitive}' branch '{branch}' references unknown {terminal} pin '{pin}'"
+            ),
+            Self::EmptyPhysicalLutPrimitive {
+                macro_name,
+                instance,
+                primitive,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has an empty physical LUT primitive"
+            ),
+            Self::EmptyPhysicalOperatingPointBranch {
+                macro_name,
+                instance,
+                primitive,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has an empty physical operating-point branch"
+            ),
+            Self::UnknownPhysicalOperatingPointBranch {
+                macro_name,
+                instance,
+                primitive,
+                branch,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' physical model references unknown branch '{branch}'"
+            ),
+            Self::EmptyPhysicalPortMap {
+                macro_name,
+                instance,
+                primitive,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has no physical port mappings"
+            ),
+            Self::EmptyPhysicalPort {
+                macro_name,
+                instance,
+                primitive,
+                mapping_index,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' has an empty physical port at mapping {mapping_index}"
+            ),
+            Self::DuplicatePhysicalPort {
+                macro_name,
+                instance,
+                primitive,
+                port,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' maps physical port '{port}' more than once"
+            ),
+            Self::EmptyPhysicalPin {
+                macro_name,
+                instance,
+                primitive,
+                port,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' maps physical port '{port}' to an empty pin"
+            ),
+            Self::UnknownPhysicalPin {
+                macro_name,
+                instance,
+                primitive,
+                port,
+                pin,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' maps physical port '{port}' to unknown pin '{pin}'"
+            ),
+            Self::MissingPhysicalPinMapping {
+                macro_name,
+                instance,
+                primitive,
+                pin,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance}' primitive '{primitive}' physical model does not map pin '{pin}'"
             ),
             Self::UnknownMacro {
                 macro_name,
@@ -649,6 +780,7 @@ fn validate_circuit(
             BlockRef::Primitive(primitive) => match primitive_catalog.get(primitive) {
                 Some(manifest) => {
                     validate_primitive_small_signal(macro_, instance.name(), manifest, errors);
+                    validate_primitive_physical_model(macro_, instance.name(), manifest, errors);
                     Some((
                         primitive.clone(),
                         manifest
@@ -720,6 +852,123 @@ fn validate_circuit(
                     });
                 }
             }
+        }
+    }
+}
+
+fn validate_primitive_physical_model(
+    macro_: &Macro,
+    instance: &str,
+    primitive: &crate::primitive::manifest::PrimitiveManifest,
+    errors: &mut Vec<MacroValidationError>,
+) {
+    let Some(physical) = primitive.physical_model.as_ref() else {
+        return;
+    };
+    let context = || {
+        (
+            macro_.name().to_owned(),
+            instance.to_owned(),
+            primitive.name.clone(),
+        )
+    };
+    if physical.lut_primitive().trim().is_empty() {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::EmptyPhysicalLutPrimitive {
+            macro_name,
+            instance,
+            primitive,
+        });
+    }
+    if physical.operating_point_branch().trim().is_empty() {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::EmptyPhysicalOperatingPointBranch {
+            macro_name,
+            instance,
+            primitive,
+        });
+    } else if !primitive.small_signal.as_ref().is_some_and(|model| {
+        model.branch(physical.operating_point_branch()).is_some()
+    }) || !primitive.build.as_ref().is_some_and(|build| {
+        build
+            .lut
+            .iter()
+            .any(|lut| lut.name == physical.operating_point_branch())
+    }) {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::UnknownPhysicalOperatingPointBranch {
+            macro_name,
+            instance,
+            primitive,
+            branch: physical.operating_point_branch().to_owned(),
+        });
+    }
+    if physical.ports().is_empty() {
+        let (macro_name, instance, primitive) = context();
+        errors.push(MacroValidationError::EmptyPhysicalPortMap {
+            macro_name,
+            instance,
+            primitive,
+        });
+    }
+
+    let pins = primitive
+        .pins
+        .iter()
+        .map(|pin| pin.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut physical_ports = HashSet::new();
+    let mut mapped_pins = HashSet::new();
+    for (mapping_index, mapping) in physical.ports().iter().enumerate() {
+        let port = mapping.physical_port();
+        let pin = mapping.primitive_pin();
+        if port.trim().is_empty() {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::EmptyPhysicalPort {
+                macro_name,
+                instance,
+                primitive,
+                mapping_index,
+            });
+        } else if !physical_ports.insert(port) {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::DuplicatePhysicalPort {
+                macro_name,
+                instance,
+                primitive,
+                port: port.to_owned(),
+            });
+        }
+        if pin.trim().is_empty() {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::EmptyPhysicalPin {
+                macro_name,
+                instance,
+                primitive,
+                port: port.to_owned(),
+            });
+        } else if !pins.contains(pin) {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::UnknownPhysicalPin {
+                macro_name,
+                instance,
+                primitive,
+                port: port.to_owned(),
+                pin: pin.to_owned(),
+            });
+        } else {
+            mapped_pins.insert(pin);
+        }
+    }
+    for pin in pins {
+        if !mapped_pins.contains(pin) {
+            let (macro_name, instance, primitive) = context();
+            errors.push(MacroValidationError::MissingPhysicalPinMapping {
+                macro_name,
+                instance,
+                primitive,
+                pin: pin.to_owned(),
+            });
         }
     }
 }
@@ -1134,7 +1383,9 @@ mod tests {
         MacroOutputSource, MacroPort, MacroPortRole,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
-    use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::primitive::manifest::{
+        Pin, PinRole, PrimitiveFiles, PrimitiveManifest, PrimitivePhysicalModel,
+    };
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use crate::testbench::{AcAnalysis, TransferFunction};
 
@@ -1169,6 +1420,7 @@ mod tests {
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
                 "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
+            physical_model: None,
             transistor_type: None,
             layout_params: None,
             lut_config: None,
@@ -1421,6 +1673,56 @@ mod tests {
             error,
             MacroValidationError::DuplicateSmallSignalBranch { branch, .. }
                 if branch == "m1"
+        )));
+    }
+
+    #[test]
+    fn validates_physical_branch_ports_and_primitive_pins() {
+        let mut primitives = primitive_catalog();
+        let mut primitive = primitives.get("stage_primitive").unwrap().clone();
+        primitive.physical_model = Some(PrimitivePhysicalModel::new(
+            "",
+            "missing",
+            [
+                ("", ""),
+                ("D", "UNKNOWN"),
+                ("D", "VIN"),
+            ],
+        ));
+        primitives.register(primitive);
+        let macros = MacroCatalog::from_macros([leaf_macro()]).unwrap();
+
+        let errors = validate_macro_catalog(&macros, &primitives);
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptyPhysicalLutPrimitive { .. }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::UnknownPhysicalOperatingPointBranch { branch, .. }
+                if branch == "missing"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptyPhysicalPort { .. }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::DuplicatePhysicalPort { port, .. } if port == "D"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptyPhysicalPin { .. }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::UnknownPhysicalPin { pin, .. } if pin == "UNKNOWN"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::MissingPhysicalPinMapping { pin, .. }
+                if pin == "VOUT" || pin == "VSS"
         )));
     }
 

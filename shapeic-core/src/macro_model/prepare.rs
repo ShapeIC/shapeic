@@ -13,14 +13,22 @@ use crate::testbench::{AcAnalysis, AcTestbench, AcTestbenchBuildError, PreparedA
 
 use super::{
     Macro, MacroAcTestbench, MacroCatalog, MacroRenderError, MacroRenderMode, MacroTestbenchSource,
-    ResolvedPrimitiveBranch, render_small_signal_netlist,
+    ResolvedPhysicalPrimitive, ResolvedPrimitiveBranch, render_small_signal_netlist,
 };
+
+type ComposedMacroAcTestbench = (
+    String,
+    Vec<String>,
+    Vec<ResolvedPrimitiveBranch>,
+    Vec<ResolvedPhysicalPrimitive>,
+);
 
 /// Compiled macro AC testbench and its resolved expanded primitive topology.
 #[derive(Clone, Debug)]
 pub struct PreparedMacroAcTestbench {
     testbench: PreparedAcTestbench,
     primitive_branches: Vec<ResolvedPrimitiveBranch>,
+    physical_primitives: Vec<ResolvedPhysicalPrimitive>,
 }
 
 impl PreparedMacroAcTestbench {
@@ -37,6 +45,11 @@ impl PreparedMacroAcTestbench {
     /// Returns the primitive branches materialized by the selected render mode.
     pub fn primitive_branches(&self) -> &[ResolvedPrimitiveBranch] {
         &self.primitive_branches
+    }
+
+    /// Returns resolved physical primitive query and stamp plans.
+    pub fn physical_primitives(&self) -> &[ResolvedPhysicalPrimitive] {
+        &self.physical_primitives
     }
 
     /// Instantiates the compiled MNA for one candidate parameter vector.
@@ -99,13 +112,14 @@ pub fn prepare_macro_ac_testbench(
     macro_catalog: &MacroCatalog,
     render_mode: MacroRenderMode,
 ) -> Result<PreparedMacroAcTestbench, MacroTestbenchPrepareError> {
-    let (source, parameter_order, primitive_branches) = compose_macro_ac_testbench(
-        macro_,
-        testbench,
-        primitive_catalog,
-        macro_catalog,
-        render_mode,
-    )?;
+    let (source, parameter_order, primitive_branches, physical_primitives) =
+        compose_macro_ac_testbench(
+            macro_,
+            testbench,
+            primitive_catalog,
+            macro_catalog,
+            render_mode,
+        )?;
     let parameter_order = parameter_order
         .iter()
         .map(String::as_str)
@@ -117,6 +131,7 @@ pub fn prepare_macro_ac_testbench(
     Ok(PreparedMacroAcTestbench {
         testbench,
         primitive_branches,
+        physical_primitives,
     })
 }
 
@@ -126,14 +141,20 @@ fn compose_macro_ac_testbench(
     primitive_catalog: &PrimitiveCatalog,
     macro_catalog: &MacroCatalog,
     render_mode: MacroRenderMode,
-) -> Result<(String, Vec<String>, Vec<ResolvedPrimitiveBranch>), MacroTestbenchPrepareError> {
+) -> Result<ComposedMacroAcTestbench, MacroTestbenchPrepareError> {
     let rendered =
         render_small_signal_netlist(macro_, primitive_catalog, macro_catalog, render_mode)
             .map_err(MacroTestbenchPrepareError::Render)?;
     let testbench_source = read_testbench_source(testbench.source())?;
-    let (macro_source, parameter_order, primitive_branches) = rendered.into_parts();
+    let (macro_source, parameter_order, primitive_branches, physical_primitives) =
+        rendered.into_parts();
     let source = compose_sources(macro_source, testbench.name(), &testbench_source);
-    Ok((source, parameter_order, primitive_branches))
+    Ok((
+        source,
+        parameter_order,
+        primitive_branches,
+        physical_primitives,
+    ))
 }
 
 fn read_testbench_source(
@@ -168,6 +189,7 @@ fn compose_sources(mut source: String, testbench_name: &str, testbench_source: &
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use crate::analysis::{
@@ -182,7 +204,10 @@ mod tests {
         PreparedMacroAcCandidateEvaluator,
     };
     use crate::netlist::names::small_signal_param_name;
-    use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::primitive::build::{LutBuildSpec, LutLengths, PrimitiveBuildSpec, SweepMode};
+    use crate::primitive::manifest::{
+        Pin, PinRole, PrimitiveFiles, PrimitiveManifest, PrimitivePhysicalModel,
+    };
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
     use crate::testbench::{AcAnalysis, TransferFunction};
     use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
@@ -237,10 +262,27 @@ mod tests {
             small_signal: Some(SmallSignalModel::new(vec![SmallSignalBranch::new(
                 "m1", "VOUT", "VIN", "VSS", "VSS",
             )])),
+            physical_model: Some(PrimitivePhysicalModel::new(
+                "gain_physical",
+                "m1",
+                [("IN", "VIN"), ("OUT", "VOUT"), ("GND", "VSS")],
+            )),
             transistor_type: None,
             layout_params: None,
             lut_config: None,
-            build: None,
+            build: Some(PrimitiveBuildSpec {
+                inputs: Vec::new(),
+                sweep_mode: SweepMode::Aligned,
+                derived: Vec::new(),
+                lut: vec![LutBuildSpec {
+                    name: "m1".to_owned(),
+                    device: "nmos".to_owned(),
+                    current: "current".to_owned(),
+                    dof: HashMap::new(),
+                    lengths: Some(LutLengths::Values(vec![1.0])),
+                }],
+                columns: Vec::new(),
+            }),
         });
         catalog
     }
@@ -288,14 +330,15 @@ mod tests {
         let catalog = MacroCatalog::from_macros([macro_.clone()]).unwrap();
         let testbench = MacroAcTestbench::from_spice("gain", "Vinput VIN VSS 1\n", analysis());
 
-        let (source, parameter_order, primitive_branches) = compose_macro_ac_testbench(
-            &macro_,
-            &testbench,
-            &primitive_catalog(),
-            &catalog,
-            MacroRenderMode::Expanded,
-        )
-        .unwrap();
+        let (source, parameter_order, primitive_branches, physical_primitives) =
+            compose_macro_ac_testbench(
+                &macro_,
+                &testbench,
+                &primitive_catalog(),
+                &catalog,
+                MacroRenderMode::Expanded,
+            )
+            .unwrap();
 
         assert_eq!(
             parameter_order,
@@ -312,6 +355,12 @@ mod tests {
         assert_eq!(branch.drain_node(), "VOUT");
         assert_eq!(branch.source_node(), "VSS");
         assert_eq!(branch.bulk_node(), "VSS");
+        let [physical] = physical_primitives.as_slice() else {
+            panic!("expected one compiled physical primitive plan");
+        };
+        assert_eq!(physical.instance_path(), "xcore");
+        assert_eq!(physical.lut_primitive(), "gain_physical");
+        assert_eq!(physical.ports()[1].node(), "VOUT");
     }
 
     #[test]
@@ -353,6 +402,7 @@ mod tests {
             MacroRenderMode::Expanded,
         )
         .unwrap();
+        assert_eq!(prepared.physical_primitives().len(), 1);
         let mut values = vec![
             ("gm__xcore__m1".to_owned(), 1.0e-3),
             ("ro__xcore__m1".to_owned(), 1.0e5),

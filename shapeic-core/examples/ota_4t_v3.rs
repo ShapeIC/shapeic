@@ -454,7 +454,7 @@ mod tests {
                 && branch.gate_node() == "VINP"
                 && branch.drain_node() == "VOUT"
                 && branch.source_node() == "IBIAS"
-                && branch.bulk_node() == "VSS"
+                && branch.bulk_node() == "IBIAS"
         }));
         assert!(rendered.primitive_branches().iter().any(|branch| {
             branch.instance_path() == CURRENT_MIRROR_INSTANCE
@@ -463,6 +463,27 @@ mod tests {
                 && branch.drain_node() == "N1"
                 && branch.source_node() == "VDD"
                 && branch.bulk_node() == "VDD"
+        }));
+        assert_eq!(rendered.physical_primitives().len(), 2);
+        let diff_pair = rendered
+            .physical_primitives()
+            .iter()
+            .find(|physical| physical.instance_path() == DIFF_PAIR_INSTANCE)
+            .unwrap();
+        assert_eq!(diff_pair.lut_primitive(), "simplediffpair");
+        assert_eq!(diff_pair.candidate_columns().vgs(), "vgs__xdp__m1");
+        assert!(diff_pair.ports().iter().any(|port| {
+            port.physical_port() == "B" && port.node() == "IBIAS"
+        }));
+        let current_mirror = rendered
+            .physical_primitives()
+            .iter()
+            .find(|physical| physical.instance_path() == CURRENT_MIRROR_INSTANCE)
+            .unwrap();
+        assert_eq!(current_mirror.lut_primitive(), "currentmirror");
+        assert_eq!(current_mirror.candidate_columns().vds(), "vds__xcm__m1");
+        assert!(current_mirror.ports().iter().any(|port| {
+            port.physical_port() == "DREF" && port.node() == "N1"
         }));
     }
 }

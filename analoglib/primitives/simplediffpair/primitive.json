@@ -25,6 +25,19 @@
     ]
   },
 
+  "physical_model": {
+    "lut_primitive": "simplediffpair",
+    "operating_point_branch": "m1",
+    "ports": {
+      "DP": "VOUTP",
+      "DN": "VOUTN",
+      "GP": "VINP",
+      "GN": "VINN",
+      "S": "VTAIL",
+      "B": "VSS"
+    }
+  },
+
   "ports": {
             "VINP":  { "name": "VINP",  "role": "INPUT",  "description": "Positive differential input" },
             "VINN":  { "name": "VINN",  "role": "INPUT",  "description": "Negative differential input" },
