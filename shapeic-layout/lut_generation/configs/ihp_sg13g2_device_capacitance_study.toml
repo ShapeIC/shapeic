@@ -1,0 +1,64 @@
+pdk = "ihp-sg13g2"
+physical_config = "ihp_sg13g2_ota.toml"
+
+[output]
+root = "../../../target/shapeic-device-capacitance-study"
+
+[simulator]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 4
+model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
+library_section = "mos_tt"
+osdi_paths = [
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
+  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
+]
+frequencies_hz = [1.0e6, 1.0e7]
+
+[acceptance]
+frequency_consistency = 0.01
+matrix_relative_error = 0.05
+
+[stage1.simplediffpair.geometry]
+length = 0.8
+finger_width = 9.18559546378991
+nf = 10
+
+[stage1.simplediffpair.calibration]
+vbs = [-0.8, -0.5]
+vgs = [0.2, 0.3]
+vds = [0.2, 0.5]
+
+[stage1.simplediffpair.validation]
+points = [
+  [-0.65, 0.25, 0.35],
+  [-0.725, 0.225, 0.275],
+  [-0.575, 0.275, 0.425],
+]
+
+[stage1.currentmirror.geometry]
+length = 0.4
+finger_width = 4.798844703697664
+nf = 1
+
+[stage1.currentmirror.calibration]
+vbs = [0.0, 0.5]
+vgs = [-0.6, -0.4]
+vds = [-0.7, -0.3]
+
+[stage1.currentmirror.validation]
+points = [
+  [0.0, -0.5, -0.5],
+  [0.125, -0.55, -0.6],
+  [0.375, -0.45, -0.4],
+]
+
+[stage2]
+length = [0.4, 0.8, 1.6]
+finger_width = [1.0, 5.0, 9.0]
+nf = [1, 2, 10, 20, 50]
+validation_geometry = [
+  [0.6, 3.0, 4],
+  [1.2, 7.0, 15],
+]

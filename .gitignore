@@ -6,3 +6,4 @@ shapeic-core/examples/ota_4t_v3/results.csv
 validation/ota_4t/outputs/ngspice.log
 validation/ota_4t/outputs/rendered.spice
 validation/ota_4t/outputs/results.csv
+shapeic-layout/lut_generation/generated/ihp_sg13g2_ota_physical.npz

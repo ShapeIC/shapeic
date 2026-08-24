@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -18,21 +19,19 @@ from shapeic_layout_generation.device_capacitance import (
     SimulatorConfig,
     _parse_raw,
     admittance_from_port_currents,
-    aggregate_primitive_spice,
     bias_port_voltages,
     charge_conservation_error,
     extract_port_admittance,
-    mos_only_pex,
     port_admittance_netlist,
-    primitive_device_definition,
     relative_matrix_error,
+)
+from shapeic_layout_generation.ihp_device_capacitance import (
+    IhpSg13g2DeviceCapacitanceAdapter,
 )
 
 
 class DeviceCapacitanceTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.diff_pair = primitive_device_definition("simplediffpair")
-        self.mirror = primitive_device_definition("currentmirror")
         self.simulator = SimulatorConfig(
             binary="ngspice",
             model_library=Path("/models.lib"),
@@ -41,6 +40,13 @@ class DeviceCapacitanceTest(unittest.TestCase):
             temperature_c=27.0,
             frequencies_hz=(1.0e6, 1.0e7),
         )
+        self.adapter = IhpSg13g2DeviceCapacitanceAdapter(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            self.simulator,
+            workers=1,
+        )
+        self.diff_pair = self.adapter.definition("simplediffpair")
+        self.mirror = self.adapter.definition("currentmirror")
 
     def test_mos_only_pex_preserves_mos_geometry_and_normalizes_bulk(self) -> None:
         raw = """
@@ -54,7 +60,7 @@ class DeviceCapacitanceTest(unittest.TestCase):
         Xignored DP GP S substrate unrelated_model w=1u
         .ends primitive
         """
-        filtered = mos_only_pex(raw, self.diff_pair)
+        filtered = self.adapter.mos_only_pex(raw, "simplediffpair")
         self.assertIn(".subckt primitive DP DN GP GN S B", filtered)
         self.assertIn(
             "X0 DP GP S B sg13_lv_nmos "
@@ -69,17 +75,17 @@ class DeviceCapacitanceTest(unittest.TestCase):
 
     def test_mos_only_pex_rejects_an_incompatible_interface(self) -> None:
         with self.assertRaisesRegex(ValueError, "ports must be"):
-            mos_only_pex(
+            self.adapter.mos_only_pex(
                 ".subckt primitive D G S B\n"
                 "X0 D G S B sg13_lv_nmos w=1u\n"
                 ".ends\n",
-                self.diff_pair,
+                "simplediffpair",
             )
 
     def test_aggregate_uses_total_width_and_preserves_finger_count(self) -> None:
         geometry = Geometry(length=0.8e-6, finger_width=3.0e-6, nf=4)
-        diff = aggregate_primitive_spice(self.diff_pair, geometry)
-        mirror = aggregate_primitive_spice(self.mirror, geometry)
+        diff = self.adapter.aggregate_spice("simplediffpair", geometry)
+        mirror = self.adapter.aggregate_spice("currentmirror", geometry)
         for netlist in (diff, mirror):
             self.assertIn("w=1.20000000000000003e-05", netlist)
             self.assertIn("ng=4", netlist)

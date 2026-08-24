@@ -4,6 +4,7 @@ import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -60,38 +61,11 @@ class Admittance:
     frequency_consistency: float
 
 
-DEVICE_DEFINITIONS = {
-    "simplediffpair": PrimitiveDeviceDefinition(
-        name="simplediffpair",
-        ports=("DP", "DN", "GP", "GN", "S", "B"),
-        model="sg13_lv_nmos",
-        instances=(
-            MosInstance("XDP1", "DP", "GP", "S", "B"),
-            MosInstance("XDP2", "DN", "GN", "S", "B"),
-        ),
-        bias_variables=("vds", "vds", "vgs", "vgs", "zero", "vbs"),
-    ),
-    "currentmirror": PrimitiveDeviceDefinition(
-        name="currentmirror",
-        ports=("DOUT", "DREF", "S", "B"),
-        model="sg13_lv_pmos",
-        instances=(
-            MosInstance("XCM1", "DOUT", "DREF", "S", "B"),
-            MosInstance("XCM2", "DREF", "DREF", "S", "B"),
-        ),
-        bias_variables=("vds", "vgs", "zero", "vbs"),
-    ),
-}
-
-
-def primitive_device_definition(name: str) -> PrimitiveDeviceDefinition:
-    try:
-        return DEVICE_DEFINITIONS[name]
-    except KeyError as error:
-        raise ValueError(f"unsupported primitive '{name}'") from error
-
-
-def mos_only_pex(text: str, definition: PrimitiveDeviceDefinition) -> str:
+def mos_only_pex(
+    text: str,
+    definition: PrimitiveDeviceDefinition,
+    normalize_device: Callable[[list[str]], list[str]],
+) -> str:
     """Keep only a primitive's MOS devices and bind their bulks to logical B."""
     lines = _logical_lines(text)
     headers = [
@@ -119,7 +93,9 @@ def mos_only_pex(text: str, definition: PrimitiveDeviceDefinition) -> str:
             continue
         if fields[5].casefold() != definition.model.casefold():
             continue
-        fields[4] = "B"
+        fields = normalize_device(fields)
+        if len(fields) < 6:
+            raise ValueError("normalized MOS device has fewer than six fields")
         output.append(" ".join(fields))
         device_count += 1
     if device_count == 0:
@@ -133,14 +109,13 @@ def mos_only_pex(text: str, definition: PrimitiveDeviceDefinition) -> str:
 def aggregate_primitive_spice(
     definition: PrimitiveDeviceDefinition,
     geometry: Geometry,
+    device_parameters: Callable[[PrimitiveDeviceDefinition, Geometry], str],
 ) -> str:
     """Build the compact-model reference with the PCell's total device width."""
     _validate_geometry(geometry)
-    total_width = geometry.finger_width * geometry.nf
-    parameters = (
-        f"{definition.model} l={geometry.length:.17e} "
-        f"w={total_width:.17e} ng={geometry.nf}"
-    )
+    parameters = device_parameters(definition, geometry)
+    if not parameters.strip():
+        raise ValueError("aggregate MOS parameters must not be empty")
     devices = [
         " ".join(
             (
@@ -425,7 +400,8 @@ def _parse_raw(path: Path) -> np.ndarray:
                 point_count = int(plot[b"no. points"])  # type: ignore[arg-type]
                 variable_count = int(plot[b"no. variables"])  # type: ignore[arg-type]
                 names = plot[b"varnames"]
-                complex_values = b"complex" in plot.get(b"flags", b"")  # type: ignore[operator]
+                flags = plot.get(b"flags", b"")
+                complex_values = b"complex" in flags  # type: ignore[operator]
                 dtype = np.dtype(
                     {
                         "names": names,
