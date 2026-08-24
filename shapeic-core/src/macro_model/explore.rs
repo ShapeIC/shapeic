@@ -745,7 +745,11 @@ mod tests {
             ("xcore.width_m1".to_owned(), gm * 1.0e6),
             (small_signal_param_name("width", "xcore", "m1"), 8.0e-6),
             (small_signal_param_name("length", "xcore", "m1"), 1.0e-6),
+            (small_signal_param_name("finger_width", "xcore", "m1"), 4.0e-6),
             (small_signal_param_name("nf", "xcore", "m1"), 2.0),
+            (small_signal_param_name("vbs", "xcore", "m1"), 0.0),
+            (small_signal_param_name("vgs", "xcore", "m1"), 0.25),
+            (small_signal_param_name("vds", "xcore", "m1"), 0.35),
         ];
         values.extend(
             MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
@@ -808,6 +812,38 @@ mod tests {
         );
         assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
         assert_eq!(statistics.frequency_evaluations(), 8);
+    }
+
+    #[test]
+    fn selected_candidate_preserves_geometry_and_operating_point_provenance() {
+        let result = MacroExplorationResult {
+            macro_name: "gain_stage".to_owned(),
+            candidate_sets: candidates(),
+            accepted: vec![MacroAcceptedCandidate {
+                candidate_indices: vec![0],
+                ac_outcomes: Vec::new(),
+            }],
+            statistics: MacroExplorationStatistics::default(),
+        };
+        let accepted = &result.accepted()[0];
+        let candidate = result
+            .selected_candidate(accepted, "xcore")
+            .expect("selected primitive candidate should remain available");
+
+        for (parameter, expected) in [
+            ("width", 8.0e-6),
+            ("length", 1.0e-6),
+            ("finger_width", 4.0e-6),
+            ("nf", 2.0),
+            ("vbs", 0.0),
+            ("vgs", 0.25),
+            ("vds", 0.35),
+        ] {
+            assert_eq!(
+                candidate.get(&small_signal_param_name(parameter, "xcore", "m1")),
+                Some(expected)
+            );
+        }
     }
 
     fn passing_outcome(frequency_evaluations: usize) -> AdaptiveAcOutcome {

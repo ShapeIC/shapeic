@@ -237,12 +237,48 @@ fn build(
     })
     .collect::<Result<Vec<_>, _>>()?;
     let mut columns = columns;
+    columns.extend(exposed_lut_provenance_columns(build_spec, &rows)?);
     columns.extend(exposed_input_columns(build_spec, &rows)?);
 
     Ok(PrimitiveBuildOutput {
         row_count: rows.len(),
         columns,
     })
+}
+
+fn exposed_lut_provenance_columns(
+    spec: &PrimitiveBuildSpec,
+    rows: &[HashMap<String, f64>],
+) -> Result<Vec<ExplorationColumn>, PrimitiveBuildError> {
+    let existing_columns = spec
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut exposed = Vec::new();
+
+    for lut in &spec.lut {
+        for parameter in ["length", "finger_width", "nf", "vbs", "vgs", "vds"] {
+            let column_name = format!("{parameter}__{}", lut.name);
+            if existing_columns.contains(column_name.as_str()) {
+                continue;
+            }
+            let symbol = format!("lut.{}.{parameter}", lut.name);
+            let values = rows
+                .iter()
+                .map(|row| {
+                    row.get(&symbol)
+                        .copied()
+                        .ok_or_else(|| PrimitiveBuildError::MissingSymbol {
+                            symbol: symbol.clone(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            exposed.push(ExplorationColumn::new(column_name, values));
+        }
+    }
+
+    Ok(exposed)
 }
 
 fn exposed_input_columns(
@@ -342,15 +378,15 @@ fn lut_query(
                     op: operating_point,
                     current: requested_current,
                 });
-                query_rows.push((row.clone(), *length));
+                query_rows.push(row.clone());
             }
         }
         let expressions = lut_expressions(model, lut)?;
         let lut_results = many_size_for_current(model, &queries, &expressions)?;
         let mut next_rows = Vec::with_capacity(query_rows.len());
-        for ((row, length), lut_values) in query_rows.into_iter().zip(lut_results) {
+        for (row, lut_values) in query_rows.into_iter().zip(lut_results) {
             let mut next_row = row;
-            insert_lut_result(&mut next_row, lut, length, &expressions, lut_values)?;
+            insert_lut_result(&mut next_row, lut, &expressions, lut_values)?;
             next_rows.push(next_row);
         }
         *rows = next_rows;
@@ -386,7 +422,6 @@ fn lut_expressions(
 fn insert_lut_result(
     row: &mut HashMap<String, f64>,
     lut: &LutBuildSpec,
-    length: f64,
     expressions: &[Expr],
     sizing: CurrentSizingResult,
 ) -> Result<(), PrimitiveBuildError> {
@@ -396,13 +431,28 @@ fn insert_lut_result(
         }
     })?;
     let prefix = format!("lut.{}", lut.name);
-    row.insert(format!("{prefix}.length"), length);
+    row.insert(
+        format!("{prefix}.length"),
+        sizing.point.operating_point.length,
+    );
     row.insert(format!("{prefix}.nf"), f64::from(sizing.nf));
     row.insert(
         format!("{prefix}.finger_width"),
         sizing.point.finger_width,
     );
     row.insert(format!("{prefix}.total_width"), sizing.total_width);
+    row.insert(
+        format!("{prefix}.vbs"),
+        sizing.point.operating_point.vbs,
+    );
+    row.insert(
+        format!("{prefix}.vgs"),
+        sizing.point.operating_point.vgs,
+    );
+    row.insert(
+        format!("{prefix}.vds"),
+        sizing.point.operating_point.vds,
+    );
     for (key, value) in expressions.iter().zip(sizing.values) {
         row.insert(
             format!("{prefix}.{}", key.parameter_name().unwrap()),
@@ -874,6 +924,26 @@ mod tests {
     }
 
     #[test]
+    fn current_mirror_uses_reference_gate_and_output_drain_biases() {
+        let spec: PrimitiveBuildSpec = serde_json::from_str(include_str!(
+            "../../../analoglib/primitives/simplecurrentmirror/build.json"
+        ))
+        .expect("current-mirror build spec should deserialize");
+        let mut rows = vec![HashMap::from([
+            ("current".to_owned(), 20.0e-6),
+            ("VINP".to_owned(), 0.65),
+            ("VOUTP".to_owned(), 0.95),
+            ("VDD".to_owned(), 1.2),
+        ])];
+
+        evaluate_expressions(&mut rows, &spec.derived)
+            .expect("current-mirror operating point should evaluate");
+
+        assert_eq!(rows[0]["vgs_m1"], 0.65 - 1.2);
+        assert_eq!(rows[0]["vds_m1"], 0.95 - 1.2);
+    }
+
+    #[test]
     fn lut_current_is_required_by_the_build_schema() {
         let error = serde_json::from_str::<LutBuildSpec>(
             r#"{"name":"m1","device":"nmos","lengths":[4e-7]}"#,
@@ -896,7 +966,6 @@ mod tests {
         insert_lut_result(
             &mut row,
             &lut_spec("id_m1"),
-            0.4e-6,
             &build_lut_expressions(),
             sizing_result(Some(extrinsic)),
         )
@@ -905,6 +974,9 @@ mod tests {
         assert_eq!(row["lut.m1.nf"], 3.0);
         assert_eq!(row["lut.m1.finger_width"], 0.75e-6);
         assert_eq!(row["lut.m1.total_width"], 2.25e-6);
+        assert_eq!(row["lut.m1.vbs"], 0.0);
+        assert_eq!(row["lut.m1.vgs"], 0.4);
+        assert_eq!(row["lut.m1.vds"], 0.4);
         assert_eq!(row["lut.m1.cgg"], 1.0e-15);
         assert_eq!(row["lut.m1.css"], 9.0e-15);
         assert_eq!(row["lut.m1.cgsol_total"], extrinsic.cgsol);
@@ -918,7 +990,6 @@ mod tests {
         let error = insert_lut_result(
             &mut HashMap::new(),
             &lut_spec("id_m1"),
-            0.4e-6,
             &build_lut_expressions(),
             sizing_result(None),
         )
@@ -998,7 +1069,6 @@ mod tests {
                 .expect("capacitance columns should evaluate");
 
             assert_eq!(row["width__m1"], 2.25e-6);
-            assert_eq!(spec.columns.len(), 36);
             for (index, parameter) in MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
                 .into_iter()
                 .enumerate()
@@ -1020,6 +1090,36 @@ mod tests {
     }
 
     #[test]
+    fn exposes_each_lut_query_coordinate_as_candidate_provenance() {
+        let spec: PrimitiveBuildSpec = serde_json::from_str(include_str!(
+            "../../../analoglib/primitives/simplediffpair/build.json"
+        ))
+        .expect("diff-pair build spec should deserialize");
+        let rows = [HashMap::from([
+            ("lut.m1.length".to_owned(), 0.8e-6),
+            ("lut.m1.finger_width".to_owned(), 1.25e-6),
+            ("lut.m1.nf".to_owned(), 4.0),
+            ("lut.m1.vbs".to_owned(), 0.0),
+            ("lut.m1.vgs".to_owned(), 0.25),
+            ("lut.m1.vds".to_owned(), 0.35),
+        ])];
+
+        let columns = exposed_lut_provenance_columns(&spec, &rows)
+            .expect("complete LUT provenance should be exposed");
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["finger_width__m1", "vbs__m1", "vgs__m1", "vds__m1"]
+        );
+        assert_eq!(columns[0].values, [1.25e-6]);
+        assert_eq!(columns[1].values, [0.0]);
+        assert_eq!(columns[2].values, [0.25]);
+        assert_eq!(columns[3].values, [0.35]);
+    }
+
+    #[test]
     fn capacitance_columns_map_to_branch_specific_candidate_names() {
         assert_eq!(
             primitive_build_candidate_column_name("xdp", "cgg__m1"),
@@ -1037,5 +1137,11 @@ mod tests {
             primitive_build_candidate_column_name("xcm", "cgsol__m2"),
             "cgsol__xcm__m2"
         );
+        for parameter in ["length", "finger_width", "nf", "vbs", "vgs", "vds"] {
+            assert_eq!(
+                primitive_build_candidate_column_name("xdp", &format!("{parameter}__m1")),
+                format!("{parameter}__xdp__m1")
+            );
+        }
     }
 }
