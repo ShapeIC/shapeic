@@ -658,6 +658,7 @@ dependencies = [
  "ndarray",
  "num-traits",
  "py_literal",
+ "zip",
 ]
 
 [[package]]

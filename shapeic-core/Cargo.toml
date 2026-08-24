@@ -18,7 +18,7 @@ shapeic-mna = { path = "../shapeic-mna" }
 
 [dev-dependencies]
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
-ndarray-npy = { version = "0.10", default-features = false }
+ndarray-npy = { version = "0.10", default-features = false, features = ["npz"] }
 shapeic-lut = { path = "../shapeic-lut" }
 symbolica = "2.1"
 zip = { version = "6", default-features = false, features = ["deflate"] }
