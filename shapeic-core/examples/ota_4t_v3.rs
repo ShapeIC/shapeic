@@ -7,20 +7,22 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use shapeic_core::analysis::{
-    AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
+    AcMetric, AcMetricSet, AcMetrics, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode,
+    AnalysisTargets,
 };
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
 use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::{
-    Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroExplorationInput,
-    MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
-    PrimitiveInstanceExplorationInput,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroCompactOutputBinding,
+    MacroExplorationInput, MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource,
+    MacroPort, MacroPortRole, PrimitiveInstanceExplorationInput,
 };
 use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::utils::linspace;
 use shapeic_lut::LookupTable;
+use shapeic_layout::PhysicalLookupTable;
 
 const TAIL_CURRENT: f64 = 20.0e-6;
 const VOUT: f64 = 1.0;
@@ -37,7 +39,8 @@ const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const DIFF_PAIR_INSTANCE: &str = "xdp";
 const CURRENT_MIRROR_INSTANCE: &str = "xcm";
-const AC_TESTBENCH: &str = "gain";
+const ELECTRICAL_AC_TESTBENCH: &str = "gain_electrical";
+const LAYOUT_AWARE_AC_TESTBENCH: &str = "gain_layout_aware";
 
 const AC_MIN_HZ: f64 = 1.0;
 const AC_MAX_HZ: f64 = 100.0e9;
@@ -59,11 +62,19 @@ const DIFF_PAIR_VBIAS_COLUMN: &str = "xdp.vtail";
 const CURRENT_MIRROR_VDD_COLUMN: &str = "xcm.vdd";
 const CURRENT_MIRROR_VOUT_COLUMN: &str = "xcm.voutp";
 const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
+const DIFF_PAIR_FINGER_WIDTH_COLUMN: &str = "finger_width__xdp__m1";
 const DIFF_PAIR_LENGTH_COLUMN: &str = "length__xdp__m1";
 const DIFF_PAIR_NF_COLUMN: &str = "nf__xdp__m1";
+const DIFF_PAIR_VBS_COLUMN: &str = "vbs__xdp__m1";
+const DIFF_PAIR_VGS_COLUMN: &str = "vgs__xdp__m1";
+const DIFF_PAIR_VDS_COLUMN: &str = "vds__xdp__m1";
 const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
+const CURRENT_MIRROR_FINGER_WIDTH_COLUMN: &str = "finger_width__xcm__m1";
 const CURRENT_MIRROR_LENGTH_COLUMN: &str = "length__xcm__m1";
 const CURRENT_MIRROR_NF_COLUMN: &str = "nf__xcm__m1";
+const CURRENT_MIRROR_VBS_COLUMN: &str = "vbs__xcm__m1";
+const CURRENT_MIRROR_VGS_COLUMN: &str = "vgs__xcm__m1";
+const CURRENT_MIRROR_VDS_COLUMN: &str = "vds__xcm__m1";
 const MAX_DIFF_PAIR_WIDTH: f64 = 100.0e-6;
 const MAX_CURRENT_MIRROR_WIDTH: f64 = 100.0e-6;
 
@@ -72,23 +83,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let primitives_dir = manifest.join("../analoglib/primitives");
     let testbench_path = manifest.join("examples/ota_4t_v3/gain.spice");
-    let (nmos_path, pmos_path, _physical_path) = lut_paths()?;
+    let (nmos_path, pmos_path, physical_path) = lut_paths()?;
 
     let stage_start = Instant::now();
     let nmos_table = LookupTable::open(nmos_path)?;
     let pmos_table = LookupTable::open(pmos_path)?;
+    let physical_table = physical_path
+        .map(PhysicalLookupTable::open)
+        .transpose()?;
     let lut_load = stage_start.elapsed();
     let nmos = nmos_table.model(NMOS_MODEL)?;
     let pmos = pmos_table.model(PMOS_MODEL)?;
 
     let primitive_catalog =
         load_primitive_catalog(&primitives_dir).map_err(|error| format!("{error:?}"))?;
-    let ota = ota_macro(testbench_path);
+    let ota = ota_macro(testbench_path, physical_table.is_some());
     let macro_catalog = MacroCatalog::from_macros([ota.clone()])?;
 
     let mut input = MacroExplorationInput::new();
     input.register_device_model("nmos", nmos)?;
     input.register_device_model("pmos", pmos)?;
+    if let Some(physical_table) = &physical_table {
+        input.register_physical_lut(physical_table)?;
+    }
     input.register_primitive_instance(
         DIFF_PAIR_INSTANCE,
         PrimitiveInstanceExplorationInput::new(
@@ -124,7 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn ota_macro(testbench_path: PathBuf) -> Macro {
+fn ota_macro(testbench_path: PathBuf, layout_aware: bool) -> Macro {
     let circuit = Circuit::builder()
         .primitive(
             DIFF_PAIR_INSTANCE,
@@ -156,7 +173,7 @@ fn ota_macro(testbench_path: PathBuf) -> Macro {
         .resistor("ro_cm_m2", "N1", "VDD", "ro_cm")
         .build();
 
-    Macro::new(
+    let mut ota = Macro::new(
         "ota_4t",
         vec![
             MacroPort::new("VINP", MacroPortRole::Input),
@@ -169,10 +186,21 @@ fn ota_macro(testbench_path: PathBuf) -> Macro {
         compact_model,
     )
     .with_ac_testbench(MacroAcTestbench::from_spice_file(
-        AC_TESTBENCH,
-        testbench_path,
+        ELECTRICAL_AC_TESTBENCH,
+        &testbench_path,
         ota_ac_analysis(),
-    ))
+    ));
+    if layout_aware {
+        ota = ota.with_ac_testbench(
+            MacroAcTestbench::from_spice_file(
+                LAYOUT_AWARE_AC_TESTBENCH,
+                testbench_path,
+                ota_ac_analysis(),
+            )
+            .with_domain(MacroAnalysisDomain::LayoutAware),
+        );
+    }
+    ota
     .with_compact_output(MacroCompactOutputBinding::new(
         "gm_dp",
         MacroOutputSource::candidate_column(DIFF_PAIR_INSTANCE, DIFF_PAIR_GM_COLUMN),
@@ -269,23 +297,32 @@ fn current_mirror_input() -> PrimitiveBuildInput {
 }
 
 fn print_results(result: &MacroExplorationResult) -> Result<(), io::Error> {
-    println!("\nOTA AC results");
+    let has_layout_aware = result
+        .statistics()
+        .testbench(LAYOUT_AWARE_AC_TESTBENCH)
+        .is_some();
+
+    println!("\nOTA sizing and operating points");
     println!(
-        "{:<8} {:<8} {:>9} {:>9} {:>10} {:>10} {:>6} {:>10} {:>10} {:>6} {:>12} {:>12} {:>12} {:>10}",
+        "{:<8} {:<8} {:>8} {:>8} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8}",
         "dp_idx",
         "cm_idx",
-        "vout_v",
-        "vbias_v",
-        "w_dp_um",
-        "l_dp_um",
-        "nf_dp",
-        "w_cm_um",
-        "l_cm_um",
-        "nf_cm",
-        "dc_gain_db",
-        "f3db_hz",
-        "ugf_hz",
-        "pm_deg",
+        "vout",
+        "vbias",
+        "dp_w_um",
+        "dp_wf_um",
+        "dp_l_um",
+        "dp_nf",
+        "dp_vbs",
+        "dp_vgs",
+        "dp_vds",
+        "cm_w_um",
+        "cm_wf_um",
+        "cm_l_um",
+        "cm_nf",
+        "cm_vbs",
+        "cm_vgs",
+        "cm_vds",
     );
 
     for accepted in result.accepted() {
@@ -295,30 +332,118 @@ fn print_results(result: &MacroExplorationResult) -> Result<(), io::Error> {
         let cm_value = |column| selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column);
         let vout = dp_value(DIFF_PAIR_VOUT_COLUMN)?;
         debug_assert_eq!(vout, cm_value(CURRENT_MIRROR_VOUT_COLUMN)?);
-        let metrics = result
-            .ac_outcome(accepted, AC_TESTBENCH)
-            .ok_or_else(|| io::Error::other("accepted OTA candidate has no gain outcome"))?
-            .metrics;
 
         println!(
-            "{:<8} {:<8} {:>9.4} {:>9.4} {:>10.4} {:>10.4} {:>6.0} {:>10.4} {:>10.4} {:>6.0} {:>12.6} {:>12.6e} {:>12.6e} {:>10.6}",
+            "{:<8} {:<8} {:>8.4} {:>8.4} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4}",
             dp_index,
             cm_index,
             vout,
             dp_value(DIFF_PAIR_VBIAS_COLUMN)?,
             dp_value(DIFF_PAIR_WIDTH_COLUMN)? * 1.0e6,
+            dp_value(DIFF_PAIR_FINGER_WIDTH_COLUMN)? * 1.0e6,
             dp_value(DIFF_PAIR_LENGTH_COLUMN)? * 1.0e6,
             dp_value(DIFF_PAIR_NF_COLUMN)?,
+            dp_value(DIFF_PAIR_VBS_COLUMN)?,
+            dp_value(DIFF_PAIR_VGS_COLUMN)?,
+            dp_value(DIFF_PAIR_VDS_COLUMN)?,
             cm_value(CURRENT_MIRROR_WIDTH_COLUMN)? * 1.0e6,
+            cm_value(CURRENT_MIRROR_FINGER_WIDTH_COLUMN)? * 1.0e6,
             cm_value(CURRENT_MIRROR_LENGTH_COLUMN)? * 1.0e6,
             cm_value(CURRENT_MIRROR_NF_COLUMN)?,
-            metrics.dc_gain_db.unwrap_or(f64::NAN),
-            metrics.bandwidth_3db_hz.unwrap_or(f64::NAN),
-            metrics.unity_gain_hz.unwrap_or(f64::NAN),
-            metrics.phase_margin_deg.unwrap_or(f64::NAN),
+            cm_value(CURRENT_MIRROR_VBS_COLUMN)?,
+            cm_value(CURRENT_MIRROR_VGS_COLUMN)?,
+            cm_value(CURRENT_MIRROR_VDS_COLUMN)?,
         );
     }
+
+    println!("\nOTA AC results");
+    if has_layout_aware {
+        println!(
+            "{:<8} {:<8} {:>11} {:>12} {:>12} {:>10} {:>11} {:>12} {:>12} {:>10} {:>11} {:>11} {:>11} {:>11}",
+            "dp_idx",
+            "cm_idx",
+            "e_gain_db",
+            "e_f3db_hz",
+            "e_ugf_hz",
+            "e_pm_deg",
+            "la_gain_db",
+            "la_f3db_hz",
+            "la_ugf_hz",
+            "la_pm_deg",
+            "d_gain_db",
+            "d_f3db_%",
+            "d_ugf_%",
+            "d_pm_deg",
+        );
+    } else {
+        println!(
+            "{:<8} {:<8} {:>12} {:>12} {:>12} {:>10}",
+            "dp_idx", "cm_idx", "dc_gain_db", "f3db_hz", "ugf_hz", "pm_deg",
+        );
+    }
+
+    for accepted in result.accepted() {
+        let dp_index = selected_index(result, accepted, DIFF_PAIR_INSTANCE)?;
+        let cm_index = selected_index(result, accepted, CURRENT_MIRROR_INSTANCE)?;
+        let electrical = result_metrics(result, accepted, ELECTRICAL_AC_TESTBENCH)?;
+        let electrical_values = required_metrics(electrical)?;
+        if has_layout_aware {
+            let layout = result_metrics(result, accepted, LAYOUT_AWARE_AC_TESTBENCH)?;
+            let layout_values = required_metrics(layout)?;
+            println!(
+                "{:<8} {:<8} {:>11.6} {:>12.6e} {:>12.6e} {:>10.6} {:>11.6} {:>12.6e} {:>12.6e} {:>10.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6}",
+                dp_index,
+                cm_index,
+                electrical_values[0],
+                electrical_values[1],
+                electrical_values[2],
+                electrical_values[3],
+                layout_values[0],
+                layout_values[1],
+                layout_values[2],
+                layout_values[3],
+                layout_values[0] - electrical_values[0],
+                relative_difference_percent(layout_values[1], electrical_values[1]),
+                relative_difference_percent(layout_values[2], electrical_values[2]),
+                layout_values[3] - electrical_values[3],
+            );
+        } else {
+            println!(
+                "{:<8} {:<8} {:>12.6} {:>12.6e} {:>12.6e} {:>10.6}",
+                dp_index,
+                cm_index,
+                electrical_values[0],
+                electrical_values[1],
+                electrical_values[2],
+                electrical_values[3],
+            );
+        }
+    }
     Ok(())
+}
+
+fn result_metrics<'a>(
+    result: &MacroExplorationResult,
+    accepted: &'a shapeic_core::macro_model::MacroAcceptedCandidate,
+    testbench: &str,
+) -> Result<&'a AcMetrics, io::Error> {
+    result
+        .ac_outcome(accepted, testbench)
+        .map(|outcome| &outcome.metrics)
+        .ok_or_else(|| io::Error::other(format!("accepted OTA candidate has no '{testbench}' outcome")))
+}
+
+fn required_metrics(metrics: &AcMetrics) -> Result<[f64; 4], io::Error> {
+    Ok([
+        required_metric(metrics.dc_gain_db, "DC gain")?,
+        required_metric(metrics.bandwidth_3db_hz, "bandwidth")?,
+        required_metric(metrics.unity_gain_hz, "UGF")?,
+        required_metric(metrics.phase_margin_deg, "phase margin")?,
+    ])
+}
+
+fn relative_difference_percent(value: f64, reference: f64) -> f64 {
+    (value - reference) / reference.abs() * 100.0
 }
 
 fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
@@ -337,9 +462,6 @@ fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
         .checked_mul(current_mirror.candidates().points.len())
         .ok_or_else(|| io::Error::other("OTA candidate pair count overflows usize"))?;
     let statistics = result.statistics();
-    let ac = statistics
-        .testbench(AC_TESTBENCH)
-        .ok_or_else(|| io::Error::other("OTA result has no gain statistics"))?;
 
     println!(
         "Diff-pair candidates rejected by width: {}",
@@ -358,24 +480,49 @@ fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
         "Rejected by shared VOUT: {}",
         possible_pairs - statistics.compatible_candidates()
     );
-    println!(
-        "Rejected by DC gain: {}",
-        ac.rejections().count(AcMetric::DcGainDb)
-    );
-    println!(
-        "Rejected by 3 dB bandwidth: {}",
-        ac.rejections().count(AcMetric::Bandwidth3DbHz)
-    );
-    println!(
-        "Rejected by UGF: {}",
-        ac.rejections().count(AcMetric::UnityGainHz)
-    );
-    println!(
-        "Rejected by phase margin: {}",
-        ac.rejections().count(AcMetric::PhaseMarginDeg)
-    );
+    print_testbench_statistics(result, ELECTRICAL_AC_TESTBENCH)?;
+    if statistics
+        .testbench(LAYOUT_AWARE_AC_TESTBENCH)
+        .is_some()
+    {
+        print_testbench_statistics(result, LAYOUT_AWARE_AC_TESTBENCH)?;
+    }
     println!("Accepted candidates: {}", statistics.accepted_candidates());
-    println!("Frequency evaluations: {}", ac.frequency_evaluations());
+    println!(
+        "Total frequency evaluations: {}",
+        statistics.frequency_evaluations()
+    );
+    Ok(())
+}
+
+fn print_testbench_statistics(
+    result: &MacroExplorationResult,
+    testbench: &str,
+) -> Result<(), io::Error> {
+    let statistics = result
+        .statistics()
+        .testbench(testbench)
+        .ok_or_else(|| io::Error::other(format!("OTA result has no '{testbench}' statistics")))?;
+    println!("{testbench} evaluated candidates: {}", statistics.evaluated_candidates());
+    println!(
+        "{testbench} rejected outside physical domain: {}",
+        statistics.physical_domain_rejections()
+    );
+    for (metric, label) in [
+        (AcMetric::DcGainDb, "DC gain"),
+        (AcMetric::Bandwidth3DbHz, "3 dB bandwidth"),
+        (AcMetric::UnityGainHz, "UGF"),
+        (AcMetric::PhaseMarginDeg, "phase margin"),
+    ] {
+        println!(
+            "{testbench} rejected by {label}: {}",
+            statistics.rejections().count(metric)
+        );
+    }
+    println!(
+        "{testbench} frequency evaluations: {}",
+        statistics.frequency_evaluations()
+    );
     Ok(())
 }
 
@@ -439,8 +586,17 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let primitives =
             load_primitive_catalog(&manifest.join("../analoglib/primitives")).unwrap();
-        let ota = ota_macro(manifest.join("examples/ota_4t_v3/gain.spice"));
+        let ota = ota_macro(manifest.join("examples/ota_4t_v3/gain.spice"), true);
         let macros = MacroCatalog::from_macros([ota.clone()]).unwrap();
+
+        let [electrical, layout_aware] = ota.exploration().testbenches() else {
+            panic!("layout-aware OTA must contain two ordered AC testbenches");
+        };
+        assert_eq!(electrical.name(), ELECTRICAL_AC_TESTBENCH);
+        assert_eq!(electrical.domain(), MacroAnalysisDomain::Electrical);
+        assert_eq!(layout_aware.name(), LAYOUT_AWARE_AC_TESTBENCH);
+        assert_eq!(layout_aware.domain(), MacroAnalysisDomain::LayoutAware);
+        assert_eq!(electrical.analysis(), layout_aware.analysis());
 
         let errors = validate_macro(&ota, &primitives, &macros);
         assert!(errors.is_empty(), "invalid OTA macro: {errors:?}");
@@ -486,6 +642,18 @@ mod tests {
             port.physical_port() == "DREF" && port.node() == "N1"
         }));
     }
+
+    #[test]
+    fn keeps_the_default_flow_electrical_without_a_physical_lut() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ota = ota_macro(manifest.join("examples/ota_4t_v3/gain.spice"), false);
+        let [electrical] = ota.exploration().testbenches() else {
+            panic!("electrical OTA must contain exactly one AC testbench");
+        };
+
+        assert_eq!(electrical.name(), ELECTRICAL_AC_TESTBENCH);
+        assert_eq!(electrical.domain(), MacroAnalysisDomain::Electrical);
+    }
 }
 
 use std::fs::File;
@@ -496,15 +664,29 @@ fn write_results_csv(
     path: impl AsRef<Path>,
 ) -> Result<(), io::Error> {
     let mut writer = BufWriter::new(File::create(path)?);
+    let has_layout_aware = result
+        .statistics()
+        .testbench(LAYOUT_AWARE_AC_TESTBENCH)
+        .is_some();
 
-    writeln!(
+    write!(
         writer,
         "candidate_id,dp_index,cm_index,vin_v,vdd_v,tail_current_a,\
          vout_v,vbias_v,n1_v,\
-         dp_width_m,dp_length_m,dp_nf,\
-         cm_width_m,cm_length_m,cm_nf,\
-         dc_gain_db,bandwidth_3db_hz,unity_gain_hz,phase_margin_deg"
+         dp_width_m,dp_finger_width_m,dp_length_m,dp_nf,dp_vbs_v,dp_vgs_v,dp_vds_v,\
+         cm_width_m,cm_finger_width_m,cm_length_m,cm_nf,cm_vbs_v,cm_vgs_v,cm_vds_v,\
+         electrical_dc_gain_db,electrical_bandwidth_3db_hz,\
+         electrical_unity_gain_hz,electrical_phase_margin_deg"
     )?;
+    if has_layout_aware {
+        write!(
+            writer,
+            ",layout_dc_gain_db,layout_bandwidth_3db_hz,layout_unity_gain_hz,\
+             layout_phase_margin_deg,delta_dc_gain_db,delta_bandwidth_3db_percent,\
+             delta_unity_gain_percent,delta_phase_margin_deg"
+        )?;
+    }
+    writeln!(writer)?;
 
     for (candidate_id, accepted) in result.accepted().iter().enumerate() {
         let dp_index = selected_index(result, accepted, DIFF_PAIR_INSTANCE)?;
@@ -517,33 +699,62 @@ fn write_results_csv(
             selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column)
         };
 
-        let metrics = result
-            .ac_outcome(accepted, AC_TESTBENCH)
-            .ok_or_else(|| io::Error::other("missing AC result"))?
-            .metrics;
+        let electrical = required_metrics(result_metrics(
+            result,
+            accepted,
+            ELECTRICAL_AC_TESTBENCH,
+        )?)?;
 
-        writeln!(
+        write!(
             writer,
             "{candidate_id},{dp_index},{cm_index},\
              {VIN:.17e},{VDD:.17e},{TAIL_CURRENT:.17e},\
              {:.17e},{:.17e},{:.17e},\
-             {:.17e},{:.17e},{:.0},\
-             {:.17e},{:.17e},{:.0},\
+             {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},{:.17e}",
             dp(DIFF_PAIR_VOUT_COLUMN)?,
             dp(DIFF_PAIR_VBIAS_COLUMN)?,
             cm("xcm.vinp")?,
             dp(DIFF_PAIR_WIDTH_COLUMN)?,
+            dp(DIFF_PAIR_FINGER_WIDTH_COLUMN)?,
             dp(DIFF_PAIR_LENGTH_COLUMN)?,
             dp(DIFF_PAIR_NF_COLUMN)?,
+            dp(DIFF_PAIR_VBS_COLUMN)?,
+            dp(DIFF_PAIR_VGS_COLUMN)?,
+            dp(DIFF_PAIR_VDS_COLUMN)?,
             cm(CURRENT_MIRROR_WIDTH_COLUMN)?,
+            cm(CURRENT_MIRROR_FINGER_WIDTH_COLUMN)?,
             cm(CURRENT_MIRROR_LENGTH_COLUMN)?,
             cm(CURRENT_MIRROR_NF_COLUMN)?,
-            required_metric(metrics.dc_gain_db, "DC gain")?,
-            required_metric(metrics.bandwidth_3db_hz, "bandwidth")?,
-            required_metric(metrics.unity_gain_hz, "UGF")?,
-            required_metric(metrics.phase_margin_deg, "phase margin")?,
+            cm(CURRENT_MIRROR_VBS_COLUMN)?,
+            cm(CURRENT_MIRROR_VGS_COLUMN)?,
+            cm(CURRENT_MIRROR_VDS_COLUMN)?,
+            electrical[0],
+            electrical[1],
+            electrical[2],
+            electrical[3],
         )?;
+        if has_layout_aware {
+            let layout = required_metrics(result_metrics(
+                result,
+                accepted,
+                LAYOUT_AWARE_AC_TESTBENCH,
+            )?)?;
+            write!(
+                writer,
+                ",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
+                layout[0],
+                layout[1],
+                layout[2],
+                layout[3],
+                layout[0] - electrical[0],
+                relative_difference_percent(layout[1], electrical[1]),
+                relative_difference_percent(layout[2], electrical[2]),
+                layout[3] - electrical[3],
+            )?;
+        }
+        writeln!(writer)?;
     }
 
     writer.flush()
