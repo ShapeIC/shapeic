@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use shapeic_lut::DeviceLut;
+use shapeic_layout::PhysicalLookupTable;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
@@ -11,7 +12,7 @@ use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::PrimitiveBuildInput;
 
-use super::{Macro, MacroCandidateProjection, MacroExplorationResult};
+use super::{Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroExplorationResult};
 
 /// Build data and local pre-exploration filters for one primitive instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +102,7 @@ impl CompactMacroInstanceExplorationInput {
 #[derive(Clone, Debug, Default)]
 pub struct MacroExplorationInput<'lut> {
     pub(super) device_models: HashMap<String, &'lut DeviceLut>,
+    pub(super) physical_lut: Option<&'lut PhysicalLookupTable>,
     pub(super) primitive_instances: HashMap<String, PrimitiveInstanceExplorationInput>,
     pub(super) compact_macro_instances: HashMap<String, CompactMacroInstanceExplorationInput>,
 }
@@ -130,6 +132,18 @@ impl<'lut> MacroExplorationInput<'lut> {
         Ok(())
     }
 
+    /// Registers the shared physical LUT used by layout-aware testbenches.
+    pub fn register_physical_lut(
+        &mut self,
+        lut: &'lut PhysicalLookupTable,
+    ) -> Result<(), MacroExplorationInputRegistrationError> {
+        if self.physical_lut.is_some() {
+            return Err(MacroExplorationInputRegistrationError::DuplicatePhysicalLut);
+        }
+        self.physical_lut = Some(lut);
+        Ok(())
+    }
+
     /// Registers build data and filters for one primitive instance path.
     pub fn register_primitive_instance(
         &mut self,
@@ -155,6 +169,11 @@ impl<'lut> MacroExplorationInput<'lut> {
     /// Returns the LUT registered for one primitive device type.
     pub fn device_model(&self, device_type: &str) -> Option<&'lut DeviceLut> {
         self.device_models.get(device_type).copied()
+    }
+
+    /// Returns the physical LUT shared by layout-aware testbenches.
+    pub const fn physical_lut(&self) -> Option<&'lut PhysicalLookupTable> {
+        self.physical_lut
     }
 
     /// Returns the input registered for one primitive instance path.
@@ -197,6 +216,7 @@ pub enum MacroExplorationInputRegistrationError {
     EmptyDeviceType,
     EmptyInstancePath,
     DuplicateDeviceModel { device_type: String },
+    DuplicatePhysicalLut,
     DuplicateInstanceInput { instance_path: String },
 }
 
@@ -210,6 +230,9 @@ impl fmt::Display for MacroExplorationInputRegistrationError {
                     formatter,
                     "device model '{device_type}' is already registered"
                 )
+            }
+            Self::DuplicatePhysicalLut => {
+                formatter.write_str("a physical LUT is already registered")
             }
             Self::DuplicateInstanceInput { instance_path } => write!(
                 formatter,
@@ -242,6 +265,10 @@ impl fmt::Display for MacroExplorationInstanceKind {
 /// One invalid or missing item in the runtime exploration input of a macro.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroExplorationInputValidationError {
+    MissingPhysicalLut {
+        macro_name: String,
+        testbench: String,
+    },
     UnknownInstance {
         macro_name: String,
         instance_path: String,
@@ -283,6 +310,13 @@ pub enum MacroExplorationInputValidationError {
 impl fmt::Display for MacroExplorationInputValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingPhysicalLut {
+                macro_name,
+                testbench,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' layout-aware testbench '{testbench}' requires a physical LUT"
+            ),
             Self::UnknownInstance {
                 macro_name,
                 instance_path,
@@ -356,6 +390,20 @@ pub fn validate_macro_exploration_input(
     input: &MacroExplorationInput<'_>,
 ) -> Vec<MacroExplorationInputValidationError> {
     let mut errors = Vec::new();
+
+    if input.physical_lut.is_none() {
+        errors.extend(
+            macro_
+                .exploration()
+                .testbenches()
+                .iter()
+                .filter(|testbench| testbench.domain() == MacroAnalysisDomain::LayoutAware)
+                .map(|testbench| MacroExplorationInputValidationError::MissingPhysicalLut {
+                    macro_name: macro_.name().to_owned(),
+                    testbench: testbench.name().to_owned(),
+                }),
+        );
+    }
 
     for instance_path in input.primitive_instances.keys() {
         validate_registered_instance_kind(
@@ -470,9 +518,13 @@ mod tests {
 
     use shapeic_lut::LookupTable;
 
+    use crate::analysis::{
+        AcMetricSet, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
+    };
     use crate::circuit::Circuit;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
+    use crate::testbench::{AcAnalysis, TransferFunction};
 
     use super::*;
 
@@ -512,6 +564,25 @@ mod tests {
             Circuit::builder()
                 .resistor("rout", "VOUT", "0", 1.0e6)
                 .build(),
+        )
+    }
+
+    fn ac_analysis() -> AcAnalysis {
+        AcAnalysis::new(
+            TransferFunction::new("VIN", "VOUT"),
+            AdaptiveAcConfig {
+                min_frequency_hz: 1.0,
+                max_frequency_hz: 1.0e6,
+                coarse_points_per_decade: 4,
+                crossing_relative_tolerance: 1.0e-3,
+                max_refinement_steps: 16,
+                retain_samples: false,
+            },
+            AdaptiveAcPolicy {
+                mode: AnalysisMode::Prune,
+                targets: AnalysisTargets::NONE,
+                metrics: AcMetricSet::ALL,
+            },
         )
     }
 
@@ -565,6 +636,47 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn registers_only_one_shared_physical_lut() {
+        let first = crate::macro_model::physical::tests::physical_lut_for(
+            "pair",
+            &["P", "N"],
+        );
+        let second = crate::macro_model::physical::tests::physical_lut_for(
+            "pair",
+            &["P", "N"],
+        );
+        let mut input = MacroExplorationInput::new();
+
+        input.register_physical_lut(&first).unwrap();
+        assert!(std::ptr::eq(input.physical_lut().unwrap(), &first));
+        assert_eq!(
+            input.register_physical_lut(&second),
+            Err(MacroExplorationInputRegistrationError::DuplicatePhysicalLut)
+        );
+        assert!(std::ptr::eq(input.physical_lut().unwrap(), &first));
+    }
+
+    #[test]
+    fn requires_a_physical_lut_for_layout_aware_testbenches() {
+        let macro_ = macro_with_primitive_and_submacro().with_ac_testbench(
+            super::super::MacroAcTestbench::from_spice("layout", "", ac_analysis())
+                .with_domain(MacroAnalysisDomain::LayoutAware),
+        );
+        let errors = validate_macro_exploration_input(
+            &macro_,
+            &PrimitiveCatalog::new(),
+            &MacroExplorationInput::new(),
+        );
+
+        assert!(errors.contains(
+            &MacroExplorationInputValidationError::MissingPhysicalLut {
+                macro_name: "ota".to_owned(),
+                testbench: "layout".to_owned(),
+            }
+        ));
     }
 
     #[test]

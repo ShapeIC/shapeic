@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
+use shapeic_layout::PhysicalLookupTable;
 use shapeic_mna::numeric::NumericMnaError;
 
 use crate::analysis::{AdaptiveAcError, AdaptiveAcOutcome};
@@ -17,7 +18,10 @@ use crate::exploration::binding::{
 use crate::exploration::candidate::CandidateSet;
 use crate::testbench::{AcTestbench, AcTestbenchEvaluationError};
 
-use super::PreparedMacroAcTestbench;
+use super::{
+    CandidatePhysicalBinder, CandidatePhysicalBindingError, MacroAnalysisDomain,
+    PhysicalCandidateStampOutcome, PreparedMacroAcTestbench,
+};
 
 const ZERO_CAPACITANCES: MosDeviceCapacitances = MosDeviceCapacitances {
     intrinsic: MosCapacitanceMatrix {
@@ -44,6 +48,7 @@ pub struct PreparedMacroAcCandidateEvaluator<'a> {
     parameter_values: Vec<f64>,
     capacitance_scratch: Vec<f64>,
     capacitance_values: Vec<MosDeviceCapacitances>,
+    physical: Option<CandidatePhysicalBinder<'a>>,
 }
 
 impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
@@ -52,10 +57,31 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
         testbench: PreparedMacroAcTestbench,
         candidate_sets: &[&'a CandidateSet],
     ) -> Result<Self, PreparedMacroAcCandidateEvaluatorError> {
+        Self::new_with_physical_lut(testbench, candidate_sets, None)
+    }
+
+    /// Precomputes candidate bindings and attaches a shared physical LUT when
+    /// the prepared testbench is layout-aware.
+    pub fn new_with_physical_lut(
+        testbench: PreparedMacroAcTestbench,
+        candidate_sets: &[&'a CandidateSet],
+        physical_lut: Option<&'a PhysicalLookupTable>,
+    ) -> Result<Self, PreparedMacroAcCandidateEvaluatorError> {
         let parameters =
             CandidateParameterBinder::new(testbench.parameter_names(), candidate_sets)?;
         let capacitances =
             CandidateCapacitanceBinder::new(testbench.primitive_branches(), candidate_sets)?;
+        let physical = match (testbench.domain(), physical_lut) {
+            (MacroAnalysisDomain::Electrical, _) => None,
+            (MacroAnalysisDomain::LayoutAware, Some(lut)) => Some(CandidatePhysicalBinder::new(
+                testbench.physical_primitives(),
+                candidate_sets,
+                lut,
+            )?),
+            (MacroAnalysisDomain::LayoutAware, None) => {
+                return Err(PreparedMacroAcCandidateEvaluatorError::MissingPhysicalLut);
+            }
+        };
         let parameter_values = vec![0.0; parameters.parameter_names().len()];
         let capacitance_scratch = vec![0.0; capacitances.scratch_len()];
         let capacitance_values = vec![ZERO_CAPACITANCES; capacitances.branches().len()];
@@ -66,6 +92,7 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
             parameter_values,
             capacitance_scratch,
             capacitance_values,
+            physical,
         })
     }
 
@@ -92,7 +119,28 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
             self.capacitances.branches(),
             &self.capacitance_values,
         )?;
+        if let Some(physical) = &mut self.physical
+            && physical.stamp(candidate.system_mut(), candidate_indices)?
+                == PhysicalCandidateStampOutcome::OutOfDomain
+        {
+            return Err(PreparedMacroAcCandidateEvaluatorError::PhysicalDomainRejected);
+        }
         Ok(candidate)
+    }
+
+    /// Instantiates and evaluates one selection while classifying physical
+    /// out-of-domain points as a normal candidate rejection.
+    pub fn evaluate(
+        &mut self,
+        candidate_indices: &[usize],
+    ) -> Result<MacroAcCandidateEvaluation, MacroAcCandidateAnalysisError> {
+        match self.analyze(candidate_indices) {
+            Ok(outcome) => Ok(MacroAcCandidateEvaluation::Outcome(outcome)),
+            Err(MacroAcCandidateAnalysisError::Candidate(
+                PreparedMacroAcCandidateEvaluatorError::PhysicalDomainRejected,
+            )) => Ok(MacroAcCandidateEvaluation::PhysicalDomainRejected),
+            Err(error) => Err(error),
+        }
     }
 
     /// Instantiates and executes the configured AC analysis for one selection.
@@ -107,6 +155,13 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
             .analyze()
             .map_err(MacroAcCandidateAnalysisError::Analysis)
     }
+}
+
+/// Classified result of evaluating one macro AC candidate.
+#[derive(Debug, PartialEq)]
+pub enum MacroAcCandidateEvaluation {
+    Outcome(AdaptiveAcOutcome),
+    PhysicalDomainRejected,
 }
 
 /// Errors produced while instantiating or analyzing one macro candidate.
@@ -137,7 +192,7 @@ impl Error for MacroAcCandidateAnalysisError {
 }
 
 /// Errors produced while preparing or instantiating macro AC candidates.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum PreparedMacroAcCandidateEvaluatorError {
     /// Numerical MNA parameters could not be bound from the candidate sets.
     ParameterBinding(CandidateParameterBindingError),
@@ -147,6 +202,12 @@ pub enum PreparedMacroAcCandidateEvaluatorError {
     Instantiate(NumericMnaError),
     /// Resolved MOS capacitances could not be stamped into the candidate MNA.
     CapacitanceStamp(ResolvedCapacitanceStampError),
+    /// A layout-aware testbench was prepared without a physical LUT.
+    MissingPhysicalLut,
+    /// The selected local geometry or bias lies outside the physical LUT axes.
+    PhysicalDomainRejected,
+    /// Physical candidate columns, LUT data, or MNA stamps were invalid.
+    Physical(CandidatePhysicalBindingError),
 }
 
 impl From<CandidateParameterBindingError> for PreparedMacroAcCandidateEvaluatorError {
@@ -173,6 +234,12 @@ impl From<ResolvedCapacitanceStampError> for PreparedMacroAcCandidateEvaluatorEr
     }
 }
 
+impl From<CandidatePhysicalBindingError> for PreparedMacroAcCandidateEvaluatorError {
+    fn from(error: CandidatePhysicalBindingError) -> Self {
+        Self::Physical(error)
+    }
+}
+
 impl fmt::Display for PreparedMacroAcCandidateEvaluatorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -189,6 +256,13 @@ impl fmt::Display for PreparedMacroAcCandidateEvaluatorError {
                 write!(formatter, "could not instantiate candidate MNA: {error}")
             }
             Self::CapacitanceStamp(error) => error.fmt(formatter),
+            Self::MissingPhysicalLut => {
+                formatter.write_str("layout-aware analysis requires a registered physical LUT")
+            }
+            Self::PhysicalDomainRejected => {
+                formatter.write_str("candidate lies outside the physical LUT domain")
+            }
+            Self::Physical(error) => error.fmt(formatter),
         }
     }
 }
@@ -200,6 +274,8 @@ impl Error for PreparedMacroAcCandidateEvaluatorError {
             Self::CapacitanceBinding(error) => Some(error),
             Self::Instantiate(error) => Some(error),
             Self::CapacitanceStamp(error) => Some(error),
+            Self::Physical(error) => Some(error),
+            Self::MissingPhysicalLut | Self::PhysicalDomainRejected => None,
         }
     }
 }

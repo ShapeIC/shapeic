@@ -143,6 +143,13 @@ pub struct ResolvedPhysicalPort {
 }
 
 impl ResolvedPhysicalPort {
+    pub(crate) fn new(physical_port: impl Into<String>, node: impl Into<String>) -> Self {
+        Self {
+            physical_port: physical_port.into(),
+            node: node.into(),
+        }
+    }
+
     /// Returns the logical port name expected by the physical LUT.
     pub fn physical_port(&self) -> &str {
         &self.physical_port
@@ -166,6 +173,28 @@ pub struct ResolvedPhysicalPrimitive {
 }
 
 impl ResolvedPhysicalPrimitive {
+    pub(crate) fn new(
+        instance_path: impl Into<String>,
+        primitive_name: impl Into<String>,
+        lut_primitive: impl Into<String>,
+        operating_point_branch: impl Into<String>,
+        ports: Vec<ResolvedPhysicalPort>,
+    ) -> Self {
+        let instance_path = instance_path.into();
+        let operating_point_branch = operating_point_branch.into();
+        Self {
+            candidate_columns: ResolvedPhysicalCandidateColumns::new(
+                &instance_path,
+                &operating_point_branch,
+            ),
+            instance_path,
+            primitive_name: primitive_name.into(),
+            lut_primitive: lut_primitive.into(),
+            operating_point_branch,
+            ports,
+        }
+    }
+
     /// Returns the sanitized hierarchical primitive-instance path.
     pub fn instance_path(&self) -> &str {
         &self.instance_path
@@ -528,28 +557,25 @@ impl Renderer {
                 .ports()
                 .iter()
                 .map(|mapping| {
-                    Ok(ResolvedPhysicalPort {
-                        physical_port: mapping.physical_port().to_owned(),
-                        node: resolved_connection(
+                    Ok(ResolvedPhysicalPort::new(
+                        mapping.physical_port(),
+                        resolved_connection(
                             macro_,
                             instance,
                             mapping.primitive_pin(),
                             scope,
                         )?,
-                    })
+                    ))
                 })
                 .collect::<Result<Vec<_>, MacroRenderError>>()?;
-            self.physical_primitives.push(ResolvedPhysicalPrimitive {
-                instance_path: path.clone(),
-                primitive_name: primitive_name.to_owned(),
-                lut_primitive: physical.lut_primitive().to_owned(),
-                operating_point_branch: physical.operating_point_branch().to_owned(),
-                candidate_columns: ResolvedPhysicalCandidateColumns::new(
+            self.physical_primitives
+                .push(ResolvedPhysicalPrimitive::new(
                     &path,
+                    primitive_name,
+                    physical.lut_primitive(),
                     physical.operating_point_branch(),
-                ),
-                ports,
-            });
+                    ports,
+                ));
         }
 
         for branch in model.branches() {

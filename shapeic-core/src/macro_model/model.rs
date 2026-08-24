@@ -267,6 +267,18 @@ pub struct MacroAcTestbench {
     name: String,
     source: MacroTestbenchSource,
     analysis: AcAnalysis,
+    domain: MacroAnalysisDomain,
+}
+
+/// Physical modeling domain used by one macro analysis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MacroAnalysisDomain {
+    /// Uses only the electrical small-signal and MOS capacitance models.
+    #[default]
+    Electrical,
+    /// Adds interconnect admittance and device-capacitance corrections from a
+    /// physical LUT.
+    LayoutAware,
 }
 
 impl MacroAcTestbench {
@@ -280,6 +292,7 @@ impl MacroAcTestbench {
             name: name.into(),
             source: MacroTestbenchSource::Spice(source.into()),
             analysis,
+            domain: MacroAnalysisDomain::Electrical,
         }
     }
 
@@ -294,7 +307,14 @@ impl MacroAcTestbench {
             name: name.into(),
             source: MacroTestbenchSource::SpiceFile(path.into()),
             analysis,
+            domain: MacroAnalysisDomain::Electrical,
         }
+    }
+
+    /// Selects the physical modeling domain for this testbench.
+    pub fn with_domain(mut self, domain: MacroAnalysisDomain) -> Self {
+        self.domain = domain;
+        self
     }
 
     /// Returns the testbench name.
@@ -310,6 +330,11 @@ impl MacroAcTestbench {
     /// Returns the attached AC analysis definition.
     pub const fn analysis(&self) -> &AcAnalysis {
         &self.analysis
+    }
+
+    /// Returns the physical modeling domain used by this testbench.
+    pub const fn domain(&self) -> MacroAnalysisDomain {
+        self.domain
     }
 }
 
@@ -350,7 +375,9 @@ mod tests {
     use crate::circuit::Circuit;
     use crate::testbench::{AcAnalysis, TransferFunction};
 
-    use super::{Macro, MacroAcTestbench, MacroExploration, MacroPort, MacroPortRole};
+    use super::{
+        Macro, MacroAcTestbench, MacroAnalysisDomain, MacroExploration, MacroPort, MacroPortRole,
+    };
 
     fn analysis() -> AcAnalysis {
         AcAnalysis::new(
@@ -416,6 +443,18 @@ mod tests {
                 .and_then(|testbench| testbench.source().as_spice()),
             Some("V1 VIN VSS 1\n")
         );
+        assert_eq!(
+            macro_.exploration().testbench("gain").unwrap().domain(),
+            MacroAnalysisDomain::Electrical
+        );
+    }
+
+    #[test]
+    fn selects_layout_aware_analysis_explicitly() {
+        let testbench = MacroAcTestbench::from_spice("layout", "V1 VIN VSS 1\n", analysis())
+            .with_domain(MacroAnalysisDomain::LayoutAware);
+
+        assert_eq!(testbench.domain(), MacroAnalysisDomain::LayoutAware);
     }
 
     #[test]

@@ -1073,6 +1073,7 @@ version = "0.1.0"
 dependencies = [
  "nalgebra",
  "ndarray",
+ "ndarray-npy",
  "num-complex",
  "serde",
  "serde_json",
@@ -1080,6 +1081,7 @@ dependencies = [
  "shapeic-lut",
  "shapeic-mna",
  "symbolica",
+ "zip",
 ]
 
 [[package]]

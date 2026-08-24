@@ -12,8 +12,9 @@ use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::testbench::{AcAnalysis, AcTestbench, AcTestbenchBuildError, PreparedAcTestbench};
 
 use super::{
-    Macro, MacroAcTestbench, MacroCatalog, MacroRenderError, MacroRenderMode, MacroTestbenchSource,
-    ResolvedPhysicalPrimitive, ResolvedPrimitiveBranch, render_small_signal_netlist,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroRenderError, MacroRenderMode,
+    MacroTestbenchSource, ResolvedPhysicalPrimitive, ResolvedPrimitiveBranch,
+    render_small_signal_netlist,
 };
 
 type ComposedMacroAcTestbench = (
@@ -27,6 +28,7 @@ type ComposedMacroAcTestbench = (
 #[derive(Clone, Debug)]
 pub struct PreparedMacroAcTestbench {
     testbench: PreparedAcTestbench,
+    domain: MacroAnalysisDomain,
     primitive_branches: Vec<ResolvedPrimitiveBranch>,
     physical_primitives: Vec<ResolvedPhysicalPrimitive>,
 }
@@ -40,6 +42,11 @@ impl PreparedMacroAcTestbench {
     /// Returns the AC analysis attached to the macro testbench.
     pub const fn analysis(&self) -> &AcAnalysis {
         self.testbench.analysis()
+    }
+
+    /// Returns the physical modeling domain selected for this testbench.
+    pub const fn domain(&self) -> MacroAnalysisDomain {
+        self.domain
     }
 
     /// Returns the primitive branches materialized by the selected render mode.
@@ -112,6 +119,7 @@ pub fn prepare_macro_ac_testbench(
     macro_catalog: &MacroCatalog,
     render_mode: MacroRenderMode,
 ) -> Result<PreparedMacroAcTestbench, MacroTestbenchPrepareError> {
+    let domain = testbench.domain();
     let (source, parameter_order, primitive_branches, physical_primitives) =
         compose_macro_ac_testbench(
             macro_,
@@ -130,6 +138,7 @@ pub fn prepare_macro_ac_testbench(
             .map_err(MacroTestbenchPrepareError::Build)?;
     Ok(PreparedMacroAcTestbench {
         testbench,
+        domain,
         primitive_branches,
         physical_primitives,
     })
@@ -199,8 +208,8 @@ mod tests {
     use crate::circuit::Circuit;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
     use crate::macro_model::{
-        Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroOutputSource,
-        MacroPort, MacroPortRole, MacroRenderMode, MacroTestbenchPrepareError,
+        Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroCompactOutputBinding,
+        MacroOutputSource, MacroPort, MacroPortRole, MacroRenderMode, MacroTestbenchPrepareError,
         PreparedMacroAcCandidateEvaluator,
     };
     use crate::netlist::names::small_signal_param_name;
@@ -316,6 +325,40 @@ mod tests {
         ))
     }
 
+    fn candidate_set() -> CandidateSet {
+        let mut values = vec![
+            ("gm__xcore__m1".to_owned(), 1.0e-3),
+            ("ro__xcore__m1".to_owned(), 1.0e5),
+            ("load_resistance".to_owned(), 1.0e4),
+        ];
+        values.extend(
+            MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
+                .into_iter()
+                .chain(MosExtrinsicCapacitances::PARAMETERS)
+                .enumerate()
+                .map(|(index, parameter)| {
+                    (
+                        small_signal_param_name(parameter, "xcore", "m1"),
+                        (index + 1) as f64 * 1.0e-15,
+                    )
+                }),
+        );
+        values.extend(
+            [
+                ("length", 1.5),
+                ("finger_width", 1.5),
+                ("nf", 1.0),
+                ("vbs", -0.5),
+                ("vgs", 1.0),
+                ("vds", 2.0),
+            ]
+            .map(|(parameter, value)| {
+                (small_signal_param_name(parameter, "xcore", "m1"), value)
+            }),
+        );
+        CandidateSet::new("xcore", vec![CandidatePoint::new(values)])
+    }
+
     #[test]
     fn composes_macro_and_testbench_sources_with_a_stable_boundary() {
         assert_eq!(
@@ -393,7 +436,8 @@ mod tests {
             "gain",
             "Vinput VIN VSS 1\n.end\n",
             analysis(),
-        );
+        )
+        .with_domain(MacroAnalysisDomain::LayoutAware);
         let prepared = prepare_macro_ac_testbench(
             &macro_,
             &testbench,
@@ -403,35 +447,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prepared.physical_primitives().len(), 1);
-        let mut values = vec![
-            ("gm__xcore__m1".to_owned(), 1.0e-3),
-            ("ro__xcore__m1".to_owned(), 1.0e5),
-            ("load_resistance".to_owned(), 1.0e4),
-        ];
-        values.extend(
-            MosCapacitanceMatrix::INDEPENDENT_PARAMETERS
-                .into_iter()
-                .chain(MosExtrinsicCapacitances::PARAMETERS)
-                .enumerate()
-                .map(|(index, parameter)| {
-                    (
-                        small_signal_param_name(parameter, "xcore", "m1"),
-                        (index + 1) as f64 * 1.0e-15,
-                    )
-                }),
-        );
-        let candidates = CandidateSet::new("xcore", vec![CandidatePoint::new(values)]);
-        let mut evaluator =
-            PreparedMacroAcCandidateEvaluator::new(prepared, &[&candidates]).unwrap();
+        assert_eq!(prepared.domain(), MacroAnalysisDomain::LayoutAware);
+        let layout_prepared = prepared.clone();
+        let mut electrical_prepared = prepared;
+        electrical_prepared.domain = MacroAnalysisDomain::Electrical;
+        let candidates = candidate_set();
+        let mut evaluator = PreparedMacroAcCandidateEvaluator::new(
+            electrical_prepared,
+            &[&candidates],
+        )
+        .unwrap();
 
-        let candidate = evaluator.instantiate(&[0]).unwrap();
+        let electrical_candidate = evaluator.instantiate(&[0]).unwrap();
 
         assert!(
-            candidate
+            electrical_candidate
                 .system()
                 .capacitance_matrix()
                 .iter()
                 .any(|value| *value != 0.0)
+        );
+
+        let missing_lut_error = PreparedMacroAcCandidateEvaluator::new(
+            layout_prepared.clone(),
+            &[&candidates],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_lut_error,
+            crate::macro_model::PreparedMacroAcCandidateEvaluatorError::MissingPhysicalLut
+        ));
+        let physical_lut = crate::macro_model::physical::tests::physical_lut_for(
+            "gain_physical",
+            &["IN", "OUT", "GND"],
+        );
+        let mut layout_evaluator = PreparedMacroAcCandidateEvaluator::new_with_physical_lut(
+            layout_prepared,
+            &[&candidates],
+            Some(&physical_lut),
+        )
+        .unwrap();
+        let layout_candidate = layout_evaluator.instantiate(&[0]).unwrap();
+        assert_ne!(
+            layout_candidate.system().base_matrix(),
+            electrical_candidate.system().base_matrix()
+        );
+        assert_ne!(
+            layout_candidate.system().capacitance_matrix(),
+            electrical_candidate.system().capacitance_matrix()
         );
 
         let outcome = evaluator.analyze(&[0]).unwrap();

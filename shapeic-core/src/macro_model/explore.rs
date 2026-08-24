@@ -4,12 +4,14 @@ use std::fmt;
 use crate::analysis::{AcCompletion, AcMetric, AdaptiveAcOutcome};
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::exploration::candidate::CandidatePoint;
+use shapeic_layout::PhysicalLookupTable;
 
 use super::{
-    Macro, MacroAcCandidateAnalysisError, MacroCandidateBuildError, MacroCandidateCombinationError,
-    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroExplorationInput,
-    MacroRenderMode, MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
-    PreparedMacroAcCandidateEvaluatorError, build_macro_candidate_sets, prepare_macro_ac_testbench,
+    Macro, MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, MacroCandidateBuildError,
+    MacroCandidateCombinationError, MacroCandidateCombinationJoin, MacroCandidateSets,
+    MacroCatalog, MacroExplorationInput, MacroRenderMode, MacroTestbenchPrepareError,
+    PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError,
+    build_macro_candidate_sets, prepare_macro_ac_testbench,
 };
 
 /// One accepted macro candidate and all AC outcomes evaluated for it.
@@ -92,6 +94,7 @@ pub struct MacroAcTestbenchStatistics {
     evaluated_candidates: usize,
     frequency_evaluations: usize,
     rejections: MacroAcRejectionCounts,
+    physical_domain_rejections: usize,
 }
 
 impl MacroAcTestbenchStatistics {
@@ -101,6 +104,7 @@ impl MacroAcTestbenchStatistics {
             evaluated_candidates: 0,
             frequency_evaluations: 0,
             rejections: MacroAcRejectionCounts::default(),
+            physical_domain_rejections: 0,
         }
     }
 
@@ -122,6 +126,12 @@ impl MacroAcTestbenchStatistics {
     /// Returns rejection counts classified by the first failed AC metric.
     pub const fn rejections(&self) -> MacroAcRejectionCounts {
         self.rejections
+    }
+
+    /// Returns candidates rejected because their geometry or bias lies outside
+    /// the physical LUT domain.
+    pub const fn physical_domain_rejections(&self) -> usize {
+        self.physical_domain_rejections
     }
 }
 
@@ -382,9 +392,16 @@ impl Macro {
         macro_catalog: &MacroCatalog,
         input: MacroExplorationInput<'_>,
     ) -> Result<MacroExplorationResult, MacroExplorationError> {
+        let physical_lut = input.physical_lut();
         let candidate_sets = build_macro_candidate_sets(self, primitive_catalog, input)?;
-        explore_macro_ac_candidates(self, primitive_catalog, macro_catalog, candidate_sets)
-            .map_err(Into::into)
+        explore_macro_ac_candidates_with_physical_lut(
+            self,
+            primitive_catalog,
+            macro_catalog,
+            candidate_sets,
+            physical_lut,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -398,6 +415,23 @@ pub fn explore_macro_ac_candidates(
     primitive_catalog: &PrimitiveCatalog,
     macro_catalog: &MacroCatalog,
     candidate_sets: MacroCandidateSets,
+) -> Result<MacroExplorationResult, MacroAcExplorationError> {
+    explore_macro_ac_candidates_with_physical_lut(
+        macro_,
+        primitive_catalog,
+        macro_catalog,
+        candidate_sets,
+        None,
+    )
+}
+
+/// Executes macro AC testbenches with an optional shared physical LUT.
+pub fn explore_macro_ac_candidates_with_physical_lut(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    candidate_sets: MacroCandidateSets,
+    physical_lut: Option<&PhysicalLookupTable>,
 ) -> Result<MacroExplorationResult, MacroAcExplorationError> {
     let testbench_names = macro_
         .exploration()
@@ -433,8 +467,12 @@ pub fn explore_macro_ac_candidates(
                     testbench: testbench.name().to_owned(),
                     error,
                 })?;
-                let evaluator = PreparedMacroAcCandidateEvaluator::new(prepared, &candidate_refs)
-                    .map_err(|error| {
+                let evaluator = PreparedMacroAcCandidateEvaluator::new_with_physical_lut(
+                    prepared,
+                    &candidate_refs,
+                    physical_lut,
+                )
+                .map_err(|error| {
                     MacroAcExplorationError::PrepareCandidateEvaluator {
                         testbench: testbench.name().to_owned(),
                         error: Box::new(error),
@@ -446,7 +484,7 @@ pub fn explore_macro_ac_candidates(
                 &mut combinations,
                 &testbench_names,
                 |testbench_index, candidate_indices| {
-                    evaluators[testbench_index].analyze(candidate_indices)
+                    evaluators[testbench_index].evaluate(candidate_indices)
                 },
             )
             .map_err(|error| match error {
@@ -510,7 +548,7 @@ enum CandidateEvaluationLoopError<E> {
 fn evaluate_candidate_combinations<E>(
     combinations: &mut MacroCandidateCombinationJoin<'_>,
     testbench_names: &[String],
-    mut analyze: impl FnMut(usize, &[usize]) -> Result<AdaptiveAcOutcome, E>,
+    mut analyze: impl FnMut(usize, &[usize]) -> Result<MacroAcCandidateEvaluation, E>,
 ) -> Result<
     (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
     CandidateEvaluationLoopError<E>,
@@ -524,7 +562,7 @@ fn evaluate_candidate_combinations<E>(
         let mut rejected = false;
 
         for testbench_index in 0..testbench_names.len() {
-            let outcome = analyze(testbench_index, candidate_indices).map_err(|error| {
+            let evaluation = analyze(testbench_index, candidate_indices).map_err(|error| {
                 CandidateEvaluationLoopError::Analysis {
                     testbench_index,
                     candidate_indices: candidate_indices.to_vec(),
@@ -533,6 +571,14 @@ fn evaluate_candidate_combinations<E>(
             })?;
             let testbench_statistics = &mut statistics.testbenches[testbench_index];
             testbench_statistics.evaluated_candidates += 1;
+            let outcome = match evaluation {
+                MacroAcCandidateEvaluation::PhysicalDomainRejected => {
+                    testbench_statistics.physical_domain_rejections += 1;
+                    rejected = true;
+                    break;
+                }
+                MacroAcCandidateEvaluation::Outcome(outcome) => outcome,
+            };
             testbench_statistics.frequency_evaluations += outcome.frequency_evaluations;
 
             if let Some(metric) = rejection_metric(&outcome).map_err(|reason| {
@@ -567,7 +613,9 @@ fn evaluate_candidate_combinations<E>(
             + statistics
                 .testbenches
                 .iter()
-                .map(|testbench| testbench.rejections.total())
+                .map(|testbench| {
+                    testbench.rejections.total() + testbench.physical_domain_rejections
+                })
                 .sum::<usize>()
     );
     Ok((accepted, statistics))
@@ -789,9 +837,12 @@ mod tests {
             |testbench_index, candidate_indices| {
                 calls.push((testbench_index, candidate_indices.to_vec()));
                 if testbench_index == 0 && candidate_indices[0] == 1 {
-                    Ok::<_, ()>(rejected_outcome(AcMetric::DcGainDb, 2))
+                    Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(rejected_outcome(
+                        AcMetric::DcGainDb,
+                        2,
+                    )))
                 } else {
-                    Ok::<_, ()>(passing_outcome(3))
+                    Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(passing_outcome(3)))
                 }
             },
         )
@@ -813,6 +864,35 @@ mod tests {
         );
         assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
         assert_eq!(statistics.frequency_evaluations(), 8);
+    }
+
+    #[test]
+    fn counts_physical_domain_rejections_and_skips_later_testbenches() {
+        let macro_ = macro_();
+        let primitives = primitive_catalog();
+        let candidates = candidates();
+        let mut combinations =
+            MacroCandidateCombinationJoin::new(&macro_, &primitives, &candidates).unwrap();
+        let testbench_names = vec!["layout".to_owned(), "later".to_owned()];
+
+        let (accepted, statistics) = evaluate_candidate_combinations(
+            &mut combinations,
+            &testbench_names,
+            |testbench_index, candidate_indices| {
+                if testbench_index == 0 && candidate_indices[0] == 1 {
+                    Ok::<_, ()>(MacroAcCandidateEvaluation::PhysicalDomainRejected)
+                } else {
+                    Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(passing_outcome(3)))
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(statistics.rejected_candidates(), 1);
+        assert_eq!(statistics.testbenches()[0].physical_domain_rejections(), 1);
+        assert_eq!(statistics.testbenches()[0].frequency_evaluations(), 3);
+        assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod evaluate;
 mod explore;
 mod input;
 mod model;
+mod physical;
 mod prepare;
 mod projection;
 mod render;
@@ -22,13 +23,14 @@ pub use combination::{
     MacroCandidateCombinationPlan, plan_macro_candidate_combinations,
 };
 pub use evaluate::{
-    MacroAcCandidateAnalysisError, PreparedMacroAcCandidateEvaluator,
+    MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,
     PreparedMacroAcCandidateEvaluatorError,
 };
 pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
     MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationError,
     MacroExplorationResult, MacroExplorationStatistics, explore_macro_ac_candidates,
+    explore_macro_ac_candidates_with_physical_lut,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,
@@ -37,9 +39,11 @@ pub use input::{
     validate_macro_exploration_input,
 };
 pub use model::{
-    Macro, MacroAcTestbench, MacroCompactOutputBinding, MacroExploration, MacroInterfaceBinding,
-    MacroOutputSource, MacroPort, MacroPortRole, MacroTestbenchSource,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroExploration,
+    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroTestbenchSource,
 };
+pub use physical::CandidatePhysicalBindingError;
+pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};
 pub use prepare::{
     MacroTestbenchPrepareError, PreparedMacroAcTestbench, prepare_macro_ac_testbench,
 };
