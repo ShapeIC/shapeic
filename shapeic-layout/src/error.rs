@@ -14,6 +14,8 @@ pub enum LayoutError {
     Schema { context: String, message: String },
     #[error("unknown physical primitive '{0}'")]
     UnknownPrimitive(String),
+    #[error("device capacitance correction is unavailable for physical primitive '{primitive}'")]
+    DeviceCorrectionUnavailable { primitive: String },
     #[error(
         "physical point is outside primitive '{primitive}' axis '{axis}': {value} not in [{minimum}, {maximum}]"
     )]

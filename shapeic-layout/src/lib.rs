@@ -8,5 +8,6 @@ mod validation;
 
 pub use error::LayoutError;
 pub use model::{
-    PhysicalLookupTable, PhysicalMetadata, PhysicalPoint, PhysicalPrimitive, PortAdmittance,
+    LayoutAwareAdmittance, LayoutAwarePoint, PhysicalLookupTable, PhysicalMetadata, PhysicalPoint,
+    PhysicalPrimitive, PortAdmittance,
 };
