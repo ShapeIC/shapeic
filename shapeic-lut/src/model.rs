@@ -285,10 +285,15 @@ impl LutPoint {
 }
 
 /// File-level metadata stored by a LUT generator.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LutMetadata {
     pub description: Option<String>,
     pub simulator: Option<String>,
+    pub pdk: Option<String>,
+    pub pdk_revision: Option<String>,
+    pub corner: Option<String>,
+    pub temperature_c: Option<f64>,
+    pub nominal_voltage: Option<f64>,
 }
 
 /// A complete lookup table, potentially containing multiple device models.
@@ -321,6 +326,26 @@ impl LookupTable {
 
     pub fn simulator(&self) -> Option<&str> {
         self.metadata.simulator.as_deref()
+    }
+
+    pub fn pdk(&self) -> Option<&str> {
+        self.metadata.pdk.as_deref()
+    }
+
+    pub fn pdk_revision(&self) -> Option<&str> {
+        self.metadata.pdk_revision.as_deref()
+    }
+
+    pub fn corner(&self) -> Option<&str> {
+        self.metadata.corner.as_deref()
+    }
+
+    pub fn temperature_c(&self) -> Option<f64> {
+        self.metadata.temperature_c
+    }
+
+    pub fn nominal_voltage(&self) -> Option<f64> {
+        self.metadata.nominal_voltage
     }
 
     pub fn model_names(&self) -> impl ExactSizeIterator<Item = &str> {

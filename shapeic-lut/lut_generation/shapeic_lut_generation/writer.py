@@ -94,7 +94,7 @@ class LutStorage:
 
     def _manifest(self) -> dict[str, object]:
         device = self.config.device
-        return {
+        manifest: dict[str, object] = {
             "format": "shapeic-lut",
             "version": 2,
             "description": self.config.description,
@@ -116,3 +116,14 @@ class LutStorage:
                 }
             ],
         }
+        if self.config.pdk is not None:
+            manifest.update(
+                {
+                    "pdk": self.config.pdk.name,
+                    "corner": self.config.pdk.corner,
+                    "nominal_voltage": self.config.pdk.nominal_voltage,
+                }
+            )
+            if self.config.pdk.revision is not None:
+                manifest["pdk_revision"] = self.config.pdk.revision
+        return manifest

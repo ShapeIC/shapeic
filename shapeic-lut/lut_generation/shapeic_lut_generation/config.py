@@ -124,6 +124,15 @@ class DeviceConfig:
 
 
 @dataclass(frozen=True)
+class PdkConfig:
+    name: str
+    revision: str | None
+    corner: str
+    nominal_voltage: float
+    directory: Path
+
+
+@dataclass(frozen=True)
 class GenerationConfig:
     source_path: Path
     output_path: Path
@@ -131,6 +140,7 @@ class GenerationConfig:
     simulator: SimulatorConfig
     device: DeviceConfig
     sweep: SweepConfig
+    pdk: PdkConfig | None = None
 
     def output_parameters(self) -> tuple[str, ...]:
         parameters = list(self.simulator.parameters)
@@ -153,11 +163,14 @@ def load_config(path: Path) -> GenerationConfig:
     simulator = _table(raw, "simulator")
     device = _table(raw, "device")
     sweep = _table(raw, "sweep")
+    pdk = _pdk_config(raw.get("pdk"))
 
     output_path = _resolve_path(str(output["path"]), source_path.parent)
-    model_library = _resolve_path(str(simulator["model_library"]), source_path.parent)
+    path_base = pdk.directory if pdk is not None else source_path.parent
+    path_resolver = _resolve_pdk_path if pdk is not None else _resolve_path
+    model_library = path_resolver(str(simulator["model_library"]), path_base)
     osdi_paths = tuple(
-        _resolve_path(str(value), source_path.parent) for value in simulator.get("osdi_paths", [])
+        path_resolver(str(value), path_base) for value in simulator.get("osdi_paths", [])
     )
     parameters = tuple(str(value).lower() for value in simulator["parameters"])
     unknown = sorted(set(parameters) - SUPPORTED_PARAMETERS)
@@ -195,6 +208,7 @@ def load_config(path: Path) -> GenerationConfig:
             vds=_linear_range(sweep, "vds"),
             finger_width=_linear_range(sweep, "finger_width"),
         ),
+        pdk=pdk,
     )
     _validate_config(config)
     for name, values in config.sweep.axes().items():
@@ -226,12 +240,97 @@ def _capacitance_nf_samples(device: dict[str, Any]) -> tuple[int, ...]:
     return tuple(values)
 
 
+def _pdk_config(value: Any) -> PdkConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("[pdk] must be a table")
+
+    name = _required_nonempty_string(value, "name", "pdk")
+    name_path = Path(name)
+    if (
+        name_path.is_absolute()
+        or name in {".", ".."}
+        or len(name_path.parts) != 1
+        or "/" in name
+        or "\\" in name
+    ):
+        raise ValueError("pdk.name must be a single directory name")
+    corner = _required_nonempty_string(value, "corner", "pdk")
+    revision_value = value.get("revision")
+    revision = None
+    if revision_value is not None:
+        if not isinstance(revision_value, str) or not revision_value.strip():
+            raise ValueError("pdk.revision must be a non-empty string when provided")
+        revision = revision_value
+
+    if "nominal_voltage" not in value:
+        raise ValueError("pdk.nominal_voltage is required")
+    try:
+        nominal_voltage = float(value["nominal_voltage"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("pdk.nominal_voltage must be positive and finite") from error
+    if not math.isfinite(nominal_voltage) or nominal_voltage <= 0.0:
+        raise ValueError("pdk.nominal_voltage must be positive and finite")
+
+    root_value = os.environ.get("PDK_ROOT")
+    selected = os.environ.get("PDK")
+    if not root_value:
+        raise ValueError("PDK_ROOT must be set when [pdk] is configured")
+    if not selected:
+        raise ValueError("PDK must be set when [pdk] is configured")
+    if selected != name:
+        raise ValueError(f"PDK selects '{selected}', but pdk.name is '{name}'")
+
+    root = _resolve_environment_path(root_value, "PDK_ROOT")
+    if not root.is_dir():
+        raise FileNotFoundError(f"PDK_ROOT directory not found: {root}")
+    directory = (root / selected).resolve()
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"PDK '{selected}' was not found at '{directory}'; install it separately "
+            "or update PDK_ROOT/PDK"
+        )
+
+    return PdkConfig(
+        name=name,
+        revision=revision,
+        corner=corner,
+        nominal_voltage=nominal_voltage,
+        directory=directory,
+    )
+
+
+def _required_nonempty_string(values: dict[str, Any], name: str, table: str) -> str:
+    value = values.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{table}.{name} must be a non-empty string")
+    return value
+
+
+def _resolve_environment_path(value: str, name: str) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if "$" in expanded:
+        raise ValueError(f"{name} contains an undefined environment variable: {value}")
+    return Path(expanded).resolve()
+
+
 def _resolve_path(value: str, base: Path) -> Path:
     expanded = os.path.expandvars(os.path.expanduser(value))
     if "$" in expanded:
         raise ValueError(f"path contains an undefined environment variable: {value}")
     path = Path(expanded)
     return (base / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def _resolve_pdk_path(value: str, pdk_directory: Path) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if "$" in expanded:
+        raise ValueError(f"PDK path contains an undefined environment variable: {value}")
+    path = Path(expanded)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"PDK-owned path must be relative to PDK_ROOT/PDK: {value}")
+    return (pdk_directory / path).resolve()
 
 
 def _validate_axis(values: np.ndarray, name: str) -> None:

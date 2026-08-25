@@ -63,6 +63,11 @@ struct V2Manifest {
     version: u32,
     description: Option<String>,
     simulator: Option<String>,
+    pdk: Option<String>,
+    pdk_revision: Option<String>,
+    corner: Option<String>,
+    temperature_c: Option<f64>,
+    nominal_voltage: Option<f64>,
     models: Vec<V2Model>,
 }
 
@@ -105,6 +110,27 @@ where
         return Err(LutError::schema(
             MANIFEST_MEMBER,
             "models must not be empty",
+        ));
+    }
+    validate_optional_manifest_string("pdk", manifest.pdk.as_deref())?;
+    validate_optional_manifest_string("pdk_revision", manifest.pdk_revision.as_deref())?;
+    validate_optional_manifest_string("corner", manifest.corner.as_deref())?;
+    if manifest
+        .temperature_c
+        .is_some_and(|value| !value.is_finite())
+    {
+        return Err(LutError::schema(
+            MANIFEST_MEMBER,
+            "temperature_c must be finite",
+        ));
+    }
+    if manifest
+        .nominal_voltage
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(LutError::schema(
+            MANIFEST_MEMBER,
+            "nominal_voltage must be positive and finite",
         ));
     }
 
@@ -216,9 +242,24 @@ where
         metadata: LutMetadata {
             description: manifest.description,
             simulator: manifest.simulator,
+            pdk: manifest.pdk,
+            pdk_revision: manifest.pdk_revision,
+            corner: manifest.corner,
+            temperature_c: manifest.temperature_c,
+            nominal_voltage: manifest.nominal_voltage,
         },
         models,
     })
+}
+
+fn validate_optional_manifest_string(name: &str, value: Option<&str>) -> Result<(), LutError> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        return Err(LutError::schema(
+            MANIFEST_MEMBER,
+            format!("{name} must be non-empty when provided"),
+        ));
+    }
+    Ok(())
 }
 
 fn register_member_path(
@@ -398,6 +439,7 @@ fn parse_root(root: BTreeMap<HashableValue, Value>) -> Result<LookupTable, LutEr
     let metadata = LutMetadata {
         description: take_optional_string(&mut root, "description", "lookup_table")?,
         simulator: take_optional_string(&mut root, "simulator", "lookup_table")?,
+        ..LutMetadata::default()
     };
     let root_parameter_names =
         take_optional_string_list(&mut root, "parameter_names", "lookup_table")?

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from shapeic_lut_generation.config import (
     DeviceConfig,
     GenerationConfig,
     LinearRange,
+    PdkConfig,
     SimulatorConfig,
     SweepConfig,
     load_config,
@@ -37,6 +39,49 @@ class LinearRangeTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    @staticmethod
+    def _write_config(root: Path, pdk_table: str = "") -> Path:
+        config_path = root / "config.toml"
+        config_path.write_text(
+            f"""
+{pdk_table}
+[output]
+path = "output/lut.npz"
+
+[simulator]
+binary = "true"
+model_library = "libs.tech/ngspice/model.lib"
+osdi_paths = ["libs.tech/ngspice/model.osdi"]
+parameters = ["id", "gm"]
+
+[device]
+name = "test_nmos"
+hierarchy = "m1"
+nf = 1
+
+[sweep]
+length = [1.0]
+[sweep.vbs]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.vgs]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.vds]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.finger_width]
+start = 1.0
+stop = 2.0
+step = 1.0
+""",
+            encoding="ascii",
+        )
+        return config_path
+
     def test_loads_paths_relative_to_config_and_expands_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -95,6 +140,99 @@ step = 1.0
             self.assertEqual(config.simulator.model_library, model)
             self.assertEqual(config.output_path, root / "output" / "lut.npz")
             self.assertEqual(config.simulator.parameters, ("id", "gm"))
+            self.assertIsNone(config.pdk)
+
+    def test_resolves_declared_pdk_paths_from_pdk_root_and_pdk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pdk_directory = root / "pdks" / "sky130A"
+            model_directory = pdk_directory / "libs.tech" / "ngspice"
+            model_directory.mkdir(parents=True)
+            (model_directory / "model.lib").touch()
+            (model_directory / "model.osdi").touch()
+            config_path = self._write_config(
+                root,
+                """[pdk]
+name = "sky130A"
+revision = "v0.1.0"
+corner = "tt"
+nominal_voltage = 1.8
+""",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"PDK_ROOT": str(root / "pdks"), "PDK": "sky130A"},
+                clear=False,
+            ):
+                config = load_config(config_path)
+
+            self.assertEqual(config.pdk.name, "sky130A")
+            self.assertEqual(config.pdk.revision, "v0.1.0")
+            self.assertEqual(config.pdk.corner, "tt")
+            self.assertEqual(config.pdk.nominal_voltage, 1.8)
+            self.assertEqual(config.pdk.directory, pdk_directory)
+            self.assertEqual(config.simulator.model_library, model_directory / "model.lib")
+            self.assertEqual(config.simulator.osdi_paths, (model_directory / "model.osdi",))
+            self.assertEqual(config.output_path, root / "output" / "lut.npz")
+
+    def test_rejects_pdk_environment_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pdks" / "gf180mcuD").mkdir(parents=True)
+            config_path = self._write_config(
+                root,
+                """[pdk]
+name = "sky130A"
+corner = "tt"
+nominal_voltage = 1.8
+""",
+            )
+            with patch.dict(
+                os.environ,
+                {"PDK_ROOT": str(root / "pdks"), "PDK": "gf180mcuD"},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(ValueError, "PDK selects 'gf180mcuD'"):
+                    load_config(config_path)
+
+    def test_reports_a_missing_local_pdk_without_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pdks").mkdir()
+            config_path = self._write_config(
+                root,
+                """[pdk]
+name = "sky130A"
+corner = "tt"
+nominal_voltage = 1.8
+""",
+            )
+            with patch.dict(
+                os.environ,
+                {"PDK_ROOT": str(root / "pdks"), "PDK": "sky130A"},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "install it separately"):
+                    load_config(config_path)
+
+    def test_rejects_unsafe_pdk_names_and_nonpositive_nominal_voltage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, voltage, message in [
+                ("../sky130A", "1.8", "single directory name"),
+                ("sky130A", "0.0", "positive and finite"),
+            ]:
+                config_path = self._write_config(
+                    root,
+                    f"""[pdk]
+name = "{name}"
+corner = "tt"
+nominal_voltage = {voltage}
+""",
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    load_config(config_path)
 
 
 class WriterTests(unittest.TestCase):
@@ -124,6 +262,13 @@ class WriterTests(unittest.TestCase):
                     vds=two_values,
                     finger_width=LinearRange(1.0, 2.0, 1.0),
                 ),
+                pdk=PdkConfig(
+                    name="sky130A",
+                    revision="v0.1.0",
+                    corner="tt",
+                    nominal_voltage=1.8,
+                    directory=root / "pdks" / "sky130A",
+                ),
             )
             storage = LutStorage(config, root / "staging")
             for length_index in range(2):
@@ -142,6 +287,11 @@ class WriterTests(unittest.TestCase):
                 manifest = json.loads(archive.read("manifest.json"))
                 self.assertEqual(manifest["format"], "shapeic-lut")
                 self.assertEqual(manifest["version"], 2)
+                self.assertEqual(manifest["pdk"], "sky130A")
+                self.assertEqual(manifest["pdk_revision"], "v0.1.0")
+                self.assertEqual(manifest["corner"], "tt")
+                self.assertEqual(manifest["temperature_c"], 27.0)
+                self.assertEqual(manifest["nominal_voltage"], 1.8)
                 self.assertEqual(
                     manifest["models"][0]["axis_order"],
                     ["length", "vbs", "vgs", "vds", "finger_width"],
