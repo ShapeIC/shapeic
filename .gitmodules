@@ -1,0 +1,3 @@
+[submodule "shapeic-cellkit"]
+	path = shapeic-cellkit
+	url = git@github.com:ShapeIC/shapeic-cellkit.git
