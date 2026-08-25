@@ -5,6 +5,7 @@ import os
 import shutil
 import tomllib
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -108,19 +109,69 @@ class SimulatorConfig:
     binary: str
     temperature_c: float
     workers: int
-    model_library: Path
-    library_section: str
-    osdi_paths: tuple[Path, ...]
     parameters: tuple[str, ...]
+
+
+class SpiceDirectiveKind(str, Enum):
+    INCLUDE = "include"
+    LIBRARY = "library"
+    OSDI = "osdi"
+
+
+@dataclass(frozen=True)
+class SpiceDirective:
+    kind: SpiceDirectiveKind
+    path: Path
+    section: str | None = None
+
+
+@dataclass(frozen=True)
+class SpiceConfig:
+    directives: tuple[SpiceDirective, ...]
+
+
+class SpiceInstanceKind(str, Enum):
+    SUBCIRCUIT = "subcircuit"
+    MODEL = "model"
+
+
+class MosTerminal(str, Enum):
+    DRAIN = "d"
+    GATE = "g"
+    SOURCE = "s"
+    BULK = "b"
+
+
+class WidthConvention(str, Enum):
+    TOTAL = "total"
+    PER_FINGER = "per_finger"
 
 
 @dataclass(frozen=True)
 class DeviceConfig:
     name: str
     instance: str
+    instance_kind: SpiceInstanceKind
+    terminals: tuple[MosTerminal, ...]
+    length_parameter: str
+    width_parameter: str
+    finger_parameter: str
+    width_convention: WidthConvention
     hierarchy: str
+    parameter_map: dict[str, str]
     nf: int
     capacitance_nf_samples: tuple[int, ...] = ()
+
+    def native_parameter(self, canonical_name: str) -> str:
+        try:
+            return self.parameter_map[canonical_name]
+        except KeyError as error:
+            raise ValueError(f"missing native mapping for parameter '{canonical_name}'") from error
+
+    def spice_width(self, finger_width: float, nf: int) -> float:
+        if self.width_convention is WidthConvention.TOTAL:
+            return finger_width * nf
+        return finger_width
 
 
 @dataclass(frozen=True)
@@ -138,6 +189,7 @@ class GenerationConfig:
     output_path: Path
     description: str
     simulator: SimulatorConfig
+    spice: SpiceConfig
     device: DeviceConfig
     sweep: SweepConfig
     pdk: PdkConfig | None = None
@@ -166,18 +218,32 @@ def load_config(path: Path) -> GenerationConfig:
     pdk = _pdk_config(raw.get("pdk"))
 
     output_path = _resolve_path(str(output["path"]), source_path.parent)
-    path_base = pdk.directory if pdk is not None else source_path.parent
-    path_resolver = _resolve_pdk_path if pdk is not None else _resolve_path
-    model_library = path_resolver(str(simulator["model_library"]), path_base)
-    osdi_paths = tuple(
-        path_resolver(str(value), path_base) for value in simulator.get("osdi_paths", [])
-    )
     parameters = tuple(str(value).lower() for value in simulator["parameters"])
     unknown = sorted(set(parameters) - SUPPORTED_PARAMETERS)
     if unknown:
         raise ValueError(f"unsupported parameters: {', '.join(unknown)}")
     if not parameters or len(parameters) != len(set(parameters)):
         raise ValueError("parameters must be a non-empty list without duplicates")
+
+    spice_value = raw.get("spice")
+    if spice_value is None:
+        spice = _legacy_spice_config(simulator, pdk, source_path.parent)
+        device_config = _legacy_device_config(device, parameters)
+    else:
+        if pdk is None:
+            raise ValueError("[pdk] is required when [spice] is configured")
+        legacy_fields = sorted(
+            {"model_library", "library_section", "osdi_paths"}.intersection(simulator)
+        )
+        if legacy_fields:
+            raise ValueError(
+                "[spice] cannot be combined with legacy simulator fields: "
+                + ", ".join(legacy_fields)
+            )
+        if not isinstance(spice_value, dict):
+            raise ValueError("[spice] must be a table")
+        spice = _spice_config(spice_value, pdk.directory)
+        device_config = _typed_device_config(device, parameters)
 
     lengths = np.asarray(sweep["length"], dtype=np.float64)
     _validate_axis(lengths, "length")
@@ -189,18 +255,10 @@ def load_config(path: Path) -> GenerationConfig:
             binary=str(simulator.get("binary", "ngspice")),
             temperature_c=float(simulator.get("temperature_c", 27.0)),
             workers=int(simulator.get("workers", 1)),
-            model_library=model_library,
-            library_section=str(simulator.get("library_section", "mos_tt")),
-            osdi_paths=osdi_paths,
             parameters=parameters,
         ),
-        device=DeviceConfig(
-            name=str(device["name"]),
-            instance=str(device.get("instance", "XM1")),
-            hierarchy=str(device["hierarchy"]),
-            nf=int(device.get("nf", 1)),
-            capacitance_nf_samples=_capacitance_nf_samples(device),
-        ),
+        spice=spice,
+        device=device_config,
         sweep=SweepConfig(
             length=lengths,
             vbs=_linear_range(sweep, "vbs"),
@@ -238,6 +296,184 @@ def _capacitance_nf_samples(device: dict[str, Any]) -> tuple[int, ...]:
     if not isinstance(values, list) or any(type(value) is not int for value in values):
         raise ValueError("capacitance_nf_samples must be a list of integers")
     return tuple(values)
+
+
+def _legacy_spice_config(
+    simulator: dict[str, Any], pdk: PdkConfig | None, config_directory: Path
+) -> SpiceConfig:
+    if "model_library" not in simulator:
+        raise ValueError("simulator.model_library is required by the legacy configuration")
+    path_base = pdk.directory if pdk is not None else config_directory
+    path_resolver = _resolve_pdk_path if pdk is not None else _resolve_path
+    directives = [
+        SpiceDirective(
+            kind=SpiceDirectiveKind.LIBRARY,
+            path=path_resolver(str(simulator["model_library"]), path_base),
+            section=str(simulator.get("library_section", "mos_tt")),
+        )
+    ]
+    directives.extend(
+        SpiceDirective(
+            kind=SpiceDirectiveKind.OSDI,
+            path=path_resolver(str(value), path_base),
+        )
+        for value in simulator.get("osdi_paths", [])
+    )
+    return SpiceConfig(tuple(directives))
+
+
+def _spice_config(values: dict[str, Any], pdk_directory: Path) -> SpiceConfig:
+    unknown = sorted(set(values) - {"directives"})
+    if unknown:
+        raise ValueError("unsupported [spice] fields: " + ", ".join(unknown))
+    raw_directives = values.get("directives")
+    if not isinstance(raw_directives, list) or not raw_directives:
+        raise ValueError("spice.directives must be a non-empty array of tables")
+
+    directives: list[SpiceDirective] = []
+    saw_osdi = False
+    for index, raw in enumerate(raw_directives):
+        context = f"spice.directives[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be a table")
+        unknown = sorted(set(raw) - {"kind", "path", "section"})
+        if unknown:
+            raise ValueError(f"unsupported {context} fields: " + ", ".join(unknown))
+        kind = _enum_value(
+            SpiceDirectiveKind,
+            _required_nonempty_string(raw, "kind", context),
+            f"{context}.kind",
+        )
+        if saw_osdi and kind is not SpiceDirectiveKind.OSDI:
+            raise ValueError("include and library directives must precede all OSDI directives")
+        saw_osdi |= kind is SpiceDirectiveKind.OSDI
+        path = _resolve_pdk_path(
+            _required_nonempty_string(raw, "path", context), pdk_directory
+        )
+        section_value = raw.get("section")
+        if kind is SpiceDirectiveKind.LIBRARY:
+            section = _required_nonempty_string(raw, "section", context)
+            _validate_spice_token(section, f"{context}.section")
+        else:
+            if section_value is not None:
+                raise ValueError(f"{context}.section is only valid for library directives")
+            section = None
+        directives.append(SpiceDirective(kind=kind, path=path, section=section))
+    return SpiceConfig(tuple(directives))
+
+
+def _legacy_device_config(
+    device: dict[str, Any], parameters: tuple[str, ...]
+) -> DeviceConfig:
+    typed_fields = {
+        "instance_kind",
+        "terminals",
+        "length_parameter",
+        "width_parameter",
+        "finger_parameter",
+        "width_convention",
+        "parameter_map",
+    }.intersection(device)
+    if typed_fields:
+        raise ValueError(
+            "typed device fields require [spice]: " + ", ".join(sorted(typed_fields))
+        )
+    return DeviceConfig(
+        name=str(device["name"]),
+        instance=str(device.get("instance", "XM1")),
+        instance_kind=SpiceInstanceKind.SUBCIRCUIT,
+        terminals=tuple(MosTerminal),
+        length_parameter="l",
+        width_parameter="w",
+        finger_parameter="ng",
+        width_convention=WidthConvention.TOTAL,
+        hierarchy=str(device["hierarchy"]),
+        parameter_map={parameter: parameter for parameter in parameters if parameter != "id"},
+        nf=int(device.get("nf", 1)),
+        capacitance_nf_samples=_capacitance_nf_samples(device),
+    )
+
+
+def _typed_device_config(
+    device: dict[str, Any], parameters: tuple[str, ...]
+) -> DeviceConfig:
+    supported_fields = {
+        "name",
+        "instance",
+        "instance_kind",
+        "terminals",
+        "length_parameter",
+        "width_parameter",
+        "finger_parameter",
+        "width_convention",
+        "hierarchy",
+        "parameter_map",
+        "nf",
+        "capacitance_nf_samples",
+    }
+    unknown = sorted(set(device) - supported_fields)
+    if unknown:
+        raise ValueError("unsupported [device] fields: " + ", ".join(unknown))
+    instance_kind = _enum_value(
+        SpiceInstanceKind,
+        _required_nonempty_string(device, "instance_kind", "device"),
+        "device.instance_kind",
+    )
+    raw_terminals = device.get("terminals")
+    if not isinstance(raw_terminals, list):
+        raise ValueError("device.terminals must be a list")
+    terminals = tuple(
+        _enum_value(MosTerminal, value, f"device.terminals[{index}]")
+        for index, value in enumerate(raw_terminals)
+    )
+    width_convention = _enum_value(
+        WidthConvention,
+        _required_nonempty_string(device, "width_convention", "device"),
+        "device.width_convention",
+    )
+    raw_map = device.get("parameter_map")
+    if not isinstance(raw_map, dict):
+        raise ValueError("missing [device.parameter_map] table")
+    parameter_map: dict[str, str] = {}
+    for canonical, native in raw_map.items():
+        if not isinstance(canonical, str) or not isinstance(native, str) or not native:
+            raise ValueError("device.parameter_map must map strings to non-empty strings")
+        normalized = canonical.lower()
+        if normalized in parameter_map:
+            raise ValueError(f"duplicate device parameter mapping '{normalized}'")
+        parameter_map[normalized] = native
+
+    return DeviceConfig(
+        name=_required_nonempty_string(device, "name", "device"),
+        instance=_required_nonempty_string(device, "instance", "device"),
+        instance_kind=instance_kind,
+        terminals=terminals,
+        length_parameter=_required_nonempty_string(device, "length_parameter", "device"),
+        width_parameter=_required_nonempty_string(device, "width_parameter", "device"),
+        finger_parameter=_required_nonempty_string(device, "finger_parameter", "device"),
+        width_convention=width_convention,
+        hierarchy=_required_nonempty_string(device, "hierarchy", "device"),
+        parameter_map=parameter_map,
+        nf=int(device.get("nf", 1)),
+        capacitance_nf_samples=_capacitance_nf_samples(device),
+    )
+
+
+def _enum_value(enum_type: type[Enum], value: Any, context: str):
+    if not isinstance(value, str):
+        raise ValueError(f"{context} must be a string")
+    try:
+        return enum_type(value)
+    except ValueError as error:
+        supported = ", ".join(member.value for member in enum_type)
+        raise ValueError(f"{context} must be one of: {supported}") from error
+
+
+def _validate_spice_token(value: str, context: str) -> None:
+    if any(character.isspace() for character in value) or any(
+        character in value for character in "'[]"
+    ):
+        raise ValueError(f"{context} must be a single SPICE token")
 
 
 def _pdk_config(value: Any) -> PdkConfig | None:
@@ -350,14 +586,64 @@ def _validate_config(config: GenerationConfig) -> None:
         raise ValueError("temperature_c must be finite")
     if shutil.which(simulator.binary) is None:
         raise ValueError(f"simulator binary '{simulator.binary}' is not accessible")
-    if not simulator.model_library.is_file():
-        raise FileNotFoundError(f"model library not found: {simulator.model_library}")
-    for path in simulator.osdi_paths:
-        if not path.is_file():
-            raise FileNotFoundError(f"OSDI model not found: {path}")
-    if not config.device.name or not config.device.hierarchy or config.device.nf != 1:
+    if not config.spice.directives:
+        raise ValueError("at least one SPICE directive is required")
+    for directive in config.spice.directives:
+        if not directive.path.is_file():
+            raise FileNotFoundError(
+                f"{directive.kind.value} file not found: {directive.path}"
+            )
+        if "'" in str(directive.path) or any(
+            character in str(directive.path) for character in "\r\n"
+        ):
+            raise ValueError(f"unsafe SPICE path: {directive.path}")
+
+    device = config.device
+    if not device.name or not device.hierarchy or device.nf != 1:
         raise ValueError("device name and hierarchy are required, and nf must equal one")
-    samples = config.device.capacitance_nf_samples
+    for value, context in [
+        (device.name, "device.name"),
+        (device.instance, "device.instance"),
+        (device.length_parameter, "device.length_parameter"),
+        (device.width_parameter, "device.width_parameter"),
+        (device.finger_parameter, "device.finger_parameter"),
+        (device.hierarchy, "device.hierarchy"),
+    ]:
+        _validate_spice_token(value, context)
+    expected_prefix = "X" if device.instance_kind is SpiceInstanceKind.SUBCIRCUIT else "M"
+    if not device.instance.upper().startswith(expected_prefix):
+        raise ValueError(
+            f"device.instance must start with '{expected_prefix}' for "
+            f"instance_kind = '{device.instance_kind.value}'"
+        )
+    if len(device.terminals) != 4 or set(device.terminals) != set(MosTerminal):
+        raise ValueError("device.terminals must contain d, g, s and b exactly once")
+    geometry_parameters = {
+        device.length_parameter,
+        device.width_parameter,
+        device.finger_parameter,
+    }
+    if len(geometry_parameters) != 3:
+        raise ValueError("length, width and finger parameter names must be distinct")
+
+    expected_mappings = set(simulator.parameters) - {"id"}
+    actual_mappings = set(device.parameter_map)
+    if actual_mappings != expected_mappings:
+        missing = sorted(expected_mappings - actual_mappings)
+        extra = sorted(actual_mappings - expected_mappings)
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if extra:
+            details.append("unexpected: " + ", ".join(extra))
+        raise ValueError(
+            "device.parameter_map does not match parameters (" + "; ".join(details) + ")"
+        )
+    for canonical, native in device.parameter_map.items():
+        _validate_spice_token(canonical, f"device.parameter_map.{canonical}")
+        _validate_spice_token(native, f"device.parameter_map.{canonical}")
+
+    samples = device.capacitance_nf_samples
     if samples:
         if samples != EXTRINSIC_CAPACITANCE_NF_SAMPLES:
             raise ValueError(

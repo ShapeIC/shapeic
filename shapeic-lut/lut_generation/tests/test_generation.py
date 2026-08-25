@@ -13,12 +13,18 @@ from shapeic_lut_generation.config import (
     DeviceConfig,
     GenerationConfig,
     LinearRange,
+    MosTerminal,
     PdkConfig,
     SimulatorConfig,
+    SpiceConfig,
+    SpiceDirective,
+    SpiceDirectiveKind,
+    SpiceInstanceKind,
     SweepConfig,
+    WidthConvention,
     load_config,
 )
-from shapeic_lut_generation.ngspice import _raw_column
+from shapeic_lut_generation.ngspice import _netlist, _raw_column
 from shapeic_lut_generation.writer import LutStorage
 
 
@@ -82,6 +88,94 @@ step = 1.0
         )
         return config_path
 
+    @staticmethod
+    def _write_typed_config(
+        root: Path,
+        directives: str,
+        *,
+        simulator_extra: str = "",
+        instance: str = "XM1",
+        instance_kind: str = "subcircuit",
+        terminals: str = '["d", "g", "s", "b"]',
+        parameter_map: str = 'gm = "gm_native"',
+    ) -> Path:
+        config_path = root / "typed.toml"
+        config_path.write_text(
+            f"""
+[pdk]
+name = "test_pdk"
+revision = "test-revision"
+corner = "tt"
+nominal_voltage = 1.8
+
+[output]
+path = "output/lut.npz"
+
+[simulator]
+binary = "true"
+temperature_c = 27.0
+workers = 1
+parameters = ["id", "gm"]
+{simulator_extra}
+
+[spice]
+{directives}
+
+[device]
+name = "test_nmos"
+instance = "{instance}"
+instance_kind = "{instance_kind}"
+terminals = {terminals}
+length_parameter = "L"
+width_parameter = "W"
+finger_parameter = "nf"
+width_convention = "per_finger"
+hierarchy = "n.xm1.m0"
+nf = 1
+
+[device.parameter_map]
+{parameter_map}
+
+[sweep]
+length = [1.0]
+[sweep.vbs]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.vgs]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.vds]
+start = 0.0
+stop = 1.0
+step = 1.0
+[sweep.finger_width]
+start = 1.0
+stop = 2.0
+step = 1.0
+""",
+            encoding="ascii",
+        )
+        return config_path
+
+    @staticmethod
+    def _typed_pdk(root: Path) -> Path:
+        pdk = root / "pdks" / "test_pdk"
+        model_directory = pdk / "models"
+        model_directory.mkdir(parents=True)
+        for name in ["design.spice", "models.lib", "model.osdi"]:
+            (model_directory / name).touch()
+        return pdk
+
+    @staticmethod
+    def _typed_environment(root: Path):
+        return patch.dict(
+            os.environ,
+            {"PDK_ROOT": str(root / "pdks"), "PDK": "test_pdk"},
+            clear=False,
+        )
+
     def test_loads_paths_relative_to_config_and_expands_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -137,10 +231,16 @@ step = 1.0
                     os.environ.pop("SHAPEIC_TEST_PDK", None)
                 else:
                     os.environ["SHAPEIC_TEST_PDK"] = previous
-            self.assertEqual(config.simulator.model_library, model)
+            self.assertEqual(config.spice.directives[0].path, model)
+            self.assertEqual(config.spice.directives[0].kind, SpiceDirectiveKind.LIBRARY)
+            self.assertEqual(config.spice.directives[1].path, osdi)
             self.assertEqual(config.output_path, root / "output" / "lut.npz")
             self.assertEqual(config.simulator.parameters, ("id", "gm"))
             self.assertIsNone(config.pdk)
+            netlist = _netlist(config, 1.0, 0.25, 2.0, 4, ("id", "gm"), root / "raw")
+            self.assertIn(f".lib '{model}' mos_tt", netlist)
+            self.assertIn("XM1 ND NG 0 NB test_nmos l=1 w=8 ng=4", netlist)
+            self.assertIn("@m1[gm]", netlist)
 
     def test_resolves_declared_pdk_paths_from_pdk_root_and_pdk(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,8 +272,8 @@ nominal_voltage = 1.8
             self.assertEqual(config.pdk.corner, "tt")
             self.assertEqual(config.pdk.nominal_voltage, 1.8)
             self.assertEqual(config.pdk.directory, pdk_directory)
-            self.assertEqual(config.simulator.model_library, model_directory / "model.lib")
-            self.assertEqual(config.simulator.osdi_paths, (model_directory / "model.osdi",))
+            self.assertEqual(config.spice.directives[0].path, model_directory / "model.lib")
+            self.assertEqual(config.spice.directives[1].path, model_directory / "model.osdi")
             self.assertEqual(config.output_path, root / "output" / "lut.npz")
 
     def test_rejects_pdk_environment_mismatch(self):
@@ -234,6 +334,149 @@ nominal_voltage = {voltage}
                 with self.assertRaisesRegex(ValueError, message):
                     load_config(config_path)
 
+    def test_loads_ordered_typed_spice_description(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pdk = self._typed_pdk(root)
+            config_path = self._write_typed_config(
+                root,
+                """[[spice.directives]]
+kind = "include"
+path = "models/design.spice"
+
+[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+section = "tt"
+
+[[spice.directives]]
+kind = "osdi"
+path = "models/model.osdi"
+""",
+                terminals='["b", "g", "s", "d"]',
+            )
+            with self._typed_environment(root):
+                config = load_config(config_path)
+
+            self.assertEqual(
+                [directive.kind for directive in config.spice.directives],
+                [
+                    SpiceDirectiveKind.INCLUDE,
+                    SpiceDirectiveKind.LIBRARY,
+                    SpiceDirectiveKind.OSDI,
+                ],
+            )
+            self.assertEqual(config.spice.directives[0].path, pdk / "models/design.spice")
+            self.assertEqual(config.spice.directives[1].section, "tt")
+            self.assertEqual(
+                config.device.terminals,
+                (
+                    MosTerminal.BULK,
+                    MosTerminal.GATE,
+                    MosTerminal.SOURCE,
+                    MosTerminal.DRAIN,
+                ),
+            )
+            self.assertEqual(config.device.parameter_map, {"gm": "gm_native"})
+
+            netlist = _netlist(config, 1.0, 0.25, 2.0, 4, ("id", "gm"), root / "raw")
+            include = f".include '{pdk / 'models/design.spice'}'"
+            library = f".lib '{pdk / 'models/models.lib'}' tt"
+            osdi = f"pre_osdi '{pdk / 'models/model.osdi'}'"
+            self.assertLess(netlist.index(include), netlist.index(library))
+            self.assertLess(netlist.index(library), netlist.index("VGS NG 0 DC=0"))
+            self.assertLess(netlist.index(".control"), netlist.index(osdi))
+            self.assertIn("XM1 NB NG 0 ND test_nmos L=1 W=2 nf=4", netlist)
+            self.assertIn("@n.xm1.m0[gm_native]", netlist)
+
+    def test_rejects_mixed_legacy_and_typed_spice_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._typed_pdk(root)
+            config_path = self._write_typed_config(
+                root,
+                """[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+section = "tt"
+""",
+                simulator_extra='model_library = "models/models.lib"',
+            )
+            with self._typed_environment(root):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                    load_config(config_path)
+
+    def test_rejects_invalid_directive_order_and_library_section(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._typed_pdk(root)
+            cases = [
+                (
+                    """[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+""",
+                    "section",
+                ),
+                (
+                    """[[spice.directives]]
+kind = "osdi"
+path = "models/model.osdi"
+[[spice.directives]]
+kind = "include"
+path = "models/design.spice"
+""",
+                    "must precede",
+                ),
+            ]
+            for directives, message in cases:
+                with self.subTest(message=message):
+                    config_path = self._write_typed_config(root, directives)
+                    with self._typed_environment(root):
+                        with self.assertRaisesRegex(ValueError, message):
+                            load_config(config_path)
+
+    def test_rejects_invalid_typed_device_description(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._typed_pdk(root)
+            directive = """[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+section = "tt"
+"""
+            cases = [
+                ({"terminals": '["d", "g", "s", "s"]'}, "exactly once"),
+                ({"instance": "MM1"}, "must start with 'X'"),
+                ({"parameter_map": ""}, "does not match parameters"),
+            ]
+            for arguments, message in cases:
+                with self.subTest(message=message):
+                    config_path = self._write_typed_config(root, directive, **arguments)
+                    with self._typed_environment(root):
+                        with self.assertRaisesRegex(ValueError, message):
+                            load_config(config_path)
+
+    def test_supports_direct_model_instances(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._typed_pdk(root)
+            config_path = self._write_typed_config(
+                root,
+                """[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+section = "tt"
+""",
+                instance="M1",
+                instance_kind="model",
+            )
+            with self._typed_environment(root):
+                config = load_config(config_path)
+            self.assertEqual(config.device.instance_kind, SpiceInstanceKind.MODEL)
+            netlist = _netlist(config, 1.0, 0.0, 2.0, 3, ("gm",), root / "raw")
+            self.assertIn("M1 ND NG 0 NB test_nmos L=1 W=2 nf=3", netlist)
+
 
 class WriterTests(unittest.TestCase):
     def test_writes_manifest_and_five_dimensional_arrays(self):
@@ -249,12 +492,30 @@ class WriterTests(unittest.TestCase):
                     binary="true",
                     temperature_c=27.0,
                     workers=1,
-                    model_library=root / "model.lib",
-                    library_section="tt",
-                    osdi_paths=(),
                     parameters=("id", "gm"),
                 ),
-                device=DeviceConfig("test_nmos", "XM1", "m1", 1),
+                spice=SpiceConfig(
+                    (
+                        SpiceDirective(
+                            SpiceDirectiveKind.LIBRARY,
+                            root / "model.lib",
+                            "tt",
+                        ),
+                    )
+                ),
+                device=DeviceConfig(
+                    name="test_nmos",
+                    instance="XM1",
+                    instance_kind=SpiceInstanceKind.SUBCIRCUIT,
+                    terminals=tuple(MosTerminal),
+                    length_parameter="l",
+                    width_parameter="w",
+                    finger_parameter="nf",
+                    width_convention=WidthConvention.PER_FINGER,
+                    hierarchy="m1",
+                    parameter_map={"gm": "gm"},
+                    nf=1,
+                ),
                 sweep=SweepConfig(
                     length=np.asarray([1.0, 2.0]),
                     vbs=two_values,

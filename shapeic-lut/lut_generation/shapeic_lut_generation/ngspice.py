@@ -9,6 +9,8 @@ import numpy as np
 from .config import (
     EXTRINSIC_CAPACITANCE_PARAMETERS,
     GenerationConfig,
+    MosTerminal,
+    SpiceDirectiveKind,
     sampled_parameter_name,
 )
 
@@ -124,7 +126,15 @@ def _netlist(
     device = config.device
     vgs = config.sweep.vgs
     vds = config.sweep.vds
-    osdi = "\n".join(f"pre_osdi '{path}'" for path in simulator.osdi_paths)
+    deck_directives: list[str] = []
+    osdi_directives: list[str] = []
+    for directive in config.spice.directives:
+        if directive.kind is SpiceDirectiveKind.INCLUDE:
+            deck_directives.append(f".include '{directive.path}'")
+        elif directive.kind is SpiceDirectiveKind.LIBRARY:
+            deck_directives.append(f".lib '{directive.path}' {directive.section}")
+        else:
+            osdi_directives.append(f"pre_osdi '{directive.path}'")
     saved: list[str] = []
     expressions: list[str] = []
     output_names: list[str] = []
@@ -135,27 +145,36 @@ def _netlist(
     for parameter in parameters:
         if parameter == "id":
             continue
-        reference = f"@{device.hierarchy}[{parameter}]"
+        native_parameter = device.native_parameter(parameter)
+        reference = f"@{device.hierarchy}[{native_parameter}]"
         saved.append(f"save {reference}")
         expressions.append(f"let shapeic_{parameter} = {reference}")
         output_names.append(f"shapeic_{parameter}")
 
-    total_width = finger_width * nf
+    nodes = {
+        MosTerminal.DRAIN: "ND",
+        MosTerminal.GATE: "NG",
+        MosTerminal.SOURCE: "0",
+        MosTerminal.BULK: "NB",
+    }
+    instance_nodes = " ".join(nodes[terminal] for terminal in device.terminals)
+    spice_width = device.spice_width(finger_width, nf)
     lines = [
         "* Shapeic five-dimensional LUT generation",
-        f".lib '{simulator.model_library}' {simulator.library_section}",
+        *deck_directives,
         "VGS NG 0 DC=0",
         f"VBS NB 0 DC={vbs:.17g}",
         "VDS ND 0 DC=0",
         (
-            f"{device.instance} ND NG 0 NB {device.name} "
-            f"l={length:.17g} w={total_width:.17g} ng={nf}"
+            f"{device.instance} {instance_nodes} {device.name} "
+            f"{device.length_parameter}={length:.17g} "
+            f"{device.width_parameter}={spice_width:.17g} "
+            f"{device.finger_parameter}={nf}"
         ),
         f".options temp={simulator.temperature_c:.17g} tnom={simulator.temperature_c:.17g}",
         ".control",
     ]
-    if osdi:
-        lines.append(osdi)
+    lines.extend(osdi_directives)
     lines.extend(saved)
     lines.append(
         f"dc VDS {vds.start:.17g} {vds.stop:.17g} {vds.step:.17g} "
