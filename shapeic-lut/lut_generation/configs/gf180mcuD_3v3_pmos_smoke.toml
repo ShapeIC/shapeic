@@ -38,6 +38,7 @@ geometry_unit_m = 1.0
 hierarchy = "m.xm1.m0"
 nf = 1
 capacitance_nf_mode = "linear"
+capacitance_convention = "signed_nodal"
 capacitance_nf_samples = [1, 2, 3, 4]
 
 [device.parameter_map]

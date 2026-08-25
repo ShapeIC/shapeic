@@ -40,6 +40,7 @@ finger_parameter = "ng"
 width_convention = "total"
 hierarchy = "n.xm1.nsg13_lv_pmos"
 nf = 1
+capacitance_convention = "compact_mutual"
 capacitance_nf_samples = [1, 2, 3, 4]
 
 [device.parameter_map]

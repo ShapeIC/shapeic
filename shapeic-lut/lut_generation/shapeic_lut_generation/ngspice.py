@@ -7,10 +7,12 @@ from pathlib import Path
 import numpy as np
 
 from .config import (
+    CapacitanceConvention,
     CapacitanceNfMode,
     EXTRINSIC_CAPACITANCE_PARAMETERS,
     GenerationConfig,
     MosTerminal,
+    MUTUAL_CAPACITANCE_PARAMETERS,
     SpiceDirectiveKind,
     sampled_parameter_name,
 )
@@ -108,7 +110,19 @@ def _simulate_nf_block(
         if not np.isfinite(values).all():
             raise RuntimeError(f"parameter '{parameter}' contains non-finite values")
         outputs[parameter] = values
-    return outputs
+    return normalize_capacitance_parameters(outputs, config.device.capacitance_convention)
+
+
+def normalize_capacitance_parameters(
+    outputs: dict[str, np.ndarray], convention: CapacitanceConvention
+) -> dict[str, np.ndarray]:
+    """Convert simulator capacitance outputs to ShapeIC's compact-mutual convention."""
+    normalized = dict(outputs)
+    if convention is CapacitanceConvention.SIGNED_NODAL:
+        for parameter in MUTUAL_CAPACITANCE_PARAMETERS:
+            if parameter in normalized:
+                normalized[parameter] = -normalized[parameter]
+    return normalized
 
 
 def _raw_column(parameter: str) -> str:

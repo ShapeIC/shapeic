@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shapeic_lut_generation.config import (
+    CapacitanceConvention,
     CapacitanceNfMode,
     MosTerminal,
     SpiceDirectiveKind,
@@ -170,6 +171,10 @@ step = 0.5e-6
                     self.assertEqual(
                         config.device.capacitance_nf_mode,
                         CapacitanceNfMode.SIMULATE,
+                    )
+                    self.assertEqual(
+                        config.device.capacitance_convention,
+                        CapacitanceConvention.COMPACT_MUTUAL,
                     )
                     self.assertEqual(config.device.parameter_map, expected_map)
                     self.assertEqual(config.simulator.parameters, PARAMETERS)

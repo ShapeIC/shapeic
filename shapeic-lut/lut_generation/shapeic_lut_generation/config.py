@@ -46,6 +46,7 @@ SUPPORTED_PARAMETERS = {
 
 EXTRINSIC_CAPACITANCE_PARAMETERS = ("cgsol", "cgdol", "cjs", "cjd")
 EXTRINSIC_CAPACITANCE_NF_SAMPLES = (1, 2, 3, 4)
+MUTUAL_CAPACITANCE_PARAMETERS = ("cgd", "cgs", "cdg", "cds", "csg", "csd")
 
 
 def sampled_parameter_name(parameter: str, nf: int) -> str:
@@ -152,6 +153,11 @@ class CapacitanceNfMode(str, Enum):
     LINEAR = "linear"
 
 
+class CapacitanceConvention(str, Enum):
+    COMPACT_MUTUAL = "compact_mutual"
+    SIGNED_NODAL = "signed_nodal"
+
+
 @dataclass(frozen=True)
 class DeviceConfig:
     name: str
@@ -167,6 +173,7 @@ class DeviceConfig:
     nf: int
     geometry_unit_m: float = 1.0
     capacitance_nf_mode: CapacitanceNfMode = CapacitanceNfMode.SIMULATE
+    capacitance_convention: CapacitanceConvention = CapacitanceConvention.COMPACT_MUTUAL
     capacitance_nf_samples: tuple[int, ...] = ()
 
     def native_parameter(self, canonical_name: str) -> str:
@@ -418,6 +425,7 @@ def _typed_device_config(
         "width_convention",
         "geometry_unit_m",
         "capacitance_nf_mode",
+        "capacitance_convention",
         "hierarchy",
         "parameter_map",
         "nf",
@@ -448,6 +456,13 @@ def _typed_device_config(
         device.get("capacitance_nf_mode", CapacitanceNfMode.SIMULATE.value),
         "device.capacitance_nf_mode",
     )
+    capacitance_convention = _enum_value(
+        CapacitanceConvention,
+        device.get(
+            "capacitance_convention", CapacitanceConvention.COMPACT_MUTUAL.value
+        ),
+        "device.capacitance_convention",
+    )
     raw_map = device.get("parameter_map")
     if not isinstance(raw_map, dict):
         raise ValueError("missing [device.parameter_map] table")
@@ -474,6 +489,7 @@ def _typed_device_config(
         nf=int(device.get("nf", 1)),
         geometry_unit_m=float(device.get("geometry_unit_m", 1.0)),
         capacitance_nf_mode=capacitance_nf_mode,
+        capacitance_convention=capacitance_convention,
         capacitance_nf_samples=_capacitance_nf_samples(device),
     )
 

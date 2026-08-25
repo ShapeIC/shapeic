@@ -34,6 +34,7 @@ geometry_unit_m = 1.0e-6
 hierarchy = "m.xm1.msky130_fd_pr__nfet_01v8"
 nf = 1
 capacitance_nf_mode = "linear"
+capacitance_convention = "signed_nodal"
 capacitance_nf_samples = [1, 2, 3, 4]
 
 [device.parameter_map]

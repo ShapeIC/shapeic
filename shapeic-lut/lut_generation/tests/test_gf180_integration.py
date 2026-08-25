@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from shapeic_lut_generation.config import (
+    CapacitanceConvention,
     CapacitanceNfMode,
     SpiceDirectiveKind,
     WidthConvention,
@@ -99,6 +100,10 @@ class Gf180IntegrationTests(unittest.TestCase):
                     self.assertEqual(
                         config.device.capacitance_nf_mode,
                         CapacitanceNfMode.LINEAR,
+                    )
+                    self.assertEqual(
+                        config.device.capacitance_convention,
+                        CapacitanceConvention.SIGNED_NODAL,
                     )
                     self.assertEqual(config.device.parameter_map, PARAMETER_MAP)
                     self.assertEqual(
