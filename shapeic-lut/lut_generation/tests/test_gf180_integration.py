@@ -127,10 +127,10 @@ class Gf180IntegrationTests(unittest.TestCase):
 
             np.testing.assert_allclose(
                 nmos.sweep.length,
-                np.asarray([0.28, 0.56, 1.12, 2.24, 4.48]) * 1.0e-6,
+                np.asarray([0.4, 0.8, 1.6, 3.2, 6.4]) * 1.0e-6,
             )
-            self.assertEqual(nmos.sweep.vgs.values().size, 33)
-            self.assertEqual(nmos.sweep.vds.values().size, 33)
+            self.assertEqual(nmos.sweep.vgs.values().size, 65)
+            self.assertEqual(nmos.sweep.vds.values().size, 65)
             self.assertEqual(nmos.sweep.vbs.values().size, 31)
             self.assertEqual(nmos.sweep.finger_width.values().size, 20)
             np.testing.assert_allclose(pmos.sweep.length, nmos.sweep.length)

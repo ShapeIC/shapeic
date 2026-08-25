@@ -62,17 +62,17 @@ cjs = "capbs"
 cjd = "capbd"
 
 [sweep]
-length = [0.28e-6, 0.56e-6, 1.12e-6, 2.24e-6, 4.48e-6]
+length = [0.4e-6, 0.8e-6, 1.6e-6, 3.2e-6, 6.4e-6]
 
 [sweep.vgs]
 start = 0.1
 stop = 3.3
-step = 0.1
+step = 0.05
 
 [sweep.vds]
 start = 0.1
 stop = 3.3
-step = 0.1
+step = 0.05
 
 [sweep.vbs]
 start = 0.0

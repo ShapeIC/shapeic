@@ -88,3 +88,20 @@ NGSpice, while their midpoint checks only validate multilinear interpolation.
 The GF180 references use the minimum configured length and finger width. A
 two-point smoke grid is not intended to certify interpolation accuracy between
 simulated points; that requires a separately validated production grid.
+
+## Full electrical LUT artifacts
+
+The checked non-smoke configurations are the source of truth for the full
+pre-layout electrical LUTs. Generation writes these external artifacts under
+`shapeic-lut/lut_generation/generated`:
+
+| PDK | Corner | Temperature | Device | Artifact |
+| --- | --- | ---: | --- | --- |
+| SKY130A | `tt` | 27 C | `sky130_fd_pr__nfet_01v8` | `sky130A_1v8_nmos_5d.npz` |
+| SKY130A | `tt` | 27 C | `sky130_fd_pr__pfet_01v8` | `sky130A_1v8_pmos_5d.npz` |
+| GF180MCU D | `typical` | 25 C | `nfet_03v3` | `gf180mcuD_3v3_nmos_5d.npz` |
+| GF180MCU D | `typical` | 25 C | `pfet_03v3` | `gf180mcuD_3v3_pmos_5d.npz` |
+
+These full LUTs are intentionally excluded from Git. Commit their TOML
+configurations, but distribute or regenerate the NPZ files separately. The
+smoke fixtures remain the small, portable regression artifacts.

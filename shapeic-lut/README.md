@@ -18,7 +18,7 @@ let model = table.model("sg13_lv_nmos")?;
 let point = OperatingPoint::new(0.4e-6, 0.0, 0.6, 0.6);
 
 let drain_current = model.query_parameter(&point, "id")?;
-let gmid = model.standard_expression(MosExpression::GmOverId)?;
+let gmid = model.standard_expression(MosExpression::Gmid)?;
 let gmid_value = model.query_expression(&point, &gmid)?;
 
 # let _ = (drain_current, gmid_value);
