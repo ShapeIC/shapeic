@@ -1,0 +1,84 @@
+[pdk]
+name = "gf180mcuD"
+revision = "026824c7969ce6f4fc9678e6ca04b0a06a596c4b"
+corner = "typical"
+nominal_voltage = 3.3
+
+[output]
+path = "../generated/gf180mcuD_3v3_nmos_smoke.npz"
+description = "GF180MCU D 3.3 V NMOS smoke LUT"
+
+[simulator]
+binary = "ngspice"
+temperature_c = 25.0
+workers = 1
+parameters = ["weff", "id", "vth", "vdsat", "gm", "gds", "cgg", "cgd", "cgs", "cdg", "cdd", "cds", "csg", "csd", "css", "cgsol", "cgdol", "cjs", "cjd"]
+
+[spice]
+
+[[spice.directives]]
+kind = "include"
+path = "libs.tech/ngspice/design.spice"
+
+[[spice.directives]]
+kind = "library"
+path = "libs.tech/ngspice/sm141064.spice"
+section = "typical"
+
+[device]
+name = "nfet_03v3"
+instance = "XM1"
+instance_kind = "subcircuit"
+terminals = ["d", "g", "s", "b"]
+length_parameter = "l"
+width_parameter = "w"
+finger_parameter = "nf"
+width_convention = "total"
+geometry_unit_m = 1.0
+hierarchy = "m.xm1.m0"
+nf = 1
+capacitance_nf_mode = "linear"
+capacitance_nf_samples = [1, 2, 3, 4]
+
+[device.parameter_map]
+weff = "weff"
+vth = "vth"
+vdsat = "vdsat"
+gm = "gm"
+gds = "gds"
+cgg = "cgg"
+cgd = "cgd"
+cgs = "cgs"
+cdg = "cdg"
+cdd = "cdd"
+cds = "cds"
+csg = "csg"
+csd = "csd"
+css = "css"
+cgsol = "cgso"
+cgdol = "cgdo"
+cjs = "capbs"
+cjd = "capbd"
+
+[sweep]
+length = [0.28e-6, 0.56e-6]
+
+[sweep.vgs]
+start = 0.8
+stop = 1.2
+step = 0.4
+
+[sweep.vds]
+start = 0.8
+stop = 1.2
+step = 0.4
+
+[sweep.vbs]
+start = 0.0
+stop = -0.1
+step = -0.1
+
+[sweep.finger_width]
+start = 0.22e-6
+stop = 0.72e-6
+step = 0.5e-6
