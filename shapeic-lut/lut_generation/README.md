@@ -69,3 +69,22 @@ OP capacitance matrix against individual G/D/S/B AC excitations at 1 MHz and
 failure when a 1% matrix/scaling gate is exceeded. Netlists, logs, raw files,
 parameter bindings, matrices, and `report.json` remain under
 `target/shapeic-electrical-probe/<timestamp>` on both success and failure.
+
+Add `--reference-output PATH` to write the deterministic portable subset of a
+passing probe. Existing references are protected unless `--force-reference` is
+also supplied. The committed SKY130 or GF180 smoke references can be reproduced
+by selecting the corresponding PDK:
+
+```text
+export PDK=sky130A # or gf180mcuD
+export SHAPEIC_RUN_EDA_TESTS=1
+cd shapeic-lut/lut_generation
+python -m unittest discover -s tests -p 'test_pdk_smoke_eda.py' -v
+```
+
+The SKY130 and GF180 smoke LUTs under `shapeic-lut/tests/fixtures` are portable
+functional fixtures. Their exact reference corners are checked against
+NGSpice, while their midpoint checks only validate multilinear interpolation.
+The GF180 references use the minimum configured length and finger width. A
+two-point smoke grid is not intended to certify interpolation accuracy between
+simulated points; that requires a separately validated production grid.

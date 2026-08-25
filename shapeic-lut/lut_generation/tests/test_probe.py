@@ -1,4 +1,8 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -9,6 +13,8 @@ from shapeic_lut_generation.probe import (
     charge_residual,
     intrinsic_matrix,
     matrix_relative_error,
+    ProbePoint,
+    write_golden_reference,
 )
 
 
@@ -79,6 +85,56 @@ class ProbeMatrixTests(unittest.TestCase):
         observed = np.eye(4)
         reference = observed * 1.01
         self.assertAlmostEqual(matrix_relative_error(reference, observed), 0.01)
+
+
+class GoldenReferenceTests(unittest.TestCase):
+    def test_writes_only_the_deterministic_portable_probe_subset(self):
+        config = SimpleNamespace(
+            pdk=SimpleNamespace(
+                name="sky130A", revision="revision", corner="tt"
+            ),
+            simulator=SimpleNamespace(temperature_c=27.0),
+            device=SimpleNamespace(
+                name="test_nmos",
+                capacitance_convention=CapacitanceConvention.SIGNED_NODAL,
+            ),
+        )
+        point = ProbePoint(0.3e-6, 0.42e-6, 0.0, 0.6, 0.6)
+        report = {
+            "status": "pass",
+            "frequencies_hz": [1.0e6, 1.0e7],
+            "nf_results": [
+                {
+                    "nf": 1,
+                    "canonical_parameters": {"id": 1.0e-6},
+                    "ac_capacitance_f": [np.eye(4).tolist(), np.eye(4).tolist()],
+                    "raw_parameters": {"native": 1.0},
+                    "status": "pass",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reference.json"
+            write_golden_reference(path, config, point, report)
+            reference = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(reference["format"], "shapeic-electrical-reference")
+            self.assertEqual(reference["version"], 1)
+            self.assertEqual(reference["pdk"], "sky130A")
+            self.assertEqual(reference["point"]["finger_width"], 0.42e-6)
+            self.assertNotIn("raw_parameters", reference["nf_results"][0])
+            with self.assertRaises(FileExistsError):
+                write_golden_reference(path, config, point, report)
+            write_golden_reference(path, config, point, report, force=True)
+
+    def test_rejects_a_failed_probe_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ValueError):
+                write_golden_reference(
+                    Path(temporary) / "reference.json",
+                    SimpleNamespace(),
+                    ProbePoint(1.0, 1.0, 0.0, 1.0, 1.0),
+                    {"status": "fail"},
+                )
 
 
 if __name__ == "__main__":

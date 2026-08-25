@@ -17,7 +17,7 @@ from .config import (
     MosTerminal,
     SpiceDirectiveKind,
 )
-from .ngspice import _parse_raw, normalize_capacitance_parameters
+from .ngspice import _parse_raw, _raw_column, normalize_capacitance_parameters
 
 
 TERMINALS = ("G", "D", "S", "B")
@@ -136,6 +136,49 @@ def run_probe(
     return root, report
 
 
+def write_golden_reference(
+    path: Path,
+    config: GenerationConfig,
+    point: ProbePoint,
+    report: dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    """Write the deterministic, portable subset of a successful probe report."""
+    if report.get("status") != "pass":
+        raise ValueError("a golden reference can only be written from a passing probe")
+    if path.exists() and not force:
+        raise FileExistsError(f"golden reference already exists: {path}")
+    pdk = config.pdk
+    reference = {
+        "format": "shapeic-electrical-reference",
+        "version": 1,
+        "device": config.device.name,
+        "pdk": None if pdk is None else pdk.name,
+        "pdk_revision": None if pdk is None else pdk.revision,
+        "corner": None if pdk is None else pdk.corner,
+        "temperature_c": config.simulator.temperature_c,
+        "capacitance_convention": config.device.capacitance_convention.value,
+        "point": {
+            "length": point.length,
+            "finger_width": point.finger_width,
+            "vbs": point.vbs,
+            "vgs": point.vgs,
+            "vds": point.vds,
+        },
+        "frequencies_hz": report["frequencies_hz"],
+        "nf_results": [
+            {
+                "nf": result["nf"],
+                "canonical_parameters": result["canonical_parameters"],
+                "ac_capacitance_f": result["ac_capacitance_f"],
+            }
+            for result in report["nf_results"]
+        ],
+    }
+    _write_json(path, reference)
+
+
 def intrinsic_matrix(values: dict[str, float]) -> np.ndarray:
     cgg, cgd, cgs, cdg, cdd, cds, csg, csd, css = (
         float(values[name]) for name in INTRINSIC_PARAMETERS
@@ -203,7 +246,7 @@ def _run_operating_point(
         column = f"i(shapeic_{parameter})" if parameter == "id" else f"shapeic_{parameter}"
         values[parameter] = _scalar_column(data, column)
     for optional in ("weff", "vth", "vdsat", "vdssat", "vsat"):
-        column = f"shapeic_{optional}"
+        column = _raw_column(optional)
         if column in (data.dtype.names or ()):
             values[optional] = _scalar_column(data, column)
     raw_values = dict(values)
@@ -269,7 +312,13 @@ def _operating_point_netlist(
             for instance in instance_names
         ]
         saved.extend(f"save {reference}" for reference in references)
-        expressions.append(f"let shapeic_{parameter} = {' + '.join(references)}")
+        aggregate = parameter in {
+            *SCALING_PARAMETERS,
+            *INTRINSIC_PARAMETERS,
+            *EXTRINSIC_CAPACITANCE_PARAMETERS,
+        }
+        expression = " + ".join(references) if aggregate else references[0]
+        expressions.append(f"let shapeic_{parameter} = {expression}")
         outputs.append(f"shapeic_{parameter}")
     devices = [_device_line(config, point, nf, native=True)] if native else [
         _device_line(config, point, 1, native=False, index=index)
