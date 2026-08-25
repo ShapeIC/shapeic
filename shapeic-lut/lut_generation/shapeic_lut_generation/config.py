@@ -147,6 +147,11 @@ class WidthConvention(str, Enum):
     PER_FINGER = "per_finger"
 
 
+class CapacitanceNfMode(str, Enum):
+    SIMULATE = "simulate"
+    LINEAR = "linear"
+
+
 @dataclass(frozen=True)
 class DeviceConfig:
     name: str
@@ -160,6 +165,8 @@ class DeviceConfig:
     hierarchy: str
     parameter_map: dict[str, str]
     nf: int
+    geometry_unit_m: float = 1.0
+    capacitance_nf_mode: CapacitanceNfMode = CapacitanceNfMode.SIMULATE
     capacitance_nf_samples: tuple[int, ...] = ()
 
     def native_parameter(self, canonical_name: str) -> str:
@@ -168,10 +175,13 @@ class DeviceConfig:
         except KeyError as error:
             raise ValueError(f"missing native mapping for parameter '{canonical_name}'") from error
 
+    def spice_length(self, length: float) -> float:
+        return length / self.geometry_unit_m
+
     def spice_width(self, finger_width: float, nf: int) -> float:
         if self.width_convention is WidthConvention.TOTAL:
-            return finger_width * nf
-        return finger_width
+            finger_width *= nf
+        return finger_width / self.geometry_unit_m
 
 
 @dataclass(frozen=True)
@@ -406,6 +416,8 @@ def _typed_device_config(
         "width_parameter",
         "finger_parameter",
         "width_convention",
+        "geometry_unit_m",
+        "capacitance_nf_mode",
         "hierarchy",
         "parameter_map",
         "nf",
@@ -431,6 +443,11 @@ def _typed_device_config(
         _required_nonempty_string(device, "width_convention", "device"),
         "device.width_convention",
     )
+    capacitance_nf_mode = _enum_value(
+        CapacitanceNfMode,
+        device.get("capacitance_nf_mode", CapacitanceNfMode.SIMULATE.value),
+        "device.capacitance_nf_mode",
+    )
     raw_map = device.get("parameter_map")
     if not isinstance(raw_map, dict):
         raise ValueError("missing [device.parameter_map] table")
@@ -455,6 +472,8 @@ def _typed_device_config(
         hierarchy=_required_nonempty_string(device, "hierarchy", "device"),
         parameter_map=parameter_map,
         nf=int(device.get("nf", 1)),
+        geometry_unit_m=float(device.get("geometry_unit_m", 1.0)),
+        capacitance_nf_mode=capacitance_nf_mode,
         capacitance_nf_samples=_capacitance_nf_samples(device),
     )
 
@@ -625,6 +644,8 @@ def _validate_config(config: GenerationConfig) -> None:
     }
     if len(geometry_parameters) != 3:
         raise ValueError("length, width and finger parameter names must be distinct")
+    if not math.isfinite(device.geometry_unit_m) or device.geometry_unit_m <= 0.0:
+        raise ValueError("device.geometry_unit_m must be positive and finite")
 
     expected_mappings = set(simulator.parameters) - {"id"}
     actual_mappings = set(device.parameter_map)
@@ -644,6 +665,8 @@ def _validate_config(config: GenerationConfig) -> None:
         _validate_spice_token(native, f"device.parameter_map.{canonical}")
 
     samples = device.capacitance_nf_samples
+    if device.capacitance_nf_mode is not CapacitanceNfMode.SIMULATE and not samples:
+        raise ValueError("device.capacitance_nf_mode requires capacitance_nf_samples")
     if samples:
         if samples != EXTRINSIC_CAPACITANCE_NF_SAMPLES:
             raise ValueError(

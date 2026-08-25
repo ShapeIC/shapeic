@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import (
+    CapacitanceNfMode,
     EXTRINSIC_CAPACITANCE_PARAMETERS,
     GenerationConfig,
     MosTerminal,
@@ -35,15 +36,21 @@ def simulate_block(
         for nf in config.device.capacitance_nf_samples:
             if nf == config.device.nf:
                 continue
-            sampled = _simulate_nf_block(
-                config,
-                length,
-                vbs,
-                finger_width,
-                nf,
-                EXTRINSIC_CAPACITANCE_PARAMETERS,
-                root,
-            )
+            if config.device.capacitance_nf_mode is CapacitanceNfMode.LINEAR:
+                sampled = {
+                    parameter: outputs[parameter] * np.float32(nf)
+                    for parameter in EXTRINSIC_CAPACITANCE_PARAMETERS
+                }
+            else:
+                sampled = _simulate_nf_block(
+                    config,
+                    length,
+                    vbs,
+                    finger_width,
+                    nf,
+                    EXTRINSIC_CAPACITANCE_PARAMETERS,
+                    root,
+                )
             outputs.update(
                 (sampled_parameter_name(parameter, nf), values)
                 for parameter, values in sampled.items()
@@ -158,6 +165,7 @@ def _netlist(
         MosTerminal.BULK: "NB",
     }
     instance_nodes = " ".join(nodes[terminal] for terminal in device.terminals)
+    spice_length = device.spice_length(length)
     spice_width = device.spice_width(finger_width, nf)
     lines = [
         "* Shapeic five-dimensional LUT generation",
@@ -167,7 +175,7 @@ def _netlist(
         "VDS ND 0 DC=0",
         (
             f"{device.instance} {instance_nodes} {device.name} "
-            f"{device.length_parameter}={length:.17g} "
+            f"{device.length_parameter}={spice_length:.17g} "
             f"{device.width_parameter}={spice_width:.17g} "
             f"{device.finger_parameter}={nf}"
         ),

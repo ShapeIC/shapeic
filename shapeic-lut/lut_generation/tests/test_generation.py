@@ -97,6 +97,7 @@ step = 1.0
         instance: str = "XM1",
         instance_kind: str = "subcircuit",
         terminals: str = '["d", "g", "s", "b"]',
+        geometry_unit_m: str = "1.0",
         parameter_map: str = 'gm = "gm_native"',
     ) -> Path:
         config_path = root / "typed.toml"
@@ -130,6 +131,7 @@ length_parameter = "L"
 width_parameter = "W"
 finger_parameter = "nf"
 width_convention = "per_finger"
+geometry_unit_m = {geometry_unit_m}
 hierarchy = "n.xm1.m0"
 nf = 1
 
@@ -378,6 +380,7 @@ path = "models/model.osdi"
                 ),
             )
             self.assertEqual(config.device.parameter_map, {"gm": "gm_native"})
+            self.assertEqual(config.device.geometry_unit_m, 1.0)
 
             netlist = _netlist(config, 1.0, 0.25, 2.0, 4, ("id", "gm"), root / "raw")
             include = f".include '{pdk / 'models/design.spice'}'"
@@ -448,6 +451,8 @@ section = "tt"
             cases = [
                 ({"terminals": '["d", "g", "s", "s"]'}, "exactly once"),
                 ({"instance": "MM1"}, "must start with 'X'"),
+                ({"geometry_unit_m": "0.0"}, "positive and finite"),
+                ({"geometry_unit_m": "nan"}, "positive and finite"),
                 ({"parameter_map": ""}, "does not match parameters"),
             ]
             for arguments, message in cases:
@@ -476,6 +481,40 @@ section = "tt"
             self.assertEqual(config.device.instance_kind, SpiceInstanceKind.MODEL)
             netlist = _netlist(config, 1.0, 0.0, 2.0, 3, ("gm",), root / "raw")
             self.assertIn("M1 ND NG 0 NB test_nmos L=1 W=2 nf=3", netlist)
+
+    def test_converts_si_geometry_to_the_device_spice_unit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._typed_pdk(root)
+            config_path = self._write_typed_config(
+                root,
+                """[[spice.directives]]
+kind = "library"
+path = "models/models.lib"
+section = "tt"
+""",
+                geometry_unit_m="1.0e-6",
+            )
+            with self._typed_environment(root):
+                config = load_config(config_path)
+
+            netlist = _netlist(
+                config,
+                0.6e-6,
+                0.0,
+                0.42e-6,
+                4,
+                ("gm",),
+                root / "raw",
+            )
+            self.assertEqual(config.device.geometry_unit_m, 1.0e-6)
+            spice_length = 0.6e-6 / 1.0e-6
+            spice_width = 0.42e-6 / 1.0e-6
+            self.assertIn(
+                f"XM1 ND NG 0 NB test_nmos L={spice_length:.17g} "
+                f"W={spice_width:.17g} nf=4",
+                netlist,
+            )
 
 
 class WriterTests(unittest.TestCase):
