@@ -1,3 +1,9 @@
+[pdk]
+name = "ihp-sg13g2"
+revision = "22f2a25f1734796de3debbbf29cf697cbbc54081"
+corner = "mos_tt"
+nominal_voltage = 1.2
+
 [output]
 path = "../generated/ihp_sg13g2_lv_pmos_5d.npz"
 description = "IHP SG13G2 LV PMOS five-dimensional LUT"
@@ -6,20 +12,55 @@ description = "IHP SG13G2 LV PMOS five-dimensional LUT"
 binary = "ngspice"
 temperature_c = 27.0
 workers = 4
-model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
-library_section = "mos_tt"
-osdi_paths = [
-  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
-  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
-]
 parameters = ["weff", "id", "vth", "vsat", "gm", "gds", "cgg", "cgd", "cgs", "cdg", "cdd", "cds", "csg", "csd", "css", "cgsol", "cgdol", "cjs", "cjd"]
+
+[spice]
+
+[[spice.directives]]
+kind = "library"
+path = "libs.tech/ngspice/models/cornerMOSlv.lib"
+section = "mos_tt"
+
+[[spice.directives]]
+kind = "osdi"
+path = "libs.tech/ngspice/osdi/psp103.osdi"
+
+[[spice.directives]]
+kind = "osdi"
+path = "libs.tech/ngspice/osdi/psp103_nqs.osdi"
 
 [device]
 name = "sg13_lv_pmos"
 instance = "XM1"
+instance_kind = "subcircuit"
+terminals = ["d", "g", "s", "b"]
+length_parameter = "l"
+width_parameter = "w"
+finger_parameter = "ng"
+width_convention = "total"
 hierarchy = "n.xm1.nsg13_lv_pmos"
 nf = 1
 capacitance_nf_samples = [1, 2, 3, 4]
+
+[device.parameter_map]
+weff = "weff"
+vth = "vth"
+vsat = "vsat"
+gm = "gm"
+gds = "gds"
+cgg = "cgg"
+cgd = "cgd"
+cgs = "cgs"
+cdg = "cdg"
+cdd = "cdd"
+cds = "cds"
+csg = "csg"
+csd = "csd"
+css = "css"
+cgsol = "cgsol"
+cgdol = "cgdol"
+cjs = "cjs"
+cjd = "cjd"
 
 [sweep]
 length = [0.4e-6, 0.8e-6, 1.6e-6, 3.2e-6, 6.4e-6]
