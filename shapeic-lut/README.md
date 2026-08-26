@@ -156,6 +156,12 @@ one `.op`, enable `wr_vecnames` and `wr_singlescale`, and write exactly one
 named data row with `wrdata`. Reference names must match its column names
 exactly; extra simulated columns are ignored.
 
+For multi-device verification, declare per-candidate placeholders with
+`VerificationConfig::dynamic_template_variable` and assign each one through
+`VerificationInput::dynamic_template_variable`. Every input must provide
+exactly the declared set; reserved, missing, unexpected, or static/dynamic
+conflicting names are rejected before NGSpice runs.
+
 `width` is the explicit total width, `nf` is the positive integer number of
 fingers, and `length` comes from `OperatingPoint`. The engine renders `width`
 and `nf` directly without dividing or reinterpreting them. When

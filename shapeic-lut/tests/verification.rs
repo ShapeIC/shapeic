@@ -35,6 +35,7 @@ fn engine_compares_manual_values_and_continues_after_ngspice_failure() {
             "VGS {{vgs}}\n",
             "VDS {{vds}}\n",
             "NF {{nf}}\n",
+            "PMOS_WIDTH {{pmos_width}}\n",
             "RESULTS {{results_path}}\n",
         ),
     )
@@ -58,7 +59,8 @@ fn engine_compares_manual_values_and_continues_after_ngspice_failure() {
     fs::set_permissions(&simulator, permissions).expect("permissions");
 
     let output = root.join("output");
-    let mut config = VerificationConfig::new(&template, &output);
+    let mut config =
+        VerificationConfig::new(&template, &output).dynamic_template_variable("pmos_width");
     config.ngspice = simulator;
     config.max_width_per_finger = Some(10.0);
     let engine = VerificationEngine::new(config).expect("engine");
@@ -68,17 +70,20 @@ fn engine_compares_manual_values_and_continues_after_ngspice_failure() {
         .reference("gm", 16.0)
         .reference("gds", 2.0)
         .reference("gm_id", 4.0)
-        .reference("jd", 4.25);
+        .reference("jd", 4.25)
+        .dynamic_template_variable("pmos_width", "5e-6");
     let width_override = VerificationInput::new(point, 3.0, 7)
         .reference("id", 8.5)
         .reference("gm", 16.0)
         .reference("gds", 2.0)
-        .reference("gm_id", 1.8823529411764706);
+        .reference("gm_id", 1.8823529411764706)
+        .dynamic_template_variable("pmos_width", "7e-6");
     let failed = VerificationInput::new(OperatingPoint::new(1.0, -1.0, 0.0, 0.5), 4.0, 2)
         .reference("id", 1.0)
         .reference("gm", 2.0)
         .reference("gds", 3.0)
-        .reference("gm_id", 2.0);
+        .reference("gm_id", 2.0)
+        .dynamic_template_variable("pmos_width", "9e-6");
     let inputs = [input, width_override, failed];
     let report = engine.verify(&inputs).expect("report");
 
@@ -119,6 +124,7 @@ fn engine_compares_manual_values_and_continues_after_ngspice_failure() {
     assert!(overridden_netlist.contains("WIDTH 3.00000000000000000e0"));
     assert!(overridden_netlist.contains("LENGTH 2.00000000000000000e0"));
     assert!(overridden_netlist.contains("NF 7"));
+    assert!(overridden_netlist.contains("PMOS_WIDTH 7e-6"));
     assert!(report.runs[2].artifact_dir.join("netlist.spice").is_file());
     assert!(report.runs[2].artifact_dir.join("ngspice.log").is_file());
     assert!(!report.runs[2].artifact_dir.join("results.tsv").exists());
@@ -141,7 +147,8 @@ fn engine_compares_manual_values_and_continues_after_ngspice_failure() {
     single_config.output_dir = root.join("single-output");
     let single_input = VerificationInput::new(point, 2.0, 1)
         .reference("id", 8.5)
-        .reference("vth", 0.3);
+        .reference("vth", 0.3)
+        .dynamic_template_variable("pmos_width", "5e-6");
     let single_report = VerificationEngine::new(single_config)
         .expect("single engine")
         .verify_one(&single_input)
@@ -191,6 +198,28 @@ fn rejects_invalid_manual_inputs_before_creating_output() {
     let invalid_config =
         VerificationConfig::new(&template, root.join("invalid-config")).max_width_per_finger(0.0);
     assert!(VerificationEngine::new(invalid_config).is_err());
+
+    let dynamic = VerificationEngine::new(
+        VerificationConfig::new(&template, root.join("dynamic-output"))
+            .dynamic_template_variable("pmos_width"),
+    )
+    .expect("dynamic engine");
+    let missing_dynamic =
+        VerificationInput::new(OperatingPoint::new(1.0e-6, 0.0, 1.0, 1.0), 1.0e-6, 1)
+            .reference("id", 1.0);
+    assert!(dynamic.verify_one(&missing_dynamic).is_err());
+    let unexpected_dynamic = missing_dynamic
+        .clone()
+        .dynamic_template_variable("unexpected", "1");
+    assert!(dynamic.verify_one(&unexpected_dynamic).is_err());
+
+    let conflict = VerificationConfig::new(&template, root.join("conflict"))
+        .template_variable("pmos_width", "1")
+        .dynamic_template_variable("pmos_width");
+    assert!(VerificationEngine::new(conflict).is_err());
+    let invalid_name = VerificationConfig::new(&template, root.join("invalid-name"))
+        .dynamic_template_variable("pmos-width");
+    assert!(VerificationEngine::new(invalid_name).is_err());
     fs::remove_dir_all(root).expect("cleanup");
 }
 

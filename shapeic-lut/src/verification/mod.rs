@@ -5,7 +5,7 @@ mod error;
 mod table;
 mod template;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -21,6 +21,7 @@ pub struct VerificationInput {
     pub width: f64,
     pub nf: u32,
     pub reference_values: BTreeMap<String, f64>,
+    pub dynamic_template_variables: BTreeMap<String, String>,
 }
 
 impl VerificationInput {
@@ -30,6 +31,7 @@ impl VerificationInput {
             width,
             nf,
             reference_values: BTreeMap::new(),
+            dynamic_template_variables: BTreeMap::new(),
         }
     }
 
@@ -42,6 +44,17 @@ impl VerificationInput {
         self.reference_values = values;
         self
     }
+
+    /// Assigns one template variable whose name was declared by the configuration.
+    pub fn dynamic_template_variable(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.dynamic_template_variables
+            .insert(name.into(), value.into());
+        self
+    }
 }
 
 /// Files and template values used by a verification run.
@@ -52,6 +65,7 @@ pub struct VerificationConfig {
     pub output_dir: PathBuf,
     pub max_width_per_finger: Option<f64>,
     pub template_variables: BTreeMap<String, String>,
+    pub dynamic_template_variables: BTreeSet<String>,
     pub environment: BTreeMap<OsString, OsString>,
 }
 
@@ -63,12 +77,19 @@ impl VerificationConfig {
             output_dir: output_dir.into(),
             max_width_per_finger: None,
             template_variables: BTreeMap::new(),
+            dynamic_template_variables: BTreeSet::new(),
             environment: BTreeMap::new(),
         }
     }
 
     pub fn template_variable(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.template_variables.insert(name.into(), value.into());
+        self
+    }
+
+    /// Declares one template variable that every verification input must assign.
+    pub fn dynamic_template_variable(mut self, name: impl Into<String>) -> Self {
+        self.dynamic_template_variables.insert(name.into());
         self
     }
 
