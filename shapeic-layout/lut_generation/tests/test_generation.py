@@ -35,6 +35,10 @@ from shapeic_layout_generation.device_correction import (
 )
 from shapeic_layout_generation.extractor import parse_rc_spice, write_magic_pex
 from shapeic_layout_generation.generator import _generate_primitive, generate
+from shapeic_layout_generation.macro_pex import (
+    prepare_macro_pex,
+    validate_macro_pex,
+)
 from shapeic_layout_generation.ota_pex import (
     normalize_bulk_nodes,
     prepare_ota_pex,
@@ -45,7 +49,6 @@ from shapeic_layout_generation.pcell import (
     IHP_TAP_SIZE_UM,
     _ihp_mos_device,
     _wire,
-    write_ota_gds,
     write_primitive_gds,
 )
 from shapeic_layout_generation.reducer import reduce_first_order
@@ -53,6 +56,45 @@ from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
+    def test_prepares_a_generic_cellkit_macro_pex(self) -> None:
+        spice = """.subckt macro OUT IN VDD VSS
+X1 OUT IN VSS VSS nmos w=1u l=0.4u
+R1 OUT n1 10
+C1 n1 VSS 2f
+.ends macro
+"""
+        technology = SimpleNamespace(
+            normalize_macro_pex=lambda text, macro, bulk_ports: text.replace(
+                "nmos", f"{macro}_nmos"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "raw.spice"
+            output = Path(directory) / "normalized.spice"
+            source.write_text(spice, encoding="utf-8")
+
+            topology = prepare_macro_pex(
+                source,
+                output,
+                macro_name="amplifier",
+                port_order=("OUT", "IN", "VDD", "VSS"),
+                technology=technology,
+                bulk_ports={"nmos": "VSS"},
+                expected_subcircuit="macro",
+            )
+
+            self.assertIn("amplifier_nmos", output.read_text(encoding="utf-8"))
+            self.assertEqual(topology.transistor_count, 1)
+            self.assertEqual(topology.resistor_count, 1)
+            self.assertEqual(topology.capacitor_count, 1)
+
+    def test_generic_macro_pex_rejects_a_wrong_port_order(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ports must be"):
+            validate_macro_pex(
+                ".subckt macro IN OUT\nM1 OUT IN 0 0 nmos\n.ends macro\n",
+                ("OUT", "IN"),
+            )
+
     def test_cellkit_device_adapter_derives_topology_and_prepares_netlists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -947,20 +989,27 @@ vds = [0.5]
         importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
         "requires the optional IHP layout backend",
     )
-    def test_ihp_full_ota_pcell_generates_six_port_layout(self) -> None:
+    def test_ihp_cellkit_ota_macro_generates_six_port_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             os.environ.setdefault("MPLCONFIGDIR", directory)
             output = Path(directory) / "ota.gds"
-            name = write_ota_gds(
-                1.0e-6,
-                10.0e-6,
-                20,
-                1.2e-6,
-                10.0e-6,
-                20,
-                output,
+            pdk_root = Path(directory) / "pdks"
+            rcfile = pdk_root / "ihp-sg13g2/libs.tech/magic/ihp-sg13g2.magicrc"
+            rcfile.parent.mkdir(parents=True)
+            rcfile.write_text("", encoding="ascii")
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "ihp-sg13g2")
+            rendered = cellkit.catalog.macro_layout("ota_4t").render(
+                {
+                    "xdp": cellkit.geometry(1.0e-6, 10.0e-6, 20),
+                    "xcm": cellkit.geometry(1.2e-6, 10.0e-6, 20),
+                }
             )
-            self.assertTrue(name.startswith("ota_4t"))
+            rendered.component.write_gds(output)
+            self.assertTrue(rendered.cell_name.startswith("ota_4t"))
+            self.assertEqual(
+                rendered.port_order,
+                ("VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"),
+            )
             self.assertGreater(output.stat().st_size, 0)
 
     @unittest.skipUnless(
@@ -1010,18 +1059,18 @@ vds = [0.5]
             root = Path(directory)
             os.environ.setdefault("MPLCONFIGDIR", directory)
             gds = root / "ota.gds"
-            cell_name = write_ota_gds(
-                0.8e-6,
-                9.0e-6,
-                2,
-                0.4e-6,
-                5.0e-6,
-                1,
-                gds,
+            pdk_root = Path(os.environ["PDK_ROOT"])
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, os.environ["PDK"])
+            rendered = cellkit.catalog.macro_layout("ota_4t").render(
+                {
+                    "xdp": cellkit.geometry(0.8e-6, 9.0e-6, 2),
+                    "xcm": cellkit.geometry(0.4e-6, 5.0e-6, 1),
+                }
             )
+            rendered.component.write_gds(gds)
             extracted = write_magic_pex(
                 gds,
-                cell_name,
+                rendered.cell_name,
                 magic_binary=magic,
                 magic_rcfile=rcfile,
                 work_directory=root / "magic",
