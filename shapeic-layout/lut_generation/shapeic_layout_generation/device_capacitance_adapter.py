@@ -25,7 +25,6 @@ class DeviceCapacitanceAdapter(Protocol):
 
     name: str
     physical: GenerationConfig
-    simulator: SimulatorConfig
     workers: int
 
     @property

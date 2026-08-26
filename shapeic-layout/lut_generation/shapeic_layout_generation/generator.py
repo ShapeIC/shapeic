@@ -15,7 +15,6 @@ from .device_correction import (
     synthetic_device_correction,
 )
 from .extractor import extract_primitive
-from .pcell import write_primitive_gds
 from .synthetic import primitive_matrices
 from .writer import write_archive
 
@@ -118,23 +117,19 @@ def _generate_primitive(
                     gds_path = point_root / "layout.gds"
                     layout = config.primitive_layout(primitive)
                     if layout is None:
-                        cell_name = write_primitive_gds(
-                            primitive,
-                            float(length),
-                            float(finger_width),
-                            nf,
-                            gds_path,
+                        raise ValueError(
+                            "Magic generation requires a CellKit PCell for "
+                            f"'{primitive}'"
                         )
-                    else:
-                        assert config.cellkit is not None
-                        rendered = layout.render(
-                            config.cellkit.geometry(
-                                float(length), float(finger_width), nf
-                            )
+                    assert config.cellkit is not None
+                    rendered = layout.render(
+                        config.cellkit.geometry(
+                            float(length), float(finger_width), nf
                         )
-                        gds_path.parent.mkdir(parents=True, exist_ok=True)
-                        rendered.component.write_gds(gds_path)
-                        cell_name = rendered.cell_name
+                    )
+                    gds_path.parent.mkdir(parents=True, exist_ok=True)
+                    rendered.component.write_gds(gds_path)
+                    cell_name = rendered.cell_name
                     assert config.extractor.magic_rcfile is not None
                     extracted = extract_primitive(
                         gds_path,
@@ -149,6 +144,18 @@ def _generate_primitive(
                             config.cellkit.technology.normalize_pex
                             if config.cellkit is not None
                             else None
+                        ),
+                        pex_validator=(
+                            lambda text, subcircuit, layout=layout, primitive=primitive: (
+                                config.cellkit.technology.validate_primitive_pex(
+                                    text,
+                                    primitive,
+                                    layout.polarity,
+                                    layout.port_order,
+                                    layout.branches,
+                                    subcircuit,
+                                )
+                            )
                         ),
                         work_directory=point_root,
                         primitive=primitive,

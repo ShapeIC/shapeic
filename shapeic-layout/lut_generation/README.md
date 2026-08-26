@@ -5,7 +5,7 @@ This directory generates the separate physical LUT consumed by the
 a reduced port conductance matrix and capacitance matrix. Values in TOML are in
 micrometers; the NPZ axes use meters, siemens, and farads.
 
-The fixed first experiment contains:
+The IHP reference configuration contains:
 
 - `simplediffpair`: `DP, DN, GP, GN, S, B`
 - `currentmirror`: `DOUT, DREF, S, B`
@@ -19,7 +19,7 @@ Generate the deterministic smoke LUT without external EDA tools:
 python3 generate.py configs/ihp_sg13g2_ota_smoke.toml --force
 ```
 
-For real extraction, install the runtime dependencies and the pinned IHP PDK:
+For real IHP extraction, install the runtime dependencies and the pinned PDK:
 
 ```sh
 python3 -m pip install -r requirements-ihp.txt
@@ -28,11 +28,12 @@ python3 -m pip install --no-deps ihp-gdsfactory==2.0.0
 
 The separate `--no-deps` step avoids the unresolved `gdsfactoryplus` /
 `vlsirtools` dependency while retaining every package used by this generator.
-Install Magic, set `IHP_PDK_ROOT`, and use
-`configs/ihp_sg13g2_ota.toml`. The expected rcfile is
-`${IHP_PDK_ROOT}/libs.tech/magic/ihp-sg13g2.magicrc`.
+Install Magic, set `PDK_ROOT` and `PDK=ihp-sg13g2`, and use
+`configs/ihp_sg13g2_ota.toml`. ShapeIC resolves the technology and its Magic
+rcfile through `shapeic-cellkit`; `shapeic-layout` does not install the PDK or
+contain an IHP PCell fallback.
 
-The PCell backend validates `Wf` as the per-finger width, then passes
+The IHP CellKit provider validates `Wf` as the per-finger width, then passes
 `width=Wf*nf` to the IHP MOS geometry core because its `width` argument is total
 device width. It uses fixed minimum-size `0.78 um` substrate and well taps.
 Every source/drain diffusion column and every gate finger is connected to an
@@ -68,12 +69,11 @@ The resulting matrices contain only local primitive interconnect parasitics.
 Inter-primitive routing and signoff extraction are intentionally outside this
 first layout-aware stage.
 
-`generate_ota_pex.py` is the separate verification path. It places and routes
-one complete OTA from the same primitive PCells, preserves Magic's flattened
-transistor-level PEX, maps NMOS substrate nodes to `VSS` and PMOS well nodes to
-`VDD`, and rejects an extracted topology that does not match the six ports
-`VOUT,VINP,VINN,IBIAS,VDD,VSS`. The Rust
-`ota_4t_physical_verification` example invokes this helper automatically.
+`generate_macro_pex.py` is the generic macro extraction path. It resolves the
+macro topology, PCell, ports, bulk bindings and technology normalization from
+CellKit, then preserves Magic's flattened transistor-level PEX.
+`generate_ota_pex.py` is a compatibility wrapper for the `ota_4t` macro; the
+Rust `ota_4t_physical_verification` example invokes it automatically.
 The complete OTA lifts its two drain nets to Metal2 with direct Via1 geometry;
 this keeps the inter-primitive routes from crossing the local Metal1 gate and
 source buses.

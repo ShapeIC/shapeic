@@ -17,7 +17,6 @@ from shapeic_layout_generation.device_capacitance import (
     Admittance,
     Bias,
     Geometry,
-    SimulatorConfig,
 )
 from shapeic_layout_generation.device_capacitance_study import (
     Acceptance,
@@ -32,9 +31,6 @@ from shapeic_layout_generation.device_capacitance_study import (
     load_study_config,
     multilinear_interpolate,
     run_study,
-)
-from shapeic_layout_generation.ihp_device_capacitance import (
-    IhpSg13g2DeviceCapacitanceAdapter,
 )
 
 
@@ -141,78 +137,37 @@ work_directory = "{root / 'work'}"
                 self._study_toml(physical, root / "output"),
                 encoding="ascii",
             )
-            config = load_study_config(study)
-        self.assertEqual(config.adapter.name, "ihp-sg13g2")
-        self.assertEqual(
-            config.adapter.definition("simplediffpair").model,
-            "sg13_lv_nmos",
-        )
-        self.assertEqual(config.adapter.simulator.frequencies_hz, (1.0e6, 1.0e7))
-        self.assertEqual(config.stage_two.finger_counts, (1, 3))
-
-    def test_ihp_adapter_preserves_original_and_derived_netlists(self) -> None:
-        simulator = SimulatorConfig(
-            binary="ngspice",
-            model_library=Path("/model.lib"),
-            library_section="mos_tt",
-            osdi_paths=(),
-            temperature_c=27.0,
-            frequencies_hz=(1.0e6, 1.0e7),
-        )
-        physical = SimpleNamespace(
-            extractor=SimpleNamespace(
-                magic_rcfile=Path("/magicrc"),
-                magic_binary="magic",
+            adapter = SimpleNamespace(
+                name="test-pdk",
+                primitives=("simplediffpair", "currentmirror"),
+                workers=2,
+                definition=lambda primitive: SimpleNamespace(model=primitive),
+                simulator_for=lambda primitive: SimpleNamespace(
+                    frequencies_hz=(1.0e6, 1.0e7)
+                ),
             )
-        )
-        adapter = IhpSg13g2DeviceCapacitanceAdapter(
-            physical,  # type: ignore[arg-type]
-            simulator,
-            workers=1,
-        )
-        raw = (
-            ".subckt diff DP DN GP GN S B\n"
-            "X1 DP GP S substrate sg13_lv_nmos w=1u l=0.4u ad=2p\n"
-            "X2 DN GN S substrate sg13_lv_nmos w=1u l=0.4u\n"
-            "R1 DP x 1\n"
-            ".ends diff\n"
-        )
-
-        def fake_gds(_primitive, _length, _wf, _nf, path):
-            path.touch()
-            return "diff"
-
-        def fake_magic(*_arguments, work_directory, **_keywords):
-            work_directory.mkdir(parents=True)
-            path = work_directory / "raw.spice"
-            path.write_text(raw, encoding="ascii")
-            return SimpleNamespace(spice_path=path, subcircuit_name="diff")
-
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory)
             with (
                 patch(
-                    "shapeic_layout_generation.ihp_device_capacitance."
-                    "write_primitive_gds",
-                    side_effect=fake_gds,
+                    "shapeic_layout_generation.device_capacitance_study.load_config",
+                    return_value=SimpleNamespace(),
                 ),
                 patch(
-                    "shapeic_layout_generation.ihp_device_capacitance.write_magic_pex",
-                    side_effect=fake_magic,
+                    "shapeic_layout_generation.device_capacitance_study."
+                    "CellKitDeviceCapacitanceAdapter",
+                    return_value=adapter,
                 ),
             ):
-                prepared = adapter.prepare_geometry(
-                    "simplediffpair",
-                    Geometry(0.4e-6, 1.0e-6, 1),
-                    output,
-                )
-            original = (output / "primitive.pex.spice").read_text(encoding="ascii")
-            mos_only = prepared.pex_path.read_text(encoding="ascii")
-            aggregate = prepared.aggregate_path.read_text(encoding="ascii")
-        self.assertEqual(original, raw)
-        self.assertIn("X1 DP GP S B sg13_lv_nmos", mos_only)
-        self.assertNotIn("R1", mos_only)
-        self.assertIn("w=9.99999999999999955e-07 ng=1", aggregate)
+                config = load_study_config(study)
+        self.assertEqual(config.adapter.name, "test-pdk")
+        self.assertEqual(
+            config.adapter.definition("simplediffpair").model,
+            "simplediffpair",
+        )
+        self.assertEqual(
+            config.adapter.simulator_for("simplediffpair").frequencies_hz,
+            (1.0e6, 1.0e7),
+        )
+        self.assertEqual(config.stage_two.finger_counts, (1, 3))
 
     def test_failure_keeps_machine_readable_and_human_readable_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -221,8 +176,12 @@ work_directory = "{root / 'work'}"
             class FailingAdapter:
                 name = "ihp-sg13g2"
                 physical = SimpleNamespace(source_path=Path("/physical.toml"))
-                simulator = SimpleNamespace(frequencies_hz=(1.0e6, 1.0e7))
+                primitives = ("simplediffpair",)
                 workers = 1
+
+                @staticmethod
+                def simulator_for(_primitive):
+                    return SimpleNamespace(frequencies_hz=(1.0e6, 1.0e7))
 
                 @staticmethod
                 def validate_environment() -> None:

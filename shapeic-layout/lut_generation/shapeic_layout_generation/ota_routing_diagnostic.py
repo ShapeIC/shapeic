@@ -1,3 +1,5 @@
+"""Historical IHP OTA diagnostic; not part of physical LUT generation."""
+
 from __future__ import annotations
 
 import csv
@@ -8,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import PORTS, GenerationConfig, load_config
+from .config import GenerationConfig, load_config
 from .device_capacitance import Geometry, relative_matrix_error
 from .device_correction import create_device_correction_adapter
 from .device_correction_diagnostic import (
@@ -290,7 +292,7 @@ def _characterize_local_interconnect(
             f"adapter did not preserve raw primitive PEX: {raw_path}"
         )
     raw = raw_path.read_text(encoding="utf-8")
-    ports = PORTS[primitive]
+    ports = config.port_order(primitive)
     floating = reduce_explicit_interconnect(raw, ports)
     bound = reduce_explicit_interconnect(
         normalize_primitive_bulk(raw, adapter.definition(primitive).model),

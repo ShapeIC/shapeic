@@ -39,23 +39,30 @@ from shapeic_layout_generation.macro_pex import (
     prepare_macro_pex,
     validate_macro_pex,
 )
-from shapeic_layout_generation.ota_pex import (
-    normalize_bulk_nodes,
-    prepare_ota_pex,
-    validate_ota_pex,
-    validate_primitive_pex,
-)
-from shapeic_layout_generation.pcell import (
-    IHP_TAP_SIZE_UM,
-    _ihp_mos_device,
-    _wire,
-    write_primitive_gds,
-)
 from shapeic_layout_generation.reducer import reduce_first_order
 from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
+    def test_magic_configuration_requires_cellkit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "physical.toml"
+            path.write_text(
+                """primitives = ["simplediffpair"]
+[output]
+path = "physical.npz"
+[sweep]
+length = [0.4]
+finger_width = [1.0]
+nf = [1]
+[extraction]
+backend = "magic"
+""",
+                encoding="ascii",
+            )
+            with self.assertRaisesRegex(ValueError, "requires.*cellkit"):
+                load_config(path)
+
     def test_prepares_a_generic_cellkit_macro_pex(self) -> None:
         spice = """.subckt macro OUT IN VDD VSS
 X1 OUT IN VSS VSS nmos w=1u l=0.4u
@@ -242,16 +249,12 @@ C1 n1 VSS 2f
             )
             with (
                 patch(
-                    "shapeic_layout_generation.generator.write_primitive_gds"
-                ) as legacy_writer,
-                patch(
                     "shapeic_layout_generation.generator.extract_primitive",
                     return_value=extraction,
                 ) as extract,
             ):
                 _generate_primitive(config, "currentmirror", None)
 
-            legacy_writer.assert_not_called()
             self.assertEqual(len(rendered_geometries), 1)
             self.assertAlmostEqual(rendered_geometries[0].length_m, 0.4e-6)
             self.assertAlmostEqual(rendered_geometries[0].finger_width_m, 1.5e-6)
@@ -664,6 +667,27 @@ vds = [0.5]
     def test_real_correction_reuses_each_magic_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            class Component:
+                @staticmethod
+                def write_gds(path):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"gds")
+
+            branch = SimpleNamespace(
+                name="m1", drain="DOUT", gate="DREF", source="S", bulk="B"
+            )
+            layout = SimpleNamespace(
+                polarity=SimpleNamespace(value="pmos"),
+                port_order=("DOUT", "DREF", "S", "B"),
+                branches=(branch,),
+                render=lambda geometry: SimpleNamespace(
+                    component=Component(), cell_name=f"mirror_nf{geometry.nf}"
+                ),
+            )
+            technology = SimpleNamespace(
+                normalize_pex=lambda text, primitive: text,
+                validate_primitive_pex=lambda *arguments: None,
+            )
             correction = DeviceCorrectionConfig(
                 backend="ngspice",
                 finger_counts=np.asarray([1.0]),
@@ -700,6 +724,15 @@ vds = [0.5]
                     keep_work=True,
                 ),
                 device_correction=correction,
+                cellkit=SimpleNamespace(
+                    geometry=lambda length, finger_width, nf: SimpleNamespace(
+                        length_m=length, finger_width_m=finger_width, nf=nf
+                    ),
+                    technology=technology,
+                ),
+                port_orders={"currentmirror": ("DOUT", "DREF", "S", "B")},
+                primitive_catalog_names={"currentmirror": "simplecurrentmirror"},
+                primitive_layouts={"currentmirror": layout},
             )
             port_matrix = np.zeros((4, 4))
             extracted_paths = [root / "nf1.pex", root / "nf2.pex"]
@@ -716,10 +749,6 @@ vds = [0.5]
             ]
             correction_values = np.zeros((1, 1, 1, 4, 4))
             with (
-                patch(
-                    "shapeic_layout_generation.generator.write_primitive_gds",
-                    return_value="primitive",
-                ),
                 patch(
                     "shapeic_layout_generation.generator.extract_primitive",
                     side_effect=extractions,
@@ -810,160 +839,6 @@ vds = [0.5]
         expected = 1.2e-12 * np.array([[1.0, -1.0], [-1.0, 1.0]])
         np.testing.assert_allclose(capacitance, expected, rtol=1e-12, atol=1e-24)
 
-    def test_normalizes_and_validates_full_ota_pex(self) -> None:
-        raw = """
-        .subckt ota_flat VOUT VINP VINN IBIAS VDD VSS
-        XDP1 IBIAS VINP VOUT sub sg13_lv_nmos w=1u l=0.4u
-        XDP2 N1 VINN IBIAS sub sg13_lv_nmos w=1u l=0.4u
-        XDPN1 IBIAS IBIAS IBIAS sub sg13_lv_nmos w=1u l=0.4u
-        XDPN2 IBIAS IBIAS IBIAS sub sg13_lv_nmos w=1u l=0.4u
-        XCM1 VDD N1 VOUT well sg13_lv_pmos w=1u l=0.4u
-        XCM2 N1 N1 VDD well sg13_lv_pmos w=1u l=0.4u
-        XCMP1 VDD VDD VDD well sg13_lv_pmos w=1u l=0.4u
-        XCMP2 VDD VDD VDD well sg13_lv_pmos w=1u l=0.4u
-        C0 VOUT N1 2f
-        .ends
-        """
-        normalized = normalize_bulk_nodes(raw)
-        self.assertIn("XDP1 IBIAS VINP VOUT VSS sg13_lv_nmos", normalized)
-        self.assertIn("XCM1 VDD N1 VOUT VDD sg13_lv_pmos", normalized)
-        topology = validate_ota_pex(
-            normalized,
-            expected_subcircuit="ota_flat",
-        )
-        self.assertEqual(topology.transistor_count, 8)
-        self.assertEqual(topology.capacitor_count, 1)
-
-    def test_prepare_ota_pex_preserves_normalized_file_on_validation_error(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "raw.spice"
-            output = root / "normalized.spice"
-            source.write_text(
-                """
-                .subckt ota_flat VOUT VINP VINN IBIAS VDD VSS
-                XDP1 VOUT VINP IBIAS sub sg13_lv_nmos
-                XDP2 N1 VINN IBIAS sub sg13_lv_nmos
-                XCM1 VOUT WRONG VDD well sg13_lv_pmos
-                XCM2 N1 N1 VDD well sg13_lv_pmos
-                .ends
-                """,
-                encoding="ascii",
-            )
-            with self.assertRaisesRegex(ValueError, "output current-mirror"):
-                prepare_ota_pex(source, output)
-            self.assertTrue(output.is_file())
-            self.assertIn(" VSS sg13_lv_nmos", output.read_text(encoding="utf-8"))
-
-    def test_ota_pex_validation_rejects_a_disconnected_mirror_gate(self) -> None:
-        text = """
-        .subckt ota_flat VOUT VINP VINN IBIAS VDD VSS
-        XDP1 VOUT VINP IBIAS VSS sg13_lv_nmos
-        XDP2 N1 VINN IBIAS VSS sg13_lv_nmos
-        XCM1 VOUT WRONG VDD VDD sg13_lv_pmos
-        XCM2 N1 N1 VDD VDD sg13_lv_pmos
-        .ends
-        """
-        with self.assertRaisesRegex(ValueError, "output current-mirror"):
-            validate_ota_pex(text)
-
-    def test_ota_pex_validation_rejects_one_unbussed_extra_finger(self) -> None:
-        text = """
-        .subckt ota_flat VOUT VINP VINN IBIAS VDD VSS
-        XDP1 VOUT VINP IBIAS VSS sg13_lv_nmos
-        XDP1_BAD internal_drain internal_gate IBIAS VSS sg13_lv_nmos
-        XDP2 N1 VINN IBIAS VSS sg13_lv_nmos
-        XCM1 VOUT N1 VDD VDD sg13_lv_pmos
-        XCM2 N1 N1 VDD VDD sg13_lv_pmos
-        .ends
-        """
-        with self.assertRaisesRegex(ValueError, "outside the logical terminal buses"):
-            validate_ota_pex(text)
-
-    def test_validates_all_multifinger_primitive_terminal_buses(self) -> None:
-        diff_pair = """
-        .subckt diff_flat DP DN GP GN S B
-        XGP0 DP GP S sub sg13_lv_nmos
-        XGP1 S GP DP sub sg13_lv_nmos
-        XGN0 DN GN S sub sg13_lv_nmos
-        XGN1 S GN DN sub sg13_lv_nmos
-        XD0 S S S sub sg13_lv_nmos
-        XD1 S S S sub sg13_lv_nmos
-        .ends
-        """
-        topology = validate_primitive_pex(
-            diff_pair,
-            "simplediffpair",
-            expected_subcircuit="diff_flat",
-        )
-        self.assertEqual(topology.transistor_count, 6)
-
-        mirror = """
-        .subckt mirror_flat DOUT DREF S B
-        XO0 DOUT DREF S well sg13_lv_pmos
-        XO1 S DREF DOUT well sg13_lv_pmos
-        XR0 DREF DREF S well sg13_lv_pmos
-        XR1 S DREF DREF well sg13_lv_pmos
-        XD0 S S S well sg13_lv_pmos
-        XD1 S S S well sg13_lv_pmos
-        .ends
-        """
-        topology = validate_primitive_pex(mirror, "currentmirror")
-        self.assertEqual(topology.transistor_count, 6)
-
-    def test_primitive_pex_rejects_one_unbussed_finger(self) -> None:
-        text = """
-        .subckt diff_flat DP DN GP GN S B
-        XGP0 DP GP S sub sg13_lv_nmos
-        XGP1 internal_gate internal_drain S sub sg13_lv_nmos
-        XGN0 DN GN S sub sg13_lv_nmos
-        XD0 S S S sub sg13_lv_nmos
-        XD1 S S S sub sg13_lv_nmos
-        .ends
-        """
-        with self.assertRaisesRegex(ValueError, "outside the logical terminal buses"):
-            validate_primitive_pex(text, "simplediffpair")
-
-    def test_wire_descends_before_joining_the_horizontal_bus(self) -> None:
-        class Component:
-            def __init__(self) -> None:
-                self.polygons: list[list[tuple[float, float]]] = []
-
-            def add_polygon(self, points, *, layer) -> None:
-                self.assert_layer = layer
-                self.polygons.append(points)
-
-        component = Component()
-        _wire(component, (2.0, 3.0), (0.0, -1.0))
-        self.assertEqual(component.assert_layer, "Metal1drawing")
-        self.assertEqual(len(component.polygons), 2)
-        vertical, horizontal = component.polygons
-        self.assertTrue(all(1.8 < x < 2.2 for x, _ in vertical))
-        self.assertTrue(all(-1.2 < y < -0.8 for _, y in horizontal))
-
-    def test_ihp_mos_uses_total_width_and_validates_finger_width(self) -> None:
-        calls: list[dict[str, object]] = []
-        tech = SimpleNamespace(
-            nmos_min_length=0.13,
-            nmos_max_length=10.0,
-            nmos_min_width=0.15,
-            nmos_max_width=10.0,
-            nmos_max_nf=20,
-        )
-
-        def mos_core(**arguments):
-            calls.append(arguments)
-            return arguments
-
-        result = _ihp_mos_device(mos_core, tech, "nmos", 0.4, 10.0, 20)
-        self.assertEqual(result["width"], 200.0)
-        self.assertEqual(result["nf"], 20)
-        self.assertEqual(result["is_pmos"], False)
-        self.assertEqual(IHP_TAP_SIZE_UM, 0.78)
-
-        with self.assertRaisesRegex(ValueError, "finger width"):
-            _ihp_mos_device(mos_core, tech, "nmos", 0.4, 10.1, 20)
-
     @unittest.skipUnless(
         importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
         "requires the optional IHP layout backend",
@@ -972,17 +847,25 @@ vds = [0.5]
         with tempfile.TemporaryDirectory() as directory:
             os.environ.setdefault("MPLCONFIGDIR", directory)
             root = Path(directory)
+            pdk_root = root / "pdks"
+            rcfile = pdk_root / "ihp-sg13g2/libs.tech/magic/ihp-sg13g2.magicrc"
+            rcfile.parent.mkdir(parents=True)
+            rcfile.write_text("", encoding="ascii")
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "ihp-sg13g2")
             endpoints = (
                 ("minimum", 0.4e-6, 0.15e-6, 1),
                 ("maximum", 0.8e-6, 10.0e-6, 20),
             )
             for primitive in ("simplediffpair", "currentmirror"):
+                descriptor = cellkit.catalog.primitive_descriptor_for_lut(primitive)
+                layout = cellkit.catalog.primitive(descriptor.catalog_name)
                 for label, length, finger_width, nf in endpoints:
                     output = root / f"{primitive}-{label}.gds"
-                    name = write_primitive_gds(
-                        primitive, length, finger_width, nf, output
+                    rendered = layout.render(
+                        cellkit.geometry(length, finger_width, nf)
                     )
-                    self.assertTrue(name.startswith(primitive))
+                    rendered.component.write_gds(output)
+                    self.assertTrue(rendered.cell_name.startswith(primitive))
                     self.assertGreater(output.stat().st_size, 0)
 
     @unittest.skipUnless(
@@ -1042,12 +925,14 @@ vds = [0.5]
                         magic_rcfile=rcfile,
                         work_directory=point / "magic",
                     )
-                    topology = validate_primitive_pex(
+                    cellkit.technology.validate_primitive_pex(
                         extracted.spice_path.read_text(encoding="utf-8"),
                         primitive,
-                        expected_subcircuit=extracted.subcircuit_name,
+                        layout.polarity,
+                        layout.port_order,
+                        layout.branches,
+                        extracted.subcircuit_name,
                     )
-                    self.assertEqual(topology.transistor_count, 4 * nf)
 
     @unittest.skipUnless(
         importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
@@ -1076,9 +961,13 @@ vds = [0.5]
                 work_directory=root / "magic",
             )
             normalized = root / "ota.normalized.spice"
-            topology = prepare_ota_pex(
+            topology = prepare_macro_pex(
                 extracted.spice_path,
                 normalized,
+                macro_name="ota_4t",
+                port_order=rendered.port_order,
+                technology=cellkit.technology,
+                bulk_ports={"nmos": "VSS", "pmos": "VDD"},
                 expected_subcircuit=extracted.subcircuit_name,
             )
             self.assertEqual(topology.transistor_count, 12)

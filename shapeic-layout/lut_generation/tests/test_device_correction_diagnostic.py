@@ -64,7 +64,7 @@ class DeviceCorrectionDiagnosticTest(unittest.TestCase):
             exact = 1.1 * interpolated
             zero = np.zeros_like(exact)
             adapter = SimpleNamespace(
-                simulator=object(),
+                simulator_for=lambda _primitive: object(),
                 validate_environment=lambda: None,
                 prepare_geometry=lambda *_args: SimpleNamespace(
                     pex_path=Path("pex.spice"),

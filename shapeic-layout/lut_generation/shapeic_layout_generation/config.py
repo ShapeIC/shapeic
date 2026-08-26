@@ -126,8 +126,11 @@ def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
     sweep = _table(raw, "sweep")
     extraction = _table(raw, "extraction")
     backend = str(extraction.get("backend", "magic")).lower()
-    if backend not in {"magic", "synthetic"}:
-        raise ValueError("extraction.backend must be 'magic' or 'synthetic'")
+    if backend != "synthetic":
+        raise ValueError(
+            "physical Magic generation requires [cellkit], [pdk], and "
+            "[electrical_models] configuration"
+        )
 
     primitives = tuple(str(value).lower() for value in raw.get("primitives", PORTS))
     if not primitives or len(primitives) != len(set(primitives)):
@@ -139,9 +142,9 @@ def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
     config = GenerationConfig(
         source_path=source,
         output_path=_path(str(output["path"]), source.parent),
-        pdk=str(raw.get("pdk", "ihp-sg13g2")),
+        pdk=str(raw.get("pdk", "synthetic")),
         layout_policy=str(
-            raw.get("layout_policy", "symmetric-adjacent-with-edge-dummies-v3")
+            raw.get("layout_policy", "synthetic-test-fixture")
         ),
         lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
         finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,

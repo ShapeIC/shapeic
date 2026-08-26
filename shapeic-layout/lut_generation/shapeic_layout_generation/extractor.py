@@ -9,7 +9,6 @@ from typing import Callable
 
 import numpy as np
 
-from .ota_pex import validate_primitive_pex
 from .reducer import reduce_first_order
 
 
@@ -47,6 +46,7 @@ def run_magic(
     primitive: str | None = None,
     magic_startup_commands: tuple[str, ...] = (),
     pex_normalizer: Callable[[str, str], str] | None = None,
+    pex_validator: Callable[[str, str], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     extraction = extract_primitive(
         gds_path,
@@ -58,6 +58,7 @@ def run_magic(
         primitive=primitive,
         magic_startup_commands=magic_startup_commands,
         pex_normalizer=pex_normalizer,
+        pex_validator=pex_validator,
     )
     return extraction.conductance, extraction.capacitance
 
@@ -73,6 +74,7 @@ def extract_primitive(
     primitive: str | None = None,
     magic_startup_commands: tuple[str, ...] = (),
     pex_normalizer: Callable[[str, str], str] | None = None,
+    pex_validator: Callable[[str, str], None] | None = None,
 ) -> PrimitiveExtraction:
     result = write_magic_pex(
         gds_path,
@@ -87,13 +89,9 @@ def extract_primitive(
         if primitive is None:
             raise ValueError("PEX normalization requires a primitive name")
         extracted_text = pex_normalizer(extracted_text, primitive)
-    if primitive is not None:
+    if pex_validator is not None:
         try:
-            validate_primitive_pex(
-                extracted_text,
-                primitive,
-                expected_subcircuit=result.subcircuit_name,
-            )
+            pex_validator(extracted_text, result.subcircuit_name)
         except ValueError as error:
             raise ValueError(
                 f"{error}; preserved GDS: {gds_path.resolve()}; "

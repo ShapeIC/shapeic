@@ -231,8 +231,9 @@ def diagnose_device_correction(
         output_root / "exact",
     )
     definition = adapter.definition(primitive)
+    simulator = adapter.simulator_for(primitive)
     pex = extract_port_admittance(
-        adapter.simulator,
+        simulator,
         definition,
         bias,
         prepared.pex_path,
@@ -240,7 +241,7 @@ def diagnose_device_correction(
         output_root / "exact" / "bias" / "pex",
     )
     aggregate = extract_port_admittance(
-        adapter.simulator,
+        simulator,
         definition,
         bias,
         prepared.aggregate_path,

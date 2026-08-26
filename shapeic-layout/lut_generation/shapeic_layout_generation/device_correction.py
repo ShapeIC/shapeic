@@ -10,12 +10,10 @@ from .config import DeviceCorrectionConfig, GenerationConfig
 from .device_capacitance import (
     Bias,
     Geometry,
-    SimulatorConfig,
     extract_port_admittance,
 )
 from .device_capacitance_adapter import DeviceCapacitanceAdapter
 from .cellkit_device_capacitance import CellKitDeviceCapacitanceAdapter
-from .ihp_device_capacitance import IhpSg13g2DeviceCapacitanceAdapter
 
 
 def correction_shape(
@@ -48,20 +46,8 @@ def create_device_correction_adapter(
         adapter = CellKitDeviceCapacitanceAdapter(config)
         adapter.validate_environment()
         return adapter
-    if correction.model_library is None:
-        raise ValueError("a legacy real device correction requires a model library")
-    simulator = SimulatorConfig(
-        binary=correction.binary,
-        model_library=correction.model_library,
-        library_section=correction.library_section,
-        osdi_paths=correction.osdi_paths,
-        temperature_c=correction.temperature_c,
-        frequencies_hz=correction.frequencies_hz,
-    )
-    return IhpSg13g2DeviceCapacitanceAdapter(
-        config,
-        simulator,
-        correction.workers,
+    raise ValueError(
+        "real device correction requires CellKit and electrical model configs"
     )
 
 

@@ -1,20 +1,7 @@
-pdk = "ihp-sg13g2"
 physical_config = "ihp_sg13g2_ota.toml"
 
 [output]
 root = "../../../target/shapeic-device-capacitance-study"
-
-[simulator]
-binary = "ngspice"
-temperature_c = 27.0
-workers = 4
-model_library = "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib"
-library_section = "mos_tt"
-osdi_paths = [
-  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
-  "${PDK_ROOT}/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi",
-]
-frequencies_hz = [1.0e6, 1.0e7]
 
 [acceptance]
 frequency_consistency = 0.01

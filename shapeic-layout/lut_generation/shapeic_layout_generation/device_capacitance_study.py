@@ -18,11 +18,10 @@ from .device_capacitance import (
     Admittance,
     Bias,
     Geometry,
-    SimulatorConfig,
     extract_port_admittance,
     relative_matrix_error,
 )
-from .ihp_device_capacitance import IhpSg13g2DeviceCapacitanceAdapter
+from .cellkit_device_capacitance import CellKitDeviceCapacitanceAdapter
 
 
 @dataclass(frozen=True)
@@ -127,37 +126,9 @@ def load_study_config(path: Path) -> StudyConfig:
     source = path.resolve()
     with source.open("rb") as handle:
         raw = tomllib.load(handle)
-    pdk = str(raw.get("pdk", "ihp-sg13g2")).casefold()
-    if pdk != "ihp-sg13g2":
-        raise ValueError(f"unsupported device-capacitance study PDK '{pdk}'")
-
     physical_path = _path(_required_string(raw, "physical_config"), source.parent)
     physical = load_config(physical_path)
-    simulator_raw = _required_table(raw, "simulator")
-    simulator = SimulatorConfig(
-        binary=str(simulator_raw.get("binary", "ngspice")),
-        model_library=_path(
-            _required_string(simulator_raw, "model_library"), source.parent
-        ),
-        library_section=str(simulator_raw.get("library_section", "mos_tt")),
-        osdi_paths=tuple(
-            _path(str(value), source.parent)
-            for value in simulator_raw.get("osdi_paths", ())
-        ),
-        temperature_c=float(simulator_raw.get("temperature_c", 27.0)),
-        frequencies_hz=tuple(
-            float(value)
-            for value in simulator_raw.get(
-                "frequencies_hz",
-                (1.0e6, 1.0e7),
-            )
-        ),  # type: ignore[arg-type]
-    )
-    adapter = IhpSg13g2DeviceCapacitanceAdapter(
-        physical,
-        simulator,
-        workers=int(simulator_raw.get("workers", 1)),
-    )
+    adapter = CellKitDeviceCapacitanceAdapter(physical)
     stage_one_raw = _required_table(raw, "stage1")
     stage_one = {
         primitive: _primitive_stage_one(
@@ -529,8 +500,9 @@ def _characterize_geometry(
     def characterize(item: tuple[int, Bias]) -> DeviceSample:
         index, bias = item
         bias_root = output_root / f"bias_{index:04d}"
+        simulator = config.adapter.simulator_for(primitive)
         pex = extract_port_admittance(
-            config.adapter.simulator,
+            simulator,
             definition,
             bias,
             prepared.pex_path,
@@ -538,7 +510,7 @@ def _characterize_geometry(
             bias_root / "pex",
         )
         aggregate = extract_port_admittance(
-            config.adapter.simulator,
+            simulator,
             definition,
             bias,
             prepared.aggregate_path,
@@ -792,7 +764,13 @@ def _primitive_stage_one(
 
 
 def _validate_study_config(config: StudyConfig) -> None:
-    frequencies = config.adapter.simulator.frequencies_hz
+    simulators = tuple(
+        config.adapter.simulator_for(primitive)
+        for primitive in config.adapter.primitives
+    )
+    frequencies = simulators[0].frequencies_hz
+    if any(simulator.frequencies_hz != frequencies for simulator in simulators[1:]):
+        raise ValueError("study primitives must use the same frequency endpoints")
     if (
         len(frequencies) != 2
         or not all(math.isfinite(value) and value > 0.0 for value in frequencies)
@@ -950,7 +928,9 @@ def _config_manifest(config: StudyConfig, stage: str) -> dict[str, object]:
         "source_config": str(config.source_path),
         "pdk_adapter": config.adapter.name,
         "physical_config": str(config.adapter.physical.source_path),
-        "frequencies_hz": list(config.adapter.simulator.frequencies_hz),
+        "frequencies_hz": list(
+            config.adapter.simulator_for(config.adapter.primitives[0]).frequencies_hz
+        ),
         "requested_stage": stage,
         "acceptance": {
             "frequency_consistency": config.acceptance.frequency_consistency,

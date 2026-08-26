@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT))
 from shapeic_layout_generation.device_capacitance import (
     Bias,
     Geometry,
+    MosInstance,
+    PrimitiveDeviceDefinition,
     SimulatorConfig,
     _parse_raw,
     admittance_from_port_currents,
@@ -24,10 +26,55 @@ from shapeic_layout_generation.device_capacitance import (
     extract_port_admittance,
     port_admittance_netlist,
     relative_matrix_error,
+    aggregate_primitive_spice,
+    mos_only_pex,
 )
-from shapeic_layout_generation.ihp_device_capacitance import (
-    IhpSg13g2DeviceCapacitanceAdapter,
-)
+
+
+class _FixtureAdapter:
+    def __init__(self) -> None:
+        self.definitions = {
+            "simplediffpair": PrimitiveDeviceDefinition(
+                "simplediffpair",
+                ("DP", "DN", "GP", "GN", "S", "B"),
+                "sg13_lv_nmos",
+                (
+                    MosInstance("XDP1", "DP", "GP", "S", "B"),
+                    MosInstance("XDP2", "DN", "GN", "S", "B"),
+                ),
+                ("vds", "vds", "vgs", "vgs", "zero", "vbs"),
+            ),
+            "currentmirror": PrimitiveDeviceDefinition(
+                "currentmirror",
+                ("DOUT", "DREF", "S", "B"),
+                "sg13_lv_pmos",
+                (
+                    MosInstance("XCM1", "DOUT", "DREF", "S", "B"),
+                    MosInstance("XCM2", "DREF", "DREF", "S", "B"),
+                ),
+                ("vds", "vgs", "zero", "vbs"),
+            ),
+        }
+
+    def definition(self, primitive):
+        return self.definitions[primitive]
+
+    def mos_only_pex(self, text, primitive):
+        return mos_only_pex(
+            text,
+            self.definition(primitive),
+            lambda fields: fields[:4] + ["B"] + fields[5:],
+        )
+
+    def aggregate_spice(self, primitive, geometry):
+        return aggregate_primitive_spice(
+            self.definition(primitive),
+            geometry,
+            lambda definition, point: (
+                f"{definition.model} l={point.length:.17e} "
+                f"w={point.finger_width * point.nf:.17e} ng={point.nf}"
+            ),
+        )
 
 
 class DeviceCapacitanceTest(unittest.TestCase):
@@ -40,11 +87,7 @@ class DeviceCapacitanceTest(unittest.TestCase):
             temperature_c=27.0,
             frequencies_hz=(1.0e6, 1.0e7),
         )
-        self.adapter = IhpSg13g2DeviceCapacitanceAdapter(
-            SimpleNamespace(),  # type: ignore[arg-type]
-            self.simulator,
-            workers=1,
-        )
+        self.adapter = _FixtureAdapter()
         self.diff_pair = self.adapter.definition("simplediffpair")
         self.mirror = self.adapter.definition("currentmirror")
 
