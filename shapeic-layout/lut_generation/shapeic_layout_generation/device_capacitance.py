@@ -8,6 +8,8 @@ from typing import Callable
 
 import numpy as np
 
+from .extractor import canonicalize_subcircuit_ports
+
 
 MATRIX_FLOOR = 1.0e-18
 
@@ -68,6 +70,7 @@ def mos_only_pex(
     normalize_device: Callable[[list[str]], list[str]],
 ) -> str:
     """Keep only a primitive's MOS devices and bind their bulks to logical B."""
+    text = canonicalize_subcircuit_ports(text, definition.ports)
     lines = _logical_lines(text)
     headers = [
         line.split()

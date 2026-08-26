@@ -35,6 +35,31 @@ class PrimitiveExtraction:
     pex: MagicPexResult
 
 
+def canonicalize_subcircuit_ports(text: str, ports: tuple[str, ...]) -> str:
+    """Rewrite one flat subcircuit header to the manifest's canonical order."""
+
+    lines = text.splitlines()
+    headers = [
+        index
+        for index, raw in enumerate(lines)
+        if raw.strip().casefold().startswith(".subckt ")
+    ]
+    if len(headers) != 1:
+        raise ValueError("PEX must contain exactly one flattened subcircuit")
+    index = headers[0]
+    fields = lines[index].split()
+    found = tuple(fields[2:])
+    expected_keys = tuple(port.casefold() for port in ports)
+    found_keys = tuple(port.casefold() for port in found)
+    if len(found) != len(ports) or set(found_keys) != set(expected_keys):
+        raise ValueError(f"PEX ports must be {ports}, found {found}")
+    if len(set(found_keys)) != len(found_keys):
+        raise ValueError(f"PEX exposes duplicate ports: {found}")
+    lines[index] = " ".join((fields[0], fields[1], *ports))
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(lines) + suffix
+
+
 def run_magic(
     gds_path: Path,
     cell_name: str,
@@ -89,6 +114,7 @@ def extract_primitive(
         if primitive is None:
             raise ValueError("PEX normalization requires a primitive name")
         extracted_text = pex_normalizer(extracted_text, primitive)
+    extracted_text = canonicalize_subcircuit_ports(extracted_text, ports)
     if pex_validator is not None:
         try:
             pex_validator(extracted_text, result.subcircuit_name)

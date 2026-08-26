@@ -116,6 +116,18 @@ class DeviceCapacitanceTest(unittest.TestCase):
         self.assertNotIn("C0", filtered)
         self.assertNotIn("Xignored", filtered)
 
+    def test_mos_only_pex_canonicalizes_magic_port_order(self) -> None:
+        raw = (
+            ".subckt primitive GP GN S DP DN B\n"
+            "X0 DP GP S substrate sg13_lv_nmos w=1u l=0.4u\n"
+            "X1 DN GN S substrate sg13_lv_nmos w=1u l=0.4u\n"
+            ".ends primitive\n"
+        )
+
+        filtered = self.adapter.mos_only_pex(raw, "simplediffpair")
+
+        self.assertTrue(filtered.startswith(".subckt primitive DP DN GP GN S B\n"))
+
     def test_mos_only_pex_rejects_an_incompatible_interface(self) -> None:
         with self.assertRaisesRegex(ValueError, "ports must be"):
             self.adapter.mos_only_pex(

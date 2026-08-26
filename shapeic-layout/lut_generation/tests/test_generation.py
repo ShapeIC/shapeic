@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib.metadata
 import json
 import os
 import shutil
@@ -17,6 +17,16 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 CELLKIT_ROOT = ROOT.parents[1] / "shapeic-cellkit"
 sys.path.insert(0, str(ROOT))
+
+
+def _has_ihp_backend() -> bool:
+    try:
+        return (
+            importlib.metadata.version("gdsfactory") == "9.44.0"
+            and importlib.metadata.version("ihp-gdsfactory") == "2.0.0"
+        )
+    except importlib.metadata.PackageNotFoundError:
+        return False
 
 from shapeic_layout_generation.config import (
     DeviceCorrectionBias,
@@ -840,8 +850,8 @@ vds = [0.5]
         np.testing.assert_allclose(capacitance, expected, rtol=1e-12, atol=1e-24)
 
     @unittest.skipUnless(
-        importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
-        "requires the optional IHP layout backend",
+        _has_ihp_backend(),
+        "requires the IHP layout backend with its pinned versions",
     )
     def test_ihp_pcell_generates_domain_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -869,8 +879,8 @@ vds = [0.5]
                     self.assertGreater(output.stat().st_size, 0)
 
     @unittest.skipUnless(
-        importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
-        "requires the optional IHP layout backend",
+        _has_ihp_backend(),
+        "requires the IHP layout backend with its pinned versions",
     )
     def test_ihp_cellkit_ota_macro_generates_six_port_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -896,8 +906,8 @@ vds = [0.5]
             self.assertGreater(output.stat().st_size, 0)
 
     @unittest.skipUnless(
-        importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
-        "requires the optional IHP layout backend",
+        _has_ihp_backend(),
+        "requires the IHP layout backend with its pinned versions",
     )
     def test_magic_extracts_all_multifinger_primitive_buses(self) -> None:
         magic, rcfile = self._magic_backend()
@@ -935,8 +945,8 @@ vds = [0.5]
                     )
 
     @unittest.skipUnless(
-        importlib.util.find_spec("gdsfactory") and importlib.util.find_spec("ihp"),
-        "requires the optional IHP layout backend",
+        _has_ihp_backend(),
+        "requires the IHP layout backend with its pinned versions",
     )
     def test_magic_validates_the_complete_ota_routing(self) -> None:
         magic, rcfile = self._magic_backend()
