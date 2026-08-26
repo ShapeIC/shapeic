@@ -47,11 +47,12 @@ class PrimitiveDeviceDefinition:
 @dataclass(frozen=True)
 class SimulatorConfig:
     binary: str
-    model_library: Path
+    model_library: Path | None
     library_section: str
     osdi_paths: tuple[Path, ...]
     temperature_c: float
     frequencies_hz: tuple[float, float]
+    model_statements: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,10 +264,13 @@ def port_admittance_netlist(
     ]
     saved = " ".join(f"i(VPORT_{port})" for port in ports)
     osdi = [f"pre_osdi '{path}'" for path in simulator.osdi_paths]
+    model_statements = simulator.model_statements or (
+        f".lib '{simulator.model_library}' {simulator.library_section}",
+    )
     return "\n".join(
         (
             "* Shapeic primitive multiport admittance extraction",
-            f".lib '{simulator.model_library}' {simulator.library_section}",
+            *model_statements,
             f".include '{subcircuit_path}'",
             *sources,
             f"XPRIMITIVE {' '.join(ports)} {subcircuit_name}",
@@ -363,8 +367,17 @@ def _validate_simulator(simulator: SimulatorConfig) -> None:
         raise ValueError("frequencies_hz must contain two positive decade endpoints")
     if not math.isfinite(simulator.temperature_c):
         raise ValueError("temperature must be finite")
-    if not simulator.binary or not simulator.library_section:
-        raise ValueError("simulator binary and model-library section are required")
+    if not simulator.binary:
+        raise ValueError("simulator binary is required")
+    if simulator.model_statements:
+        if simulator.model_library is not None:
+            raise ValueError(
+                "model_statements cannot be combined with the legacy model library"
+            )
+        if any(not statement.strip() for statement in simulator.model_statements):
+            raise ValueError("model_statements must be non-empty")
+    elif simulator.model_library is None or not simulator.library_section:
+        raise ValueError("a model library and section are required")
 
 
 def _parse_raw(path: Path) -> np.ndarray:

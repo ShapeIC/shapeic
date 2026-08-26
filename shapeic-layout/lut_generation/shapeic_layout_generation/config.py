@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from .cellkit import ResolvedCellKit, load_cellkit
+from .electrical_model import ElectricalMosModel, load_electrical_model
 
 
 PORTS = {
@@ -34,8 +35,15 @@ class ExtractorConfig:
 class ElectricalModelsConfig:
     """Electrical LUT generator inputs used to build aggregate MOS devices."""
 
-    nmos: Path
-    pmos: Path
+    nmos: ElectricalMosModel
+    pmos: ElectricalMosModel
+
+    def for_polarity(self, polarity: str) -> ElectricalMosModel:
+        if polarity == "nmos":
+            return self.nmos
+        if polarity == "pmos":
+            return self.pmos
+        raise ValueError(f"unsupported MOS polarity '{polarity}'")
 
 
 @dataclass(frozen=True)
@@ -218,15 +226,29 @@ def _load_cellkit_config(
             f"physical.layout_policy '{requested_policy}' does not match CellKit "
             f"provider policy '{provider_policy}'"
         )
+    nmos_path = _path(_required_string(electrical_raw, "nmos"), source.parent)
+    pmos_path = _path(_required_string(electrical_raw, "pmos"), source.parent)
     electrical_models = ElectricalModelsConfig(
-        nmos=_path(_required_string(electrical_raw, "nmos"), source.parent),
-        pmos=_path(_required_string(electrical_raw, "pmos"), source.parent),
+        nmos=load_electrical_model(
+            nmos_path, pdk=pdk_name, pdk_directory=resolved.pdk_root
+        ),
+        pmos=load_electrical_model(
+            pmos_path, pdk=pdk_name, pdk_directory=resolved.pdk_root
+        ),
     )
+    revisions = {
+        model.revision
+        for model in (electrical_models.nmos, electrical_models.pmos)
+        if model.revision is not None
+    }
+    if len(revisions) > 1:
+        raise ValueError("NMOS and PMOS electrical models declare different PDK revisions")
+    inferred_revision = next(iter(revisions), technology.revision)
     config = GenerationConfig(
         source_path=source,
         output_path=_path(str(output["path"]), source.parent),
         pdk=pdk_name,
-        pdk_revision=str(pdk_raw.get("revision", technology.revision)),
+        pdk_revision=str(pdk_raw.get("revision", inferred_revision)),
         layout_policy=provider_policy,
         lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
         finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,
@@ -254,12 +276,6 @@ def _load_cellkit_config(
         primitive_layouts=primitive_layouts,
     )
     _validate(config)
-    for name, model_config in (
-        ("electrical_models.nmos", electrical_models.nmos),
-        ("electrical_models.pmos", electrical_models.pmos),
-    ):
-        if not model_config.is_file():
-            raise FileNotFoundError(f"{name} does not exist: {model_config}")
     return config
 
 
@@ -441,19 +457,20 @@ def _validate(config: GenerationConfig) -> None:
                 "the ngspice device correction backend requires Magic physical "
                 "extraction"
             )
-        if config.pdk != "ihp-sg13g2":
-            raise ValueError(
-                "the ngspice device correction backend currently supports only "
-                "ihp-sg13g2"
-            )
         if shutil.which(correction.binary) is None:
             raise FileNotFoundError(
                 f"NGSpice binary not found: {correction.binary}"
             )
-        if correction.model_library is None:
+        if config.electrical_models is None and correction.model_library is None:
             raise ValueError(
-                "device correction model_library is required by the ngspice backend"
+                "legacy device correction requires model_library"
             )
-        for path in (correction.model_library, *correction.osdi_paths):
+        legacy_paths = (
+            (correction.model_library, *correction.osdi_paths)
+            if config.electrical_models is None
+            else ()
+        )
+        for path in legacy_paths:
+            assert path is not None
             if not path.is_file():
                 raise FileNotFoundError(path)

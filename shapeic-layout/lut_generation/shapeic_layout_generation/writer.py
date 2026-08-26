@@ -77,8 +77,23 @@ def write_archive(
             manifest["pdk_revision"] = config.pdk_revision
         if config.cellkit is not None:
             manifest["cellkit"] = {
-                "root_name": config.cellkit.root.name,
+                "catalog": "shapeic-cellkit",
                 "technology": config.cellkit.pdk,
+                "technology_sha256": config.cellkit.catalog.technology_digest,
+            }
+        if config.electrical_models is not None:
+            manifest["electrical_models"] = {
+                polarity: {
+                    "sha256": model.digest,
+                    "pdk": model.pdk,
+                    "pdk_revision": model.revision,
+                    "corner": model.corner,
+                    "device": model.name,
+                }
+                for polarity, model in (
+                    ("nmos", config.electrical_models.nmos),
+                    ("pmos", config.electrical_models.pmos),
+                )
             }
         with zipfile.ZipFile(
             temporary,
@@ -123,6 +138,12 @@ def write_archive(
                         "capacitance": c_path,
                     }
                 )
+                layout = config.primitive_layout(primitive)
+                if layout is not None:
+                    manifest["primitives"][-1]["cellkit"] = {
+                        "catalog_primitive": layout.catalog_name,
+                        "pcell_sha256": layout.implementation_digest,
+                    }
                 if correction_config is not None and device_corrections is not None:
                     correction = device_corrections[primitive]
                     if correction is None:
@@ -162,9 +183,7 @@ def write_archive(
                         correction_path,
                         correction.astype(np.float64),
                     )
-                    manifest["primitives"][-1][
-                        "device_capacitance_correction"
-                    ] = {
+                    correction_manifest = {
                         "definition": (
                             "pex_mos_only_minus_aggregate_compact_model"
                         ),
@@ -172,12 +191,26 @@ def write_archive(
                         "axes": correction_axis_paths,
                         "capacitance": correction_path,
                         "simulator": correction_config.binary,
-                        "library_section": correction_config.library_section,
                         "temperature_c": correction_config.temperature_c,
                         "frequencies_hz": list(
                             correction_config.frequencies_hz
                         ),
                     }
+                    if config.electrical_models is None:
+                        correction_manifest["library_section"] = (
+                            correction_config.library_section
+                        )
+                    else:
+                        assert layout is not None
+                        model = config.electrical_models.for_polarity(
+                            layout.polarity.value
+                        )
+                        correction_manifest["electrical_model_sha256"] = model.digest
+                        correction_manifest["corner"] = model.corner
+                        correction_manifest["device"] = model.name
+                    manifest["primitives"][-1][
+                        "device_capacitance_correction"
+                    ] = correction_manifest
             archive.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
         temporary.replace(output)
     finally:

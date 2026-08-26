@@ -72,6 +72,10 @@ class IhpSg13g2DeviceCapacitanceAdapter:
         except KeyError as error:
             raise ValueError(f"unsupported IHP primitive '{primitive}'") from error
 
+    def simulator_for(self, primitive: str) -> SimulatorConfig:
+        self.definition(primitive)
+        return self.simulator
+
     def mos_only_pex(self, text: str, primitive: str) -> str:
         return mos_only_pex(
             text,

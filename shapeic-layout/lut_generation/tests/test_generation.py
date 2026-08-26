@@ -26,6 +26,10 @@ from shapeic_layout_generation.config import (
     load_config,
 )
 from shapeic_layout_generation.cellkit import load_cellkit
+from shapeic_layout_generation.cellkit_device_capacitance import (
+    CellKitDeviceCapacitanceAdapter,
+)
+from shapeic_layout_generation.device_capacitance import Geometry
 from shapeic_layout_generation.device_correction import (
     validate_device_correction,
 )
@@ -49,6 +53,93 @@ from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
+    def test_cellkit_device_adapter_derives_topology_and_prepares_netlists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            branches = (
+                SimpleNamespace(name="m1", drain="DOUT", gate="DREF", source="S", bulk="B"),
+                SimpleNamespace(name="m2", drain="DREF", gate="DREF", source="S", bulk="B"),
+            )
+            layout = SimpleNamespace(
+                lut_primitive="currentmirror",
+                polarity=SimpleNamespace(value="pmos"),
+                operating_point_branch="m1",
+                port_order=("DOUT", "DREF", "S", "B"),
+                branches=branches,
+            )
+            model = SimpleNamespace(
+                name="pmos_model",
+                instance_kind="subcircuit",
+                osdi_paths=(root / "model.osdi",),
+                model_statements=(f".include '{root / 'models.spice'}'",),
+                spice_geometry=lambda length, width, nf: (
+                    f"pmos_model l={length:.17e} w={width * nf:.17e} ng={nf}"
+                ),
+            )
+            correction = DeviceCorrectionConfig(
+                backend="ngspice",
+                finger_counts=np.asarray([1.0]),
+                biases={},
+                binary="ngspice",
+                model_library=None,
+                library_section="",
+                osdi_paths=(),
+                temperature_c=27.0,
+                frequencies_hz=(1.0e6, 1.0e7),
+                workers=1,
+                frequency_consistency=0.01,
+            )
+            technology = SimpleNamespace(
+                normalize_pex=lambda text, primitive: text,
+                normalize_mos_device=lambda fields, primitive: (
+                    fields[:4] + ["B"] + fields[5:]
+                ),
+            )
+            physical = SimpleNamespace(
+                pdk="test-pdk",
+                primitives=("currentmirror",),
+                cellkit=SimpleNamespace(technology=technology),
+                electrical_models=SimpleNamespace(
+                    for_polarity=lambda polarity: model
+                ),
+                device_correction=correction,
+                primitive_layout=lambda primitive: layout,
+            )
+            adapter = CellKitDeviceCapacitanceAdapter(physical)
+
+            definition = adapter.definition("currentmirror")
+            self.assertEqual(
+                definition.bias_variables, ("vds", "vgs", "zero", "vbs")
+            )
+            self.assertEqual(
+                adapter.simulator_for("currentmirror").model_statements,
+                model.model_statements,
+            )
+            aggregate = adapter.aggregate_spice(
+                "currentmirror", Geometry(0.4e-6, 1.5e-6, 3)
+            )
+            self.assertIn("w=4.50000000000000011e-06 ng=3", aggregate)
+
+            raw = root / "raw.pex.spice"
+            raw.write_text(
+                ".subckt mirror_flat DOUT DREF S B\n"
+                "X1 DOUT DREF S well pmos_model l=0.4u w=4.5u ng=3\n"
+                "X2 DREF DREF S well pmos_model l=0.4u w=4.5u ng=3\n"
+                "C0 DOUT DREF 1f\n"
+                ".ends mirror_flat\n",
+                encoding="ascii",
+            )
+            prepared = adapter.prepare_extracted_geometry(
+                "currentmirror",
+                Geometry(0.4e-6, 1.5e-6, 3),
+                raw,
+                "mirror_flat",
+                root / "prepared",
+            )
+            mos_only = prepared.pex_path.read_text(encoding="utf-8")
+            self.assertNotIn("C0", mos_only)
+            self.assertIn("X1 DOUT DREF S B pmos_model", mos_only)
+
     def test_magic_generation_uses_the_cellkit_pcell_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -167,10 +258,35 @@ class GenerationTest(unittest.TestCase):
             rcfile = installed / "libs.tech/magic/ihp-sg13g2.magicrc"
             rcfile.parent.mkdir(parents=True)
             rcfile.write_text("", encoding="ascii")
+            model_library = installed / "models.lib"
+            model_library.write_text("* models\n", encoding="ascii")
             nmos = root / "nmos.toml"
             pmos = root / "pmos.toml"
-            nmos.write_text("device = 'nmos'\n", encoding="ascii")
-            pmos.write_text("device = 'pmos'\n", encoding="ascii")
+            for path, model in ((nmos, "nmos_model"), (pmos, "pmos_model")):
+                path.write_text(
+                    f'''[pdk]
+name = "ihp-sg13g2"
+revision = "fixture-revision"
+corner = "tt"
+[simulator]
+binary = "ngspice"
+temperature_c = 27.0
+[spice]
+[[spice.directives]]
+kind = "include"
+path = "models.lib"
+[device]
+name = "{model}"
+instance_kind = "subcircuit"
+terminals = ["d", "g", "s", "b"]
+length_parameter = "l"
+width_parameter = "w"
+finger_parameter = "nf"
+width_convention = "total"
+geometry_unit_m = 1.0
+''',
+                    encoding="ascii",
+                )
             config_path = root / "physical.toml"
             config_path.write_text(
                 f'''primitives = ["simplediffpair", "currentmirror"]
@@ -195,6 +311,20 @@ path = "{root / 'physical.npz'}"
 length = [0.4]
 finger_width = [1.0]
 nf = [1]
+
+[device_capacitance_correction]
+backend = "synthetic"
+nf = [1]
+
+[device_capacitance_correction.simplediffpair]
+vbs = [0.0]
+vgs = [0.5]
+vds = [0.5]
+
+[device_capacitance_correction.currentmirror]
+vbs = [0.0]
+vgs = [-0.5]
+vds = [-0.5]
 ''',
                 encoding="ascii",
             )
@@ -208,7 +338,7 @@ nf = [1]
                 generated = generate(config_path)
 
             self.assertEqual(config.pdk, "ihp-sg13g2")
-            self.assertEqual(config.pdk_revision, "local-installation")
+            self.assertEqual(config.pdk_revision, "fixture-revision")
             self.assertEqual(config.extractor.magic_rcfile, rcfile)
             self.assertEqual(
                 config.port_order("simplediffpair"),
@@ -217,14 +347,29 @@ nf = [1]
             self.assertEqual(
                 config.catalog_name("currentmirror"), "simplecurrentmirror"
             )
-            self.assertEqual(config.electrical_models.nmos, nmos)
+            self.assertEqual(config.electrical_models.nmos.source_path, nmos)
             with zipfile.ZipFile(generated) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
-            self.assertEqual(manifest["pdk_revision"], "local-installation")
+            self.assertEqual(manifest["pdk_revision"], "fixture-revision")
+            self.assertEqual(manifest["cellkit"]["catalog"], "shapeic-cellkit")
+            self.assertEqual(manifest["cellkit"]["technology"], "ihp-sg13g2")
+            self.assertEqual(len(manifest["cellkit"]["technology_sha256"]), 64)
             self.assertEqual(
-                manifest["cellkit"],
-                {"root_name": "shapeic-cellkit", "technology": "ihp-sg13g2"},
+                manifest["electrical_models"]["nmos"]["sha256"],
+                config.electrical_models.nmos.digest,
             )
+            self.assertEqual(
+                manifest["primitives"][0]["cellkit"]["catalog_primitive"],
+                "simplediffpair",
+            )
+            correction_manifest = manifest["primitives"][0][
+                "device_capacitance_correction"
+            ]
+            self.assertEqual(
+                correction_manifest["electrical_model_sha256"],
+                config.electrical_models.nmos.digest,
+            )
+            self.assertNotIn("library_section", correction_manifest)
 
     def test_cellkit_config_does_not_install_a_missing_pdk(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

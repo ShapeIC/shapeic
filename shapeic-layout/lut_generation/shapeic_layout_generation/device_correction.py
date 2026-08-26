@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import PORTS, DeviceCorrectionConfig, GenerationConfig
+from .config import DeviceCorrectionConfig, GenerationConfig
 from .device_capacitance import (
     Bias,
     Geometry,
@@ -14,6 +14,7 @@ from .device_capacitance import (
     extract_port_admittance,
 )
 from .device_capacitance_adapter import DeviceCapacitanceAdapter
+from .cellkit_device_capacitance import CellKitDeviceCapacitanceAdapter
 from .ihp_device_capacitance import IhpSg13g2DeviceCapacitanceAdapter
 
 
@@ -22,9 +23,9 @@ def correction_shape(
     finger_widths: np.ndarray,
     correction: DeviceCorrectionConfig,
     primitive: str,
+    port_count: int,
 ) -> tuple[int, ...]:
     bias = correction.biases[primitive]
-    port_count = len(PORTS[primitive])
     return (
         lengths.size,
         finger_widths.size,
@@ -43,8 +44,12 @@ def create_device_correction_adapter(
     correction = config.device_correction
     if correction is None or correction.backend != "ngspice":
         raise ValueError("a real device correction requires the ngspice backend")
+    if config.cellkit is not None and config.electrical_models is not None:
+        adapter = CellKitDeviceCapacitanceAdapter(config)
+        adapter.validate_environment()
+        return adapter
     if correction.model_library is None:
-        raise ValueError("a real device correction requires a model library")
+        raise ValueError("a legacy real device correction requires a model library")
     simulator = SimulatorConfig(
         binary=correction.binary,
         model_library=correction.model_library,
@@ -53,13 +58,11 @@ def create_device_correction_adapter(
         temperature_c=correction.temperature_c,
         frequencies_hz=correction.frequencies_hz,
     )
-    if config.pdk == "ihp-sg13g2":
-        return IhpSg13g2DeviceCapacitanceAdapter(
-            config,
-            simulator,
-            correction.workers,
-        )
-    raise ValueError(f"no device-capacitance adapter is available for '{config.pdk}'")
+    return IhpSg13g2DeviceCapacitanceAdapter(
+        config,
+        simulator,
+        correction.workers,
+    )
 
 
 def synthetic_device_correction(
@@ -67,13 +70,15 @@ def synthetic_device_correction(
     lengths: np.ndarray,
     finger_widths: np.ndarray,
     correction: DeviceCorrectionConfig,
+    port_count: int,
 ) -> np.ndarray:
     output = np.empty(
-        correction_shape(lengths, finger_widths, correction, primitive),
+        correction_shape(
+            lengths, finger_widths, correction, primitive, port_count
+        ),
         dtype=np.float64,
     )
     bias = correction.biases[primitive]
-    port_count = len(PORTS[primitive])
     base = np.full((port_count, port_count), -1.0)
     np.fill_diagonal(base, port_count - 1.0)
     for indices in itertools.product(
@@ -117,6 +122,7 @@ def characterize_geometry_correction(
         output_root,
     )
     definition = adapter.definition(primitive)
+    simulator = adapter.simulator_for(primitive)
     bias_grid = correction.biases[primitive]
     biases = tuple(
         Bias(*values)
@@ -131,7 +137,7 @@ def characterize_geometry_correction(
         index, bias = item
         point_root = output_root / f"bias_{index:04d}"
         pex = extract_port_admittance(
-            adapter.simulator,
+            simulator,
             definition,
             bias,
             prepared.pex_path,
@@ -139,7 +145,7 @@ def characterize_geometry_correction(
             point_root / "pex",
         )
         aggregate = extract_port_admittance(
-            adapter.simulator,
+            simulator,
             definition,
             bias,
             prepared.aggregate_path,
@@ -169,7 +175,7 @@ def characterize_geometry_correction(
             f"{maximum_consistency:.3%} exceeds "
             f"{correction.frequency_consistency:.3%}"
         )
-    port_count = len(PORTS[primitive])
+    port_count = len(definition.ports)
     matrices = np.stack([value[0] for value in samples]).reshape(
         bias_grid.vbs.size,
         bias_grid.vgs.size,

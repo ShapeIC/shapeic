@@ -46,7 +46,7 @@ def load_cellkit(root: Path, pdk_root: Path, pdk: str) -> ResolvedCellKit:
     catalog = module.CellKitCatalog.open(root, pdk, pdk_root)
     return ResolvedCellKit(
         root=root,
-        pdk_root=pdk_root,
+        pdk_root=catalog.pdk_root,
         pdk=pdk,
         catalog=catalog,
         technology=catalog.technology(),

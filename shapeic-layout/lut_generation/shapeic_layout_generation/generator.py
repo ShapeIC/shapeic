@@ -76,6 +76,7 @@ def _generate_primitive(
             config.lengths,
             config.finger_widths,
             correction_config,
+            port_count,
         )
         if correction_config is not None
         and correction_config.backend == "synthetic"
@@ -86,6 +87,7 @@ def _generate_primitive(
                     config.finger_widths,
                     correction_config,
                     primitive,
+                    port_count,
                 ),
                 dtype=np.float64,
             )
