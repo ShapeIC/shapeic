@@ -215,7 +215,7 @@ pub fn run(spec: OtaPreLayoutSpec) -> Result<(), Box<dyn Error>> {
     let nmos = nmos_table.model(spec.nmos_model)?;
     let pmos = pmos_table.model(spec.pmos_model)?;
 
-    let primitives = load_primitive_catalog(&manifest.join("../analoglib/primitives"))
+    let primitives = load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives"))
         .map_err(|error| io::Error::other(format!("could not load primitives: {error:?}")))?;
     let macro_ = ota_macro(manifest.join("examples/ota_4t_pre_layout/gain.spice"));
     let macros = MacroCatalog::from_macros([macro_.clone()])?;
