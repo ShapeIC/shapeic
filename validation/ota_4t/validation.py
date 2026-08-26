@@ -88,19 +88,19 @@ if __name__ == "__main__":
 
             results = [float(x) for x in first_line.split()]
 
-            shapeic_gain = float(row["dc_gain_db"])
+            shapeic_gain = float(row["electrical_dc_gain_db"])
             simulation_gain = results[1]
             gain_error = (abs(simulation_gain-shapeic_gain)/simulation_gain)*100
 
-            shapeic_bw = float(row["bandwidth_3db_hz"])
+            shapeic_bw = float(row["electrical_bandwidth_3db_hz"])
             simulation_bw = results[3]
             bw_error = (abs(simulation_bw-shapeic_bw)/simulation_bw)*100
 
-            shapeic_gbw = float(row["unity_gain_hz"])
+            shapeic_gbw = float(row["electrical_unity_gain_hz"])
             simulation_gbw = results[5]
             gbw_error = (abs(shapeic_gbw - simulation_gbw)/simulation_gbw)*100
 
-            shapeic_pm = float(row["phase_margin_deg"])
+            shapeic_pm = float(row["electrical_phase_margin_deg"])
             simulation_pm = results[7]
             pm_error = (abs(simulation_pm-shapeic_pm)/simulation_pm)*100
 

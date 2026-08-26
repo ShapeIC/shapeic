@@ -81,7 +81,7 @@ const MAX_CURRENT_MIRROR_WIDTH: f64 = 100.0e-6;
 fn main() -> Result<(), Box<dyn Error>> {
     let total_start = Instant::now();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let primitives_dir = manifest.join("../analoglib/primitives");
+    let primitives_dir = manifest.join("../shapeic-cellkit/primitives");
     let testbench_path = manifest.join("examples/ota_4t_v3/gain.spice");
     let (nmos_path, pmos_path, physical_path) = lut_paths()?;
 
