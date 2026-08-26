@@ -5,6 +5,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -44,6 +45,8 @@ def run_magic(
     magic_rcfile: Path,
     work_directory: Path,
     primitive: str | None = None,
+    magic_startup_commands: tuple[str, ...] = (),
+    pex_normalizer: Callable[[str, str], str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     extraction = extract_primitive(
         gds_path,
@@ -53,6 +56,8 @@ def run_magic(
         magic_rcfile=magic_rcfile,
         work_directory=work_directory,
         primitive=primitive,
+        magic_startup_commands=magic_startup_commands,
+        pex_normalizer=pex_normalizer,
     )
     return extraction.conductance, extraction.capacitance
 
@@ -66,6 +71,8 @@ def extract_primitive(
     magic_rcfile: Path,
     work_directory: Path,
     primitive: str | None = None,
+    magic_startup_commands: tuple[str, ...] = (),
+    pex_normalizer: Callable[[str, str], str] | None = None,
 ) -> PrimitiveExtraction:
     result = write_magic_pex(
         gds_path,
@@ -73,8 +80,13 @@ def extract_primitive(
         magic_binary=magic_binary,
         magic_rcfile=magic_rcfile,
         work_directory=work_directory,
+        magic_startup_commands=magic_startup_commands,
     )
     extracted_text = result.spice_path.read_text(encoding="utf-8")
+    if pex_normalizer is not None:
+        if primitive is None:
+            raise ValueError("PEX normalization requires a primitive name")
+        extracted_text = pex_normalizer(extracted_text, primitive)
     if primitive is not None:
         try:
             validate_primitive_pex(
@@ -107,6 +119,7 @@ def write_magic_pex(
     magic_binary: str,
     magic_rcfile: Path,
     work_directory: Path,
+    magic_startup_commands: tuple[str, ...] = (),
 ) -> MagicPexResult:
     """Run Magic and preserve the flattened transistor-level PEX artifacts."""
     work_directory.mkdir(parents=True, exist_ok=True)
@@ -120,6 +133,7 @@ def write_magic_pex(
         "\n".join(
             (
                 "drc off",
+                *magic_startup_commands,
                 f"gds read {gds_path}",
                 f"load {cell_name}",
                 "select top cell",

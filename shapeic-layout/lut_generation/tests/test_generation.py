@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+CELLKIT_ROOT = ROOT.parents[1] / "shapeic-cellkit"
 sys.path.insert(0, str(ROOT))
 
 from shapeic_layout_generation.config import (
@@ -47,6 +48,133 @@ from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
+    def test_magic_inserts_provider_startup_before_reading_gds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gds = root / "primitive.gds"
+            rcfile = root / "magicrc"
+            work = root / "magic"
+            gds.write_bytes(b"gds")
+            rcfile.write_text("", encoding="ascii")
+
+            def run_magic(*args, **kwargs):
+                del args, kwargs
+                (work / "primitive.pex.spice").write_text(
+                    ".subckt primitive P N\nC0 P N 1f\n.ends\n",
+                    encoding="ascii",
+                )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch(
+                "shapeic_layout_generation.extractor.subprocess.run",
+                side_effect=run_magic,
+            ):
+                result = write_magic_pex(
+                    gds,
+                    "primitive",
+                    magic_binary="magic",
+                    magic_rcfile=rcfile,
+                    work_directory=work,
+                    magic_startup_commands=("tech load selected",),
+                )
+            script = result.script_path.read_text(encoding="ascii").splitlines()
+            self.assertLess(
+                script.index("tech load selected"), script.index(f"gds read {gds}")
+            )
+
+    def test_cellkit_config_resolves_selected_pdk_and_manifest_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed = root / "pdks/ihp-sg13g2"
+            rcfile = installed / "libs.tech/magic/ihp-sg13g2.magicrc"
+            rcfile.parent.mkdir(parents=True)
+            rcfile.write_text("", encoding="ascii")
+            nmos = root / "nmos.toml"
+            pmos = root / "pmos.toml"
+            nmos.write_text("device = 'nmos'\n", encoding="ascii")
+            pmos.write_text("device = 'pmos'\n", encoding="ascii")
+            config_path = root / "physical.toml"
+            config_path.write_text(
+                f'''primitives = ["simplediffpair", "currentmirror"]
+
+[cellkit]
+root = "{CELLKIT_ROOT}"
+
+[pdk]
+
+[electrical_models]
+nmos = "{nmos}"
+pmos = "{pmos}"
+
+[physical]
+backend = "synthetic"
+work_directory = "{root / 'work'}"
+
+[output]
+path = "{root / 'physical.npz'}"
+
+[sweep]
+length = [0.4]
+finger_width = [1.0]
+nf = [1]
+''',
+                encoding="ascii",
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {"PDK_ROOT": str(root / "pdks"), "PDK": "ihp-sg13g2"},
+                ),
+            ):
+                config = load_config(config_path)
+                generated = generate(config_path)
+
+            self.assertEqual(config.pdk, "ihp-sg13g2")
+            self.assertEqual(config.pdk_revision, "local-installation")
+            self.assertEqual(config.extractor.magic_rcfile, rcfile)
+            self.assertEqual(
+                config.port_order("simplediffpair"),
+                ("DP", "DN", "GP", "GN", "S", "B"),
+            )
+            self.assertEqual(
+                config.catalog_name("currentmirror"), "simplecurrentmirror"
+            )
+            self.assertEqual(config.electrical_models.nmos, nmos)
+            with zipfile.ZipFile(generated) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["pdk_revision"], "local-installation")
+            self.assertEqual(
+                manifest["cellkit"],
+                {"root_name": "shapeic-cellkit", "technology": "ihp-sg13g2"},
+            )
+
+    def test_cellkit_config_does_not_install_a_missing_pdk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "physical.toml"
+            config_path.write_text(
+                f'''[cellkit]
+root = "{CELLKIT_ROOT}"
+[pdk]
+root = "{root / 'pdks'}"
+name = "ihp-sg13g2"
+[electrical_models]
+nmos = "missing-nmos.toml"
+pmos = "missing-pmos.toml"
+[physical]
+backend = "synthetic"
+[output]
+path = "physical.npz"
+[sweep]
+length = [0.4]
+finger_width = [1.0]
+nf = [1]
+''',
+                encoding="ascii",
+            )
+            with self.assertRaisesRegex(Exception, "was not found"):
+                load_config(config_path)
+
     def test_synthetic_archive_matches_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

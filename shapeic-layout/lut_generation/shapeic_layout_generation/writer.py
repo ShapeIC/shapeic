@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import GenerationConfig, PORTS
+from .config import GenerationConfig
 from .device_correction import validate_device_correction
 
 
@@ -73,6 +73,13 @@ def write_archive(
             "nf_query": "positive-integer-with-linear-interpolation",
             "primitives": [],
         }
+        if config.pdk_revision is not None:
+            manifest["pdk_revision"] = config.pdk_revision
+        if config.cellkit is not None:
+            manifest["cellkit"] = {
+                "root_name": config.cellkit.root.name,
+                "technology": config.cellkit.pdk,
+            }
         with zipfile.ZipFile(
             temporary,
             mode="w",
@@ -81,6 +88,7 @@ def write_archive(
             allowZip64=True,
         ) as archive:
             for index, primitive in enumerate(config.primitives):
+                ports = config.port_order(primitive)
                 root = f"primitives/{index}"
                 axis_paths = []
                 for name, values in (
@@ -96,8 +104,8 @@ def write_archive(
                     config.lengths.size,
                     config.finger_widths.size,
                     config.finger_counts.size,
-                    len(PORTS[primitive]),
-                    len(PORTS[primitive]),
+                    len(ports),
+                    len(ports),
                 )
                 if conductance.shape != expected or capacitance.shape != expected:
                     raise ValueError(f"{primitive} matrices must have shape {expected}")
@@ -108,7 +116,7 @@ def write_archive(
                 manifest["primitives"].append(
                     {
                         "name": primitive,
-                        "port_order": list(PORTS[primitive]),
+                        "port_order": list(ports),
                         "axis_order": list(AXIS_ORDER),
                         "axes": axis_paths,
                         "conductance": g_path,
@@ -132,7 +140,7 @@ def write_archive(
                     )
                     expected_correction = tuple(
                         axis.size for axis in correction_axes
-                    ) + (len(PORTS[primitive]), len(PORTS[primitive]))
+                    ) + (len(ports), len(ports))
                     if correction.shape != expected_correction:
                         raise ValueError(
                             f"{primitive} device correction must have shape "

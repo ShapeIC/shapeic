@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import PORTS, GenerationConfig, load_config
+from .config import GenerationConfig, load_config
 from .device_capacitance import Geometry
 from .device_capacitance_adapter import DeviceCapacitanceAdapter
 from .device_correction import (
@@ -58,7 +58,8 @@ def _generate_primitive(
     primitive: str,
     adapter: DeviceCapacitanceAdapter | None,
 ) -> tuple[tuple[np.ndarray, np.ndarray], np.ndarray | None]:
-    port_count = len(PORTS[primitive])
+    ports = config.port_order(primitive)
+    port_count = len(ports)
     shape = (
         config.lengths.size,
         config.finger_widths.size,
@@ -124,9 +125,17 @@ def _generate_primitive(
                     extracted = extract_primitive(
                         gds_path,
                         cell_name,
-                        PORTS[primitive],
+                        ports,
                         magic_binary=config.extractor.magic_binary,
                         magic_rcfile=config.extractor.magic_rcfile,
+                        magic_startup_commands=(
+                            config.extractor.magic_startup_commands
+                        ),
+                        pex_normalizer=(
+                            config.cellkit.technology.normalize_pex
+                            if config.cellkit is not None
+                            else None
+                        ),
                         work_directory=point_root,
                         primitive=primitive,
                     )

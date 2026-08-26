@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from .cellkit import ResolvedCellKit, load_cellkit
+
 
 PORTS = {
     "simplediffpair": ("DP", "DN", "GP", "GN", "S", "B"),
@@ -25,6 +27,15 @@ class ExtractorConfig:
     magic_rcfile: Path | None
     work_directory: Path
     keep_work: bool
+    magic_startup_commands: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ElectricalModelsConfig:
+    """Electrical LUT generator inputs used to build aggregate MOS devices."""
+
+    nmos: Path
+    pmos: Path
 
 
 @dataclass(frozen=True)
@@ -61,12 +72,39 @@ class GenerationConfig:
     primitives: tuple[str, ...]
     extractor: ExtractorConfig
     device_correction: DeviceCorrectionConfig | None
+    pdk_revision: str | None = None
+    cellkit: ResolvedCellKit | None = None
+    electrical_models: ElectricalModelsConfig | None = None
+    port_orders: dict[str, tuple[str, ...]] | None = None
+    primitive_catalog_names: dict[str, str] | None = None
+
+    def port_order(self, primitive: str) -> tuple[str, ...]:
+        if self.port_orders is not None:
+            try:
+                return self.port_orders[primitive]
+            except KeyError as error:
+                raise ValueError(f"unknown configured primitive '{primitive}'") from error
+        try:
+            return PORTS[primitive]
+        except KeyError as error:
+            raise ValueError(f"unknown legacy primitive '{primitive}'") from error
+
+    def catalog_name(self, primitive: str) -> str:
+        if self.primitive_catalog_names is None:
+            return primitive
+        return self.primitive_catalog_names[primitive]
 
 
 def load_config(path: Path) -> GenerationConfig:
     source = path.resolve()
     with source.open("rb") as handle:
         raw = tomllib.load(handle)
+    if "cellkit" in raw or "physical" in raw or isinstance(raw.get("pdk"), dict):
+        return _load_cellkit_config(source, raw)
+    return _load_legacy_config(source, raw)
+
+
+def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
     output = _table(raw, "output")
     sweep = _table(raw, "sweep")
     extraction = _table(raw, "extraction")
@@ -115,11 +153,114 @@ def load_config(path: Path) -> GenerationConfig:
     return config
 
 
+def _load_cellkit_config(
+    source: Path, raw: dict[str, Any]
+) -> GenerationConfig:
+    output = _table(raw, "output")
+    sweep = _table(raw, "sweep")
+    cellkit_raw = _table(raw, "cellkit")
+    pdk_raw = _table(raw, "pdk")
+    physical = _table(raw, "physical")
+    electrical_raw = _table(raw, "electrical_models")
+
+    cellkit_root = _path(_required_string(cellkit_raw, "root"), source.parent)
+    pdk_name = _selector(pdk_raw.get("name"), "PDK")
+    pdk_root = _path(_selector(pdk_raw.get("root"), "PDK_ROOT"), source.parent)
+    resolved = load_cellkit(cellkit_root, pdk_root, pdk_name)
+    technology = resolved.technology
+
+    backend = str(physical.get("backend", "magic")).lower()
+    if backend not in {"magic", "synthetic"}:
+        raise ValueError("physical.backend must be 'magic' or 'synthetic'")
+    primitive_names = tuple(
+        str(value).lower()
+        for value in raw.get("primitives", ("simplediffpair", "currentmirror"))
+    )
+    if not primitive_names or len(primitive_names) != len(set(primitive_names)):
+        raise ValueError("primitives must be a non-empty list without duplicates")
+    descriptors = {
+        primitive: resolved.catalog.primitive_descriptor_for_lut(primitive)
+        for primitive in primitive_names
+    }
+    port_orders = {
+        primitive: descriptor.port_order
+        for primitive, descriptor in descriptors.items()
+    }
+    catalog_names = {
+        primitive: descriptor.catalog_name
+        for primitive, descriptor in descriptors.items()
+    }
+    electrical_models = ElectricalModelsConfig(
+        nmos=_path(_required_string(electrical_raw, "nmos"), source.parent),
+        pmos=_path(_required_string(electrical_raw, "pmos"), source.parent),
+    )
+    config = GenerationConfig(
+        source_path=source,
+        output_path=_path(str(output["path"]), source.parent),
+        pdk=pdk_name,
+        pdk_revision=str(pdk_raw.get("revision", technology.revision)),
+        layout_policy=str(physical.get("layout_policy", "cellkit-provider")),
+        lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
+        finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,
+        finger_counts=np.asarray(sweep["nf"], dtype=np.float64),
+        primitives=primitive_names,
+        extractor=ExtractorConfig(
+            backend=backend,
+            magic_binary=str(physical.get("magic_binary", "magic")),
+            magic_rcfile=technology.magic_rcfile,
+            work_directory=_path(
+                str(physical.get("work_directory", "../work")), source.parent
+            ),
+            keep_work=bool(physical.get("keep_work", False)),
+            magic_startup_commands=tuple(technology.magic_startup_commands),
+        ),
+        device_correction=_device_correction(
+            raw.get("device_capacitance_correction"),
+            source.parent,
+            primitive_names,
+        ),
+        cellkit=resolved,
+        electrical_models=electrical_models,
+        port_orders=port_orders,
+        primitive_catalog_names=catalog_names,
+    )
+    _validate(config)
+    for name, model_config in (
+        ("electrical_models.nmos", electrical_models.nmos),
+        ("electrical_models.pmos", electrical_models.pmos),
+    ):
+        if not model_config.is_file():
+            raise FileNotFoundError(f"{name} does not exist: {model_config}")
+    return config
+
+
 def _table(raw: dict[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name)
     if not isinstance(value, dict):
         raise ValueError(f"missing [{name}] table")
     return value
+
+
+def _required_string(raw: dict[str, Any], name: str) -> str:
+    value = raw.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
+def _selector(value: object, environment_name: str) -> str:
+    if value is None:
+        value = os.environ.get(environment_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{environment_name} must be set in the environment or in [pdk]"
+        )
+    expanded = os.path.expandvars(value)
+    if "$" in expanded:
+        raise ValueError(
+            f"{environment_name} references an undefined environment variable"
+        )
+    return expanded
 
 
 def _path(value: str, base: Path) -> Path:
