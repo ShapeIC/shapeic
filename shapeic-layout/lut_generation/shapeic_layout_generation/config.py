@@ -77,6 +77,7 @@ class GenerationConfig:
     electrical_models: ElectricalModelsConfig | None = None
     port_orders: dict[str, tuple[str, ...]] | None = None
     primitive_catalog_names: dict[str, str] | None = None
+    primitive_layouts: dict[str, Any] | None = None
 
     def port_order(self, primitive: str) -> tuple[str, ...]:
         if self.port_orders is not None:
@@ -93,6 +94,14 @@ class GenerationConfig:
         if self.primitive_catalog_names is None:
             return primitive
         return self.primitive_catalog_names[primitive]
+
+    def primitive_layout(self, primitive: str):
+        if self.primitive_layouts is None:
+            return None
+        try:
+            return self.primitive_layouts[primitive]
+        except KeyError as error:
+            raise ValueError(f"unknown configured primitive '{primitive}'") from error
 
 
 def load_config(path: Path) -> GenerationConfig:
@@ -190,6 +199,25 @@ def _load_cellkit_config(
         primitive: descriptor.catalog_name
         for primitive, descriptor in descriptors.items()
     }
+    primitive_layouts = {
+        primitive: resolved.catalog.primitive(descriptor.catalog_name)
+        for primitive, descriptor in descriptors.items()
+    }
+    policies = {
+        layout.provider.LAYOUT_POLICY for layout in primitive_layouts.values()
+    }
+    if len(policies) != 1:
+        raise ValueError(
+            "configured primitive PCells must use one common layout policy; found "
+            + ", ".join(sorted(policies))
+        )
+    provider_policy = next(iter(policies))
+    requested_policy = physical.get("layout_policy")
+    if requested_policy is not None and str(requested_policy) != provider_policy:
+        raise ValueError(
+            f"physical.layout_policy '{requested_policy}' does not match CellKit "
+            f"provider policy '{provider_policy}'"
+        )
     electrical_models = ElectricalModelsConfig(
         nmos=_path(_required_string(electrical_raw, "nmos"), source.parent),
         pmos=_path(_required_string(electrical_raw, "pmos"), source.parent),
@@ -199,7 +227,7 @@ def _load_cellkit_config(
         output_path=_path(str(output["path"]), source.parent),
         pdk=pdk_name,
         pdk_revision=str(pdk_raw.get("revision", technology.revision)),
-        layout_policy=str(physical.get("layout_policy", "cellkit-provider")),
+        layout_policy=provider_policy,
         lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
         finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,
         finger_counts=np.asarray(sweep["nf"], dtype=np.float64),
@@ -223,6 +251,7 @@ def _load_cellkit_config(
         electrical_models=electrical_models,
         port_orders=port_orders,
         primitive_catalog_names=catalog_names,
+        primitive_layouts=primitive_layouts,
     )
     _validate(config)
     for name, model_config in (

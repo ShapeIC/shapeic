@@ -1,0 +1,18 @@
+
+Note: No compatibility mode selected!
+
+
+Circuit: * shapeic primitive multiport admittance extraction
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+No. of Data Rows : 1
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+No. of Data Rows : 2
+binary raw file "/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/simplediffpair_l0_w0_n1/device_correction/bias_0000/aggregate/excite_b/admittance.raw"
+Note: Simulation executed from .control section 

@@ -1,0 +1,23 @@
+* NGSPICE file created from currentmirror_l0p400_wf0p150_nf1_flat.ext - technology: ihp-sg13g2
+
+.subckt currentmirror_l0p400_wf0p150_nf1_flat DOUT DREF S B
+X0 DOUT DREF S w_n1348_n215# sg13_lv_pmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+X1 DREF DREF S w_n1348_n215# sg13_lv_pmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+X2 S S S w_n1348_n215# sg13_lv_pmos ad=0.1005p pd=1.34u as=8.2134p ps=57.54u w=0.15u l=0.4u
+X3 S S S w_n1348_n215# sg13_lv_pmos ad=0.1005p pd=1.34u as=0 ps=0 w=0.15u l=0.4u
+C0 B w_n1348_n215# 0.02305f
+C1 S DREF 0.14066f
+C2 DOUT w_n1348_n215# 0.05396f
+C3 DOUT DREF 0.06159f
+C4 w_n1348_n215# DREF 0.63638f
+C5 S B 0.00694f
+C6 S a_n78_603# 0.00476f
+C7 a_n78_603# B 0.01359f
+C8 S DOUT 0.02312f
+C9 S w_n1348_n215# 1.73183f
+C10 B sub 0.01027f
+C11 DOUT sub 0.00306f
+C12 DREF sub 0.54056f
+C13 S sub 0.52265f
+.ends
+

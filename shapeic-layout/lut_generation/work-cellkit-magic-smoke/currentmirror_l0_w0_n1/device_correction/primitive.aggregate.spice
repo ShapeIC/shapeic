@@ -1,0 +1,4 @@
+.subckt aggregate_currentmirror DOUT DREF S B
+XCM1 DOUT DREF S B sg13_lv_pmos l=3.99999999999999982e-07 w=7.49999999999999934e-06 ng=50
+XCM2 DREF DREF S B sg13_lv_pmos l=3.99999999999999982e-07 w=7.49999999999999934e-06 ng=50
+.ends aggregate_currentmirror

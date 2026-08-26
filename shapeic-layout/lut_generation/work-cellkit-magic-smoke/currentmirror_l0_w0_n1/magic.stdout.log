@@ -1,0 +1,34 @@
+
+Magic 8.3 revision 623 - Compiled on Tue Mar 17 08:19:38 UTC 2026.
+Starting magic under Tcl interpreter
+Using the terminal as the console.
+Using NULL graphics device.
+Processing system .magicrc file
+Switching to WIRING tool.
+Switching to NETLIST tool.
+Switching to PICK tool.
+Switching to BOX tool.
+Sourcing design .magicrc for technology ihp-sg13g2 ...
+2 Magic internal units = 1 Lambda
+Input style sg13g2(): scaleFactor=2, multiplier=2
+The following types are not handled by extraction and will be treated as non-electrical types:
+    pblock sealcont difffill nemitter hvnemitter hvisodiffres sealvia1 sealvia2 sealvia3 sealvia4 sealvia5 sealvia6 pillar solder seal glass thruvia inductor 
+Scaled tech values by 2 / 1 to match internal grid scaling
+Loading ihp-sg13g2 Device Generator Menu ...
+Loading "/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/currentmirror_l0_w0_n1/currentmirror_l0p400_wf0p150_nf50.tcl" from command line.
+Warning: Calma reading is not undoable!  I hope that's OK.
+Library written using GDS-II Release 6.0
+Library name: LIB
+Reading "$$$CONTEXT_INFO$$$".
+Reading "Unnamed_24".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p98__dff61cd1".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S1p4_1_8fd930ef".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p28__2625054a".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p16__fbf0290e".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p78__3b728210".
+Reading "pmos_bussed_l0p400_wf0p150_nf50".
+Reading "ntap1_W0p78_L0p78_R1_C1_LNNWelldrawing_LAActivdrawing_L_f8bafa10".
+Reading "currentmirror_l0p400_wf0p150_nf50".
+Extracting currentmirror_l0p400_wf0p150_nf50_flat into currentmirror_l0p400_wf0p150_nf50_flat.ext:
+currentmirror_l0p400_wf0p150_nf50_flat: 100 warnings
+exttospice finished.

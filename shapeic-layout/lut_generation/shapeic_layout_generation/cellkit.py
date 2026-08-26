@@ -18,6 +18,10 @@ class ResolvedCellKit:
     pdk: str
     catalog: Any
     technology: Any
+    geometry_type: Any
+
+    def geometry(self, length_m: float, finger_width_m: float, nf: int):
+        return self.geometry_type(length_m, finger_width_m, nf)
 
 
 def load_cellkit(root: Path, pdk_root: Path, pdk: str) -> ResolvedCellKit:
@@ -46,4 +50,5 @@ def load_cellkit(root: Path, pdk_root: Path, pdk: str) -> ResolvedCellKit:
         pdk=pdk,
         catalog=catalog,
         technology=catalog.technology(),
+        geometry_type=module.PrimitiveGeometry,
     )

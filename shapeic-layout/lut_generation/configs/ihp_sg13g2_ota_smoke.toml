@@ -1,18 +1,27 @@
-pdk = "ihp-sg13g2"
-layout_policy = "symmetric-adjacent-with-edge-dummies-v3"
 primitives = ["simplediffpair", "currentmirror"]
 
+[cellkit]
+root = "../../../shapeic-cellkit"
+
+[pdk]
+root = "${PDK_ROOT}"
+name = "${PDK}"
+
+[electrical_models]
+nmos = "../../../shapeic-lut/lut_generation/configs/ihp_sg13g2_lv_nmos.toml"
+pmos = "../../../shapeic-lut/lut_generation/configs/ihp_sg13g2_lv_pmos.toml"
+
 [output]
-path = "../generated/ihp_sg13g2_ota_physical_smoke.npz"
+path = "../generated/ihp_sg13g2_ota_physical_cellkit_smoke.npz"
 
 [sweep]
 length = [0.4, 0.8]
 finger_width = [0.15, 10.0]
 nf = [1, 2, 50]
 
-[extraction]
+[physical]
 backend = "synthetic"
-work_directory = "../work-smoke"
+work_directory = "../work-cellkit-smoke"
 keep_work = true
 
 [device_capacitance_correction]

@@ -1,0 +1,4 @@
+.subckt aggregate_simplediffpair DP DN GP GN S B
+XDP1 DP GP S B sg13_lv_nmos l=3.99999999999999982e-07 w=1.49999999999999993e-07 ng=1
+XDP2 DN GN S B sg13_lv_nmos l=3.99999999999999982e-07 w=1.49999999999999993e-07 ng=1
+.ends aggregate_simplediffpair

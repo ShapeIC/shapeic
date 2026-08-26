@@ -1,0 +1,20 @@
+* Shapeic primitive multiport admittance extraction
+.lib '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib' mos_tt
+.include '/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/simplediffpair_l0_w0_n1/device_correction/primitive.mos_only.spice'
+VPORT_DP DP 0 DC=3.49999999999999978e-01 AC=0
+VPORT_DN DN 0 DC=3.49999999999999978e-01 AC=1
+VPORT_GP GP 0 DC=2.50000000000000000e-01 AC=0
+VPORT_GN GN 0 DC=2.50000000000000000e-01 AC=0
+VPORT_S S 0 DC=0.00000000000000000e+00 AC=0
+VPORT_B B 0 DC=-6.50000000000000022e-01 AC=0
+XPRIMITIVE DP DN GP GN S B simplediffpair_l0p400_wf0p150_nf50_flat
+.options temp=27 tnom=27
+.control
+pre_osdi '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi'
+pre_osdi '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi'
+save i(VPORT_DP) i(VPORT_DN) i(VPORT_GP) i(VPORT_GN) i(VPORT_S) i(VPORT_B)
+op
+ac dec 1 1.00000000000000000e+06 1.00000000000000000e+07
+write '/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/simplediffpair_l0_w0_n1/device_correction/bias_0000/pex/excite_dn/admittance.raw' frequency i(VPORT_DP) i(VPORT_DN) i(VPORT_GP) i(VPORT_GN) i(VPORT_S) i(VPORT_B)
+.endc
+.end

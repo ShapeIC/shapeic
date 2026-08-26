@@ -25,6 +25,7 @@ from shapeic_layout_generation.config import (
     GenerationConfig,
     load_config,
 )
+from shapeic_layout_generation.cellkit import load_cellkit
 from shapeic_layout_generation.device_correction import (
     validate_device_correction,
 )
@@ -48,6 +49,83 @@ from shapeic_layout_generation.writer import write_archive
 
 
 class GenerationTest(unittest.TestCase):
+    def test_magic_generation_uses_the_cellkit_pcell_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rendered_geometries = []
+            written_paths = []
+
+            class Component:
+                def write_gds(self, path):
+                    written_paths.append(path)
+
+            class Layout:
+                def render(self, geometry):
+                    rendered_geometries.append(geometry)
+                    return SimpleNamespace(
+                        component=Component(), cell_name="cellkit_primitive"
+                    )
+
+            geometry_type = lambda length, finger_width, nf: SimpleNamespace(
+                length_m=length,
+                finger_width_m=finger_width,
+                nf=nf,
+            )
+            config = GenerationConfig(
+                source_path=root / "config.toml",
+                output_path=root / "physical.npz",
+                pdk="test-pdk",
+                layout_policy="test-policy",
+                lengths=np.asarray([0.4e-6]),
+                finger_widths=np.asarray([1.5e-6]),
+                finger_counts=np.asarray([3.0]),
+                primitives=("currentmirror",),
+                extractor=ExtractorConfig(
+                    backend="magic",
+                    magic_binary="magic",
+                    magic_rcfile=root / "magicrc",
+                    work_directory=root / "work",
+                    keep_work=True,
+                ),
+                device_correction=None,
+                cellkit=SimpleNamespace(
+                    geometry=geometry_type,
+                    technology=SimpleNamespace(
+                        normalize_pex=lambda text, primitive: text
+                    ),
+                ),
+                port_orders={"currentmirror": ("DOUT", "DREF", "S", "B")},
+                primitive_catalog_names={"currentmirror": "simplecurrentmirror"},
+                primitive_layouts={"currentmirror": Layout()},
+            )
+            matrix = np.zeros((4, 4))
+            extraction = SimpleNamespace(
+                conductance=matrix,
+                capacitance=matrix,
+                pex=SimpleNamespace(
+                    spice_path=root / "raw.pex.spice",
+                    subcircuit_name="cellkit_primitive_flat",
+                ),
+            )
+            with (
+                patch(
+                    "shapeic_layout_generation.generator.write_primitive_gds"
+                ) as legacy_writer,
+                patch(
+                    "shapeic_layout_generation.generator.extract_primitive",
+                    return_value=extraction,
+                ) as extract,
+            ):
+                _generate_primitive(config, "currentmirror", None)
+
+            legacy_writer.assert_not_called()
+            self.assertEqual(len(rendered_geometries), 1)
+            self.assertAlmostEqual(rendered_geometries[0].length_m, 0.4e-6)
+            self.assertAlmostEqual(rendered_geometries[0].finger_width_m, 1.5e-6)
+            self.assertEqual(rendered_geometries[0].nf, 3)
+            self.assertEqual(written_paths, [root / "work/currentmirror_l0_w0_n0/layout.gds"])
+            self.assertEqual(extract.call_args.args[1], "cellkit_primitive")
+
     def test_magic_inserts_provider_startup_before_reading_gds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -749,20 +827,23 @@ vds = [0.5]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             os.environ.setdefault("MPLCONFIGDIR", directory)
+            pdk_root = Path(os.environ["PDK_ROOT"])
+            pdk = os.environ["PDK"]
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, pdk)
             for primitive in ("simplediffpair", "currentmirror"):
+                descriptor = cellkit.catalog.primitive_descriptor_for_lut(primitive)
+                layout = cellkit.catalog.primitive(descriptor.catalog_name)
                 for nf in (1, 20):
                     point = root / f"{primitive}-nf{nf}"
                     gds = point / "layout.gds"
-                    cell_name = write_primitive_gds(
-                        primitive,
-                        0.8e-6,
-                        0.15e-6,
-                        nf,
-                        gds,
+                    rendered = layout.render(
+                        cellkit.geometry(0.8e-6, 0.15e-6, nf)
                     )
+                    gds.parent.mkdir(parents=True, exist_ok=True)
+                    rendered.component.write_gds(gds)
                     extracted = write_magic_pex(
                         gds,
-                        cell_name,
+                        rendered.cell_name,
                         magic_binary=magic,
                         magic_rcfile=rcfile,
                         work_directory=point / "magic",
@@ -812,12 +893,13 @@ vds = [0.5]
 
     def _magic_backend(self) -> tuple[str, Path]:
         magic = shutil.which("magic")
-        pdk_root = os.environ.get("IHP_PDK_ROOT")
-        if magic is None or pdk_root is None:
-            self.skipTest("requires magic and IHP_PDK_ROOT")
-        rcfile = (
-            Path(pdk_root) / "libs.tech/magic/ihp-sg13g2.magicrc"
-        ).resolve()
+        pdk_root = os.environ.get("PDK_ROOT")
+        pdk = os.environ.get("PDK")
+        if magic is None or pdk_root is None or pdk is None:
+            self.skipTest("requires Magic, PDK_ROOT, and PDK")
+        if pdk != "ihp-sg13g2":
+            self.skipTest("requires PDK=ihp-sg13g2")
+        rcfile = (Path(pdk_root) / pdk / "libs.tech/magic/ihp-sg13g2.magicrc").resolve()
         if not rcfile.is_file():
             self.skipTest(f"Magic rcfile is absent: {rcfile}")
         return magic, rcfile

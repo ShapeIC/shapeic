@@ -1,0 +1,6 @@
+.subckt simplediffpair_l0p400_wf0p150_nf1_flat DP DN GP GN S B
+X0 DN GN S B sg13_lv_nmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+X1 S S S B sg13_lv_nmos ad=0.1005p pd=1.34u as=7.4716p ps=53.64u w=0.15u l=0.4u
+X2 S S S B sg13_lv_nmos ad=0.1005p pd=1.34u as=0 ps=0 w=0.15u l=0.4u
+X3 DP GP S B sg13_lv_nmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+.ends simplediffpair_l0p400_wf0p150_nf1_flat

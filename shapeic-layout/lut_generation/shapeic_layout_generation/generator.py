@@ -114,13 +114,25 @@ def _generate_primitive(
                         f"{primitive}_l{li}_w{wi}_n{ni}"
                     )
                     gds_path = point_root / "layout.gds"
-                    cell_name = write_primitive_gds(
-                        primitive,
-                        float(length),
-                        float(finger_width),
-                        nf,
-                        gds_path,
-                    )
+                    layout = config.primitive_layout(primitive)
+                    if layout is None:
+                        cell_name = write_primitive_gds(
+                            primitive,
+                            float(length),
+                            float(finger_width),
+                            nf,
+                            gds_path,
+                        )
+                    else:
+                        assert config.cellkit is not None
+                        rendered = layout.render(
+                            config.cellkit.geometry(
+                                float(length), float(finger_width), nf
+                            )
+                        )
+                        gds_path.parent.mkdir(parents=True, exist_ok=True)
+                        rendered.component.write_gds(gds_path)
+                        cell_name = rendered.cell_name
                     assert config.extractor.magic_rcfile is not None
                     extracted = extract_primitive(
                         gds_path,
