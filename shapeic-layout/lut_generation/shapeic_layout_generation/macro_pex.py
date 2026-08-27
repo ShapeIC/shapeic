@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .config import GenerationConfig
-from .extractor import write_magic_pex
+from .extractor import canonicalize_subcircuit_ports, write_magic_pex
 
 
 @dataclass(frozen=True)
@@ -112,6 +112,7 @@ def prepare_macro_pex(
 ) -> MacroPexTopology:
     text = source.read_text(encoding="utf-8")
     normalized = technology.normalize_macro_pex(text, macro_name, bulk_ports)
+    normalized = canonicalize_subcircuit_ports(normalized, port_order)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(normalized, encoding="utf-8")
     return validate_macro_pex(

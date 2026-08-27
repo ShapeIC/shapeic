@@ -12,7 +12,7 @@ from shapeic_layout_generation.macro_pex import generate_macro_pex
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate a routed IHP SG13G2 four-transistor OTA and extract its PEX."
+        description="Generate a routed CellKit four-transistor OTA and extract its PEX."
     )
     parser.add_argument("config", type=Path, help="physical LUT generation TOML")
     parser.add_argument("output_dir", type=Path, help="artifact directory")

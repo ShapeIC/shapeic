@@ -48,6 +48,13 @@ def canonicalize_subcircuit_ports(text: str, ports: tuple[str, ...]) -> str:
         raise ValueError("PEX must contain exactly one flattened subcircuit")
     index = headers[0]
     fields = lines[index].split()
+    continuation_end = index + 1
+    while (
+        continuation_end < len(lines)
+        and lines[continuation_end].lstrip().startswith("+")
+    ):
+        fields.extend(lines[continuation_end].lstrip()[1:].split())
+        continuation_end += 1
     found = tuple(fields[2:])
     expected_keys = tuple(port.casefold() for port in ports)
     found_keys = tuple(port.casefold() for port in found)
@@ -55,7 +62,7 @@ def canonicalize_subcircuit_ports(text: str, ports: tuple[str, ...]) -> str:
         raise ValueError(f"PEX ports must be {ports}, found {found}")
     if len(set(found_keys)) != len(found_keys):
         raise ValueError(f"PEX exposes duplicate ports: {found}")
-    lines[index] = " ".join((fields[0], fields[1], *ports))
+    lines[index:continuation_end] = [" ".join((fields[0], fields[1], *ports))]
     suffix = "\n" if text.endswith("\n") else ""
     return "\n".join(lines) + suffix
 

@@ -105,6 +105,41 @@ C1 n1 VSS 2f
             self.assertEqual(topology.resistor_count, 1)
             self.assertEqual(topology.capacitor_count, 1)
 
+    def test_prepares_macro_pex_in_the_manifest_port_order(self) -> None:
+        spice = """.subckt macro VINP VINN IBIAS
++ VOUT VDD VSS
+X1 VOUT VINP VSS VSS nmos
++ w=1u l=0.4u
+.ends macro
+"""
+        technology = SimpleNamespace(
+            normalize_macro_pex=lambda text, macro, bulk_ports: text
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "raw.spice"
+            output = Path(directory) / "normalized.spice"
+            source.write_text(spice, encoding="utf-8")
+
+            prepare_macro_pex(
+                source,
+                output,
+                macro_name="ota_4t",
+                port_order=("VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"),
+                technology=technology,
+                bulk_ports={"nmos": "VSS", "pmos": "VDD"},
+                expected_subcircuit="macro",
+            )
+
+            self.assertTrue(
+                output.read_text(encoding="utf-8").startswith(
+                    ".subckt macro VOUT VINP VINN IBIAS VDD VSS\n"
+                )
+            )
+            self.assertIn(
+                "X1 VOUT VINP VSS VSS nmos\n+ w=1u l=0.4u\n",
+                output.read_text(encoding="utf-8"),
+            )
+
     def test_generic_macro_pex_rejects_a_wrong_port_order(self) -> None:
         with self.assertRaisesRegex(ValueError, "ports must be"):
             validate_macro_pex(
