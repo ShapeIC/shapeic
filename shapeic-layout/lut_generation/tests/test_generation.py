@@ -28,6 +28,16 @@ def _has_ihp_backend() -> bool:
     except importlib.metadata.PackageNotFoundError:
         return False
 
+
+def _has_gf180_backend() -> bool:
+    try:
+        return (
+            importlib.metadata.version("gdsfactory") == "9.40.1"
+            and importlib.metadata.version("gf180mcu") == "1.0.0"
+        )
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
 from shapeic_layout_generation.config import (
     DeviceCorrectionBias,
     DeviceCorrectionConfig,
@@ -939,6 +949,31 @@ vds = [0.5]
                 ("VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"),
             )
             self.assertGreater(output.stat().st_size, 0)
+
+    @unittest.skipUnless(
+        _has_gf180_backend(),
+        "requires the GF180MCU layout backend with its pinned versions",
+    )
+    def test_gf180_pcell_generates_smoke_domain_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ.setdefault("MPLCONFIGDIR", directory)
+            root = Path(directory)
+            pdk_root = root / "pdks"
+            rcfile = pdk_root / "gf180mcuD/libs.tech/magic/gf180mcuD.magicrc"
+            rcfile.parent.mkdir(parents=True)
+            rcfile.write_text("", encoding="ascii")
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "gf180mcuD")
+            for primitive in ("simplediffpair", "currentmirror"):
+                descriptor = cellkit.catalog.primitive_descriptor_for_lut(primitive)
+                layout = cellkit.catalog.primitive(descriptor.catalog_name)
+                for nf in (1, 2):
+                    output = root / f"{primitive}-nf{nf}.gds"
+                    rendered = layout.render(
+                        cellkit.geometry(0.4e-6, 0.22e-6, nf)
+                    )
+                    rendered.component.write_gds(output)
+                    self.assertTrue(rendered.cell_name.startswith(primitive))
+                    self.assertGreater(output.stat().st_size, 0)
 
     @unittest.skipUnless(
         _has_ihp_backend(),

@@ -12,3 +12,4 @@ shapeic-layout/lut_generation/generated
 pdks/
 shapeic-layout/lut_generation/work-cellkit-sky130-magic-smoke
 shapeic-layout/lut_generation/work-cellkit-sky130-v2-magic-smoke
+shapeic-layout/lut_generation/work-cellkit-gf180-magic-smoke
