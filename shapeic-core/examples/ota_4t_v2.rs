@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let total_start = Instant::now();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let testbench_path = manifest.join("examples/ota_4t/ota_4t.spice");
-    let primitives_dir = manifest.join("../analoglib/primitives/");
+    let primitives_dir = manifest.join("../shapeic-cellkit/primitives/");
     let (nmos_path, pmos_path, _physical_path) = lut_paths()?;
 
     //Load the LUTs and the models

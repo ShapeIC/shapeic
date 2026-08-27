@@ -190,7 +190,7 @@ mod tests {
         let path = manifest_dir
             .parent()
             .unwrap()
-            .join("analoglib/primitives/simplediffpair/primitive.json");
+            .join("shapeic-cellkit/primitives/simplediffpair/primitive.json");
 
         let primitive = load_primitive_manifest(&path).unwrap();
         let model = primitive.small_signal.as_ref().unwrap();
@@ -221,7 +221,7 @@ mod tests {
         let path = manifest_dir
             .parent()
             .unwrap()
-            .join("analoglib/primitives/simplecurrentmirror/primitive.json");
+            .join("shapeic-cellkit/primitives/simplecurrentmirror/primitive.json");
 
         let primitive = load_primitive_manifest(&path).unwrap();
         let physical = primitive.physical_model.as_ref().unwrap();

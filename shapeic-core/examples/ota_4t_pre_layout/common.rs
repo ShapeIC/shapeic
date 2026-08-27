@@ -852,7 +852,8 @@ mod tests {
     #[test]
     fn ota_contains_only_one_electrical_testbench() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let primitives = load_primitive_catalog(&manifest.join("../analoglib/primitives")).unwrap();
+        let primitives =
+            load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives")).unwrap();
         let macro_ = ota_macro(manifest.join("examples/ota_4t_pre_layout/gain.spice"));
         let macros = MacroCatalog::from_macros([macro_.clone()]).unwrap();
         let [testbench] = macro_.exploration().testbenches() else {

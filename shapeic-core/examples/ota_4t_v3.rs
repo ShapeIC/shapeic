@@ -21,22 +21,12 @@ use shapeic_core::macro_model::{
 use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::utils::linspace;
-use shapeic_lut::LookupTable;
 use shapeic_layout::PhysicalLookupTable;
+use shapeic_lut::LookupTable;
 
-const TAIL_CURRENT: f64 = 20.0e-6;
-const VOUT: f64 = 1.0;
-const VOUT_START: f64 = 0.95;
-const VOUT_STOP: f64 = 1.1;
 const VOUT_POINTS: usize = 10;
-const VDD: f64 = 1.5;
-const VIN: f64 = 0.9;
-const VBIAS_START: f64 = 0.65;
-const VBIAS_STOP: f64 = 0.79;
 const VBIAS_POINTS: usize = 10;
 
-const NMOS_MODEL: &str = "sg13_lv_nmos";
-const PMOS_MODEL: &str = "sg13_lv_pmos";
 const DIFF_PAIR_INSTANCE: &str = "xdp";
 const CURRENT_MIRROR_INSTANCE: &str = "xcm";
 const ELECTRICAL_AC_TESTBENCH: &str = "gain_electrical";
@@ -78,6 +68,71 @@ const CURRENT_MIRROR_VDS_COLUMN: &str = "vds__xcm__m1";
 const MAX_DIFF_PAIR_WIDTH: f64 = 100.0e-6;
 const MAX_CURRENT_MIRROR_WIDTH: f64 = 100.0e-6;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PdkSpec {
+    label: &'static str,
+    pdk: &'static str,
+    nmos_model: &'static str,
+    pmos_model: &'static str,
+    tail_current: f64,
+    mirror_reference: f64,
+    vout_start: f64,
+    vout_stop: f64,
+    vdd: f64,
+    vin: f64,
+    vbias_start: f64,
+    vbias_stop: f64,
+    layout_policy: &'static str,
+}
+
+const IHP_SPEC: PdkSpec = PdkSpec {
+    label: "IHP SG13G2",
+    pdk: "ihp-sg13g2",
+    nmos_model: "sg13_lv_nmos",
+    pmos_model: "sg13_lv_pmos",
+    tail_current: 20.0e-6,
+    mirror_reference: 1.0,
+    vout_start: 0.95,
+    vout_stop: 1.1,
+    vdd: 1.5,
+    vin: 0.9,
+    vbias_start: 0.65,
+    vbias_stop: 0.79,
+    layout_policy: "symmetric-adjacent-with-edge-dummies-v3",
+};
+
+const SKY130_SPEC: PdkSpec = PdkSpec {
+    label: "SKY130A",
+    pdk: "sky130A",
+    nmos_model: "sky130_fd_pr__nfet_01v8",
+    pmos_model: "sky130_fd_pr__pfet_01v8",
+    tail_current: 20.0e-6,
+    mirror_reference: 0.6,
+    vout_start: 0.8,
+    vout_stop: 1.2,
+    vdd: 1.8,
+    vin: 0.9,
+    vbias_start: 0.1,
+    vbias_stop: 0.3,
+    layout_policy: "symmetric-native-fingers-with-edge-dummies-v1",
+};
+
+const GF180_SPEC: PdkSpec = PdkSpec {
+    label: "GF180MCU D",
+    pdk: "gf180mcuD",
+    nmos_model: "nfet_03v3",
+    pmos_model: "pfet_03v3",
+    tail_current: 20.0e-6,
+    mirror_reference: 2.1,
+    vout_start: 1.6,
+    vout_stop: 2.4,
+    vdd: 3.3,
+    vin: 1.4,
+    vbias_start: 0.3,
+    vbias_stop: 0.6,
+    layout_policy: "symmetric-native-fingers-with-edge-dummies-v2",
+};
+
 fn main() -> Result<(), Box<dyn Error>> {
     let total_start = Instant::now();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -88,12 +143,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stage_start = Instant::now();
     let nmos_table = LookupTable::open(nmos_path)?;
     let pmos_table = LookupTable::open(pmos_path)?;
-    let physical_table = physical_path
-        .map(PhysicalLookupTable::open)
-        .transpose()?;
+    let physical_table = physical_path.map(PhysicalLookupTable::open).transpose()?;
     let lut_load = stage_start.elapsed();
-    let nmos = nmos_table.model(NMOS_MODEL)?;
-    let pmos = pmos_table.model(PMOS_MODEL)?;
+    let spec = resolve_pdk_spec(&nmos_table, &pmos_table, physical_table.as_ref())?;
+    let nmos = nmos_table.model(spec.nmos_model)?;
+    let pmos = pmos_table.model(spec.pmos_model)?;
 
     let primitive_catalog =
         load_primitive_catalog(&primitives_dir).map_err(|error| format!("{error:?}"))?;
@@ -109,7 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     input.register_primitive_instance(
         DIFF_PAIR_INSTANCE,
         PrimitiveInstanceExplorationInput::new(
-            diff_pair_input(),
+            diff_pair_input(&spec),
             vec![CandidateFilter::at_most(
                 DIFF_PAIR_WIDTH_COLUMN,
                 MAX_DIFF_PAIR_WIDTH,
@@ -119,7 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     input.register_primitive_instance(
         CURRENT_MIRROR_INSTANCE,
         PrimitiveInstanceExplorationInput::new(
-            current_mirror_input(),
+            current_mirror_input(&spec),
             vec![CandidateFilter::at_most(
                 CURRENT_MIRROR_WIDTH_COLUMN,
                 MAX_CURRENT_MIRROR_WIDTH,
@@ -130,9 +184,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stage_start = Instant::now();
     let result = ota.explore(&primitive_catalog, &macro_catalog, input)?;
     let exploration_time = stage_start.elapsed();
-    
-    write_results_csv(&result, manifest.join("examples/ota_4t_v3/results.csv"))?;
 
+    write_results_csv(
+        &result,
+        &spec,
+        manifest.join("examples/ota_4t_v3/results.csv"),
+    )?;
+
+    println!("{} four-transistor OTA exploration", spec.label);
     print_results(&result)?;
     print_statistics(&result)?;
     println!("LUT load took: {lut_load:?}");
@@ -200,8 +259,7 @@ fn ota_macro(testbench_path: PathBuf, layout_aware: bool) -> Macro {
             .with_domain(MacroAnalysisDomain::LayoutAware),
         );
     }
-    ota
-    .with_compact_output(MacroCompactOutputBinding::new(
+    ota.with_compact_output(MacroCompactOutputBinding::new(
         "gm_dp",
         MacroOutputSource::candidate_column(DIFF_PAIR_INSTANCE, DIFF_PAIR_GM_COLUMN),
     ))
@@ -263,37 +321,174 @@ fn ota_ac_analysis() -> AcAnalysis {
     )
 }
 
-fn diff_pair_input() -> PrimitiveBuildInput {
+fn diff_pair_input(spec: &PdkSpec) -> PrimitiveBuildInput {
     PrimitiveBuildInput::new(HashMap::from([
         (
             "current".to_owned(),
-            PrimitiveBuildValue::Scalar(TAIL_CURRENT),
+            PrimitiveBuildValue::Scalar(spec.tail_current),
         ),
-        ("VINP".to_owned(), PrimitiveBuildValue::Scalar(VIN)),
+        ("VINP".to_owned(), PrimitiveBuildValue::Scalar(spec.vin)),
         (
             "VOUTP".to_owned(),
-            PrimitiveBuildValue::Vector(linspace(VOUT_START, VOUT_STOP, VOUT_POINTS)),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
         ),
         (
             "VTAIL".to_owned(),
-            PrimitiveBuildValue::Vector(linspace(VBIAS_START, VBIAS_STOP, VBIAS_POINTS)),
+            PrimitiveBuildValue::Vector(linspace(spec.vbias_start, spec.vbias_stop, VBIAS_POINTS)),
         ),
     ]))
 }
 
-fn current_mirror_input() -> PrimitiveBuildInput {
+fn current_mirror_input(spec: &PdkSpec) -> PrimitiveBuildInput {
     PrimitiveBuildInput::new(HashMap::from([
         (
             "current".to_owned(),
-            PrimitiveBuildValue::Scalar(TAIL_CURRENT),
+            PrimitiveBuildValue::Scalar(spec.tail_current),
         ),
-        ("VINP".to_owned(), PrimitiveBuildValue::Scalar(VOUT)),
+        (
+            "VINP".to_owned(),
+            PrimitiveBuildValue::Scalar(spec.mirror_reference),
+        ),
         (
             "VOUTP".to_owned(),
-            PrimitiveBuildValue::Vector(linspace(VOUT_START, VOUT_STOP, VOUT_POINTS)),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
         ),
-        ("VDD".to_owned(), PrimitiveBuildValue::Scalar(VDD)),
+        ("VDD".to_owned(), PrimitiveBuildValue::Scalar(spec.vdd)),
     ]))
+}
+
+fn pdk_spec(pdk: &str) -> Result<PdkSpec, io::Error> {
+    match pdk {
+        "ihp-sg13g2" => Ok(IHP_SPEC),
+        "sky130A" => Ok(SKY130_SPEC),
+        "gf180mcuD" => Ok(GF180_SPEC),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported LUT PDK '{pdk}'; expected ihp-sg13g2, sky130A, or gf180mcuD"),
+        )),
+    }
+}
+
+fn validate_pdk_selection(
+    nmos_pdk: Option<&str>,
+    pmos_pdk: Option<&str>,
+    physical: Option<(&str, u32, &str)>,
+) -> Result<PdkSpec, io::Error> {
+    let nmos_pdk = nmos_pdk.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NMOS LUT does not declare metadata.pdk",
+        )
+    })?;
+    let pmos_pdk = pmos_pdk.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PMOS LUT does not declare metadata.pdk",
+        )
+    })?;
+    if pmos_pdk != nmos_pdk {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("NMOS LUT uses PDK '{nmos_pdk}', but PMOS LUT uses '{pmos_pdk}'"),
+        ));
+    }
+
+    let spec = pdk_spec(nmos_pdk)?;
+    if let Some((physical_pdk, format_version, layout_policy)) = physical {
+        if physical_pdk != spec.pdk {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "electrical LUTs use PDK '{}', but the physical LUT uses '{physical_pdk}'",
+                    spec.pdk
+                ),
+            ));
+        }
+        if format_version != 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "layout-aware exploration requires physical LUT format v2, found v{format_version}"
+                ),
+            ));
+        }
+        if layout_policy != spec.layout_policy {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "physical LUT layout policy '{layout_policy}' does not match '{}' for PDK '{}'",
+                    spec.layout_policy, spec.pdk
+                ),
+            ));
+        }
+    }
+    Ok(spec)
+}
+
+fn resolve_pdk_spec(
+    nmos: &LookupTable,
+    pmos: &LookupTable,
+    physical: Option<&PhysicalLookupTable>,
+) -> Result<PdkSpec, io::Error> {
+    let nmos_pdk = resolve_electrical_lut_pdk(nmos, true)?;
+    let pmos_pdk = resolve_electrical_lut_pdk(pmos, false)?;
+    validate_pdk_selection(
+        Some(nmos_pdk),
+        Some(pmos_pdk),
+        physical.map(|table| {
+            let metadata = table.metadata();
+            (
+                metadata.pdk.as_str(),
+                metadata.format_version,
+                metadata.layout_policy.as_str(),
+            )
+        }),
+    )
+}
+
+fn resolve_electrical_lut_pdk(table: &LookupTable, nmos: bool) -> Result<&str, io::Error> {
+    if let Some(pdk) = table.pdk() {
+        return Ok(pdk);
+    }
+
+    let inferred = infer_pdk_from_models(table.model_names(), nmos)?;
+    Ok(inferred.pdk)
+}
+
+fn infer_pdk_from_models<'a>(
+    model_names: impl IntoIterator<Item = &'a str>,
+    nmos: bool,
+) -> Result<PdkSpec, io::Error> {
+    let model_names = model_names.into_iter().collect::<Vec<_>>();
+    let matching = [IHP_SPEC, SKY130_SPEC, GF180_SPEC]
+        .into_iter()
+        .filter(|spec| {
+            let expected = if nmos {
+                spec.nmos_model
+            } else {
+                spec.pmos_model
+            };
+            model_names.contains(&expected)
+        })
+        .collect::<Vec<_>>();
+
+    match matching.as_slice() {
+        [spec] => Ok(*spec),
+        [] => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} LUT has no metadata.pdk and its models do not identify a supported PDK",
+                if nmos { "NMOS" } else { "PMOS" }
+            ),
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} LUT has no metadata.pdk and contains models from multiple supported PDKs",
+                if nmos { "NMOS" } else { "PMOS" }
+            ),
+        )),
+    }
 }
 
 fn print_results(result: &MacroExplorationResult) -> Result<(), io::Error> {
@@ -430,7 +625,11 @@ fn result_metrics<'a>(
     result
         .ac_outcome(accepted, testbench)
         .map(|outcome| &outcome.metrics)
-        .ok_or_else(|| io::Error::other(format!("accepted OTA candidate has no '{testbench}' outcome")))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "accepted OTA candidate has no '{testbench}' outcome"
+            ))
+        })
 }
 
 fn required_metrics(metrics: &AcMetrics) -> Result<[f64; 4], io::Error> {
@@ -481,10 +680,7 @@ fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
         possible_pairs - statistics.compatible_candidates()
     );
     print_testbench_statistics(result, ELECTRICAL_AC_TESTBENCH)?;
-    if statistics
-        .testbench(LAYOUT_AWARE_AC_TESTBENCH)
-        .is_some()
-    {
+    if statistics.testbench(LAYOUT_AWARE_AC_TESTBENCH).is_some() {
         print_testbench_statistics(result, LAYOUT_AWARE_AC_TESTBENCH)?;
     }
     println!("Accepted candidates: {}", statistics.accepted_candidates());
@@ -503,7 +699,10 @@ fn print_testbench_statistics(
         .statistics()
         .testbench(testbench)
         .ok_or_else(|| io::Error::other(format!("OTA result has no '{testbench}' statistics")))?;
-    println!("{testbench} evaluated candidates: {}", statistics.evaluated_candidates());
+    println!(
+        "{testbench} evaluated candidates: {}",
+        statistics.evaluated_candidates()
+    );
     println!(
         "{testbench} rejected outside physical domain: {}",
         statistics.physical_domain_rejections()
@@ -585,7 +784,7 @@ mod tests {
     fn defines_and_renders_the_complete_typed_ota() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let primitives =
-            load_primitive_catalog(&manifest.join("../analoglib/primitives")).unwrap();
+            load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives")).unwrap();
         let ota = ota_macro(manifest.join("examples/ota_4t_v3/gain.spice"), true);
         let macros = MacroCatalog::from_macros([ota.clone()]).unwrap();
 
@@ -628,9 +827,12 @@ mod tests {
             .unwrap();
         assert_eq!(diff_pair.lut_primitive(), "simplediffpair");
         assert_eq!(diff_pair.candidate_columns().vgs(), "vgs__xdp__m1");
-        assert!(diff_pair.ports().iter().any(|port| {
-            port.physical_port() == "B" && port.node() == "IBIAS"
-        }));
+        assert!(
+            diff_pair
+                .ports()
+                .iter()
+                .any(|port| { port.physical_port() == "B" && port.node() == "IBIAS" })
+        );
         let current_mirror = rendered
             .physical_primitives()
             .iter()
@@ -638,9 +840,12 @@ mod tests {
             .unwrap();
         assert_eq!(current_mirror.lut_primitive(), "currentmirror");
         assert_eq!(current_mirror.candidate_columns().vds(), "vds__xcm__m1");
-        assert!(current_mirror.ports().iter().any(|port| {
-            port.physical_port() == "DREF" && port.node() == "N1"
-        }));
+        assert!(
+            current_mirror
+                .ports()
+                .iter()
+                .any(|port| { port.physical_port() == "DREF" && port.node() == "N1" })
+        );
     }
 
     #[test]
@@ -654,6 +859,64 @@ mod tests {
         assert_eq!(electrical.name(), ELECTRICAL_AC_TESTBENCH);
         assert_eq!(electrical.domain(), MacroAnalysisDomain::Electrical);
     }
+
+    #[test]
+    fn selects_each_supported_pdk_and_its_cellkit_policy() {
+        for expected in [IHP_SPEC, SKY130_SPEC, GF180_SPEC] {
+            let selected = validate_pdk_selection(
+                Some(expected.pdk),
+                Some(expected.pdk),
+                Some((expected.pdk, 2, expected.layout_policy)),
+            )
+            .unwrap();
+            assert_eq!(selected, expected);
+        }
+    }
+
+    #[test]
+    fn infers_legacy_lut_pdk_from_a_unique_model() {
+        assert_eq!(
+            infer_pdk_from_models([IHP_SPEC.nmos_model], true).unwrap(),
+            IHP_SPEC
+        );
+        assert_eq!(
+            infer_pdk_from_models([SKY130_SPEC.pmos_model], false).unwrap(),
+            SKY130_SPEC
+        );
+        assert!(infer_pdk_from_models(["unknown"], true).is_err());
+        assert!(infer_pdk_from_models([IHP_SPEC.nmos_model, GF180_SPEC.nmos_model], true).is_err());
+    }
+
+    #[test]
+    fn rejects_incompatible_electrical_and_physical_luts() {
+        let mismatched_electrical =
+            validate_pdk_selection(Some("sky130A"), Some("gf180mcuD"), None).unwrap_err();
+        assert!(mismatched_electrical.to_string().contains("PMOS LUT"));
+
+        let mismatched_physical = validate_pdk_selection(
+            Some("sky130A"),
+            Some("sky130A"),
+            Some(("gf180mcuD", 2, GF180_SPEC.layout_policy)),
+        )
+        .unwrap_err();
+        assert!(mismatched_physical.to_string().contains("physical LUT"));
+
+        let legacy_physical = validate_pdk_selection(
+            Some("ihp-sg13g2"),
+            Some("ihp-sg13g2"),
+            Some(("ihp-sg13g2", 1, IHP_SPEC.layout_policy)),
+        )
+        .unwrap_err();
+        assert!(legacy_physical.to_string().contains("format v2"));
+
+        let wrong_policy = validate_pdk_selection(
+            Some("sky130A"),
+            Some("sky130A"),
+            Some(("sky130A", 2, GF180_SPEC.layout_policy)),
+        )
+        .unwrap_err();
+        assert!(wrong_policy.to_string().contains("layout policy"));
+    }
 }
 
 use std::fs::File;
@@ -661,6 +924,7 @@ use std::io::{BufWriter, Write};
 
 fn write_results_csv(
     result: &MacroExplorationResult,
+    spec: &PdkSpec,
     path: impl AsRef<Path>,
 ) -> Result<(), io::Error> {
     let mut writer = BufWriter::new(File::create(path)?);
@@ -692,27 +956,23 @@ fn write_results_csv(
         let dp_index = selected_index(result, accepted, DIFF_PAIR_INSTANCE)?;
         let cm_index = selected_index(result, accepted, CURRENT_MIRROR_INSTANCE)?;
 
-        let dp = |column| {
-            selected_value(result, accepted, DIFF_PAIR_INSTANCE, column)
-        };
-        let cm = |column| {
-            selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column)
-        };
+        let dp = |column| selected_value(result, accepted, DIFF_PAIR_INSTANCE, column);
+        let cm = |column| selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column);
 
-        let electrical = required_metrics(result_metrics(
-            result,
-            accepted,
-            ELECTRICAL_AC_TESTBENCH,
-        )?)?;
+        let electrical =
+            required_metrics(result_metrics(result, accepted, ELECTRICAL_AC_TESTBENCH)?)?;
 
         write!(
             writer,
             "{candidate_id},{dp_index},{cm_index},\
-             {VIN:.17e},{VDD:.17e},{TAIL_CURRENT:.17e},\
+             {:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},{:.17e}",
+            spec.vin,
+            spec.vdd,
+            spec.tail_current,
             dp(DIFF_PAIR_VOUT_COLUMN)?,
             dp(DIFF_PAIR_VBIAS_COLUMN)?,
             cm("xcm.vinp")?,
@@ -736,11 +996,8 @@ fn write_results_csv(
             electrical[3],
         )?;
         if has_layout_aware {
-            let layout = required_metrics(result_metrics(
-                result,
-                accepted,
-                LAYOUT_AWARE_AC_TESTBENCH,
-            )?)?;
+            let layout =
+                required_metrics(result_metrics(result, accepted, LAYOUT_AWARE_AC_TESTBENCH)?)?;
             write!(
                 writer,
                 ",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",

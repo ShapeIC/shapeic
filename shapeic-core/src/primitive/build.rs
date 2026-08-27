@@ -914,8 +914,8 @@ mod tests {
     #[test]
     fn analog_primitives_declare_their_lut_current() {
         for json in [
-            include_str!("../../../analoglib/primitives/simplediffpair/build.json"),
-            include_str!("../../../analoglib/primitives/simplecurrentmirror/build.json"),
+            include_str!("../../../shapeic-cellkit/primitives/simplediffpair/build.json"),
+            include_str!("../../../shapeic-cellkit/primitives/simplecurrentmirror/build.json"),
         ] {
             let spec: PrimitiveBuildSpec =
                 serde_json::from_str(json).expect("primitive build spec should deserialize");
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn current_mirror_uses_reference_gate_and_output_drain_biases() {
         let spec: PrimitiveBuildSpec = serde_json::from_str(include_str!(
-            "../../../analoglib/primitives/simplecurrentmirror/build.json"
+            "../../../shapeic-cellkit/primitives/simplecurrentmirror/build.json"
         ))
         .expect("current-mirror build spec should deserialize");
         let mut rows = vec![HashMap::from([
@@ -1038,8 +1038,8 @@ mod tests {
     #[test]
     fn analog_builds_publish_total_capacitances_for_both_branches() {
         for json in [
-            include_str!("../../../analoglib/primitives/simplediffpair/build.json"),
-            include_str!("../../../analoglib/primitives/simplecurrentmirror/build.json"),
+            include_str!("../../../shapeic-cellkit/primitives/simplediffpair/build.json"),
+            include_str!("../../../shapeic-cellkit/primitives/simplecurrentmirror/build.json"),
         ] {
             let spec: PrimitiveBuildSpec =
                 serde_json::from_str(json).expect("primitive build spec should deserialize");
@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn exposes_each_lut_query_coordinate_as_candidate_provenance() {
         let spec: PrimitiveBuildSpec = serde_json::from_str(include_str!(
-            "../../../analoglib/primitives/simplediffpair/build.json"
+            "../../../shapeic-cellkit/primitives/simplediffpair/build.json"
         ))
         .expect("diff-pair build spec should deserialize");
         let rows = [HashMap::from([
