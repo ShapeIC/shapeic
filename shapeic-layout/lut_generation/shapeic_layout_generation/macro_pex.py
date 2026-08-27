@@ -148,6 +148,7 @@ def validate_macro_pex(
             f"expected macro PEX subcircuit '{expected_subcircuit}', found '{subcircuit}'"
         )
     counts = {"r": 0, "c": 0, "m": 0}
+    used_nodes: set[str] = set()
     for line in lines:
         fields = line.split()
         if not fields:
@@ -155,10 +156,18 @@ def validate_macro_pex(
         kind = fields[0][0].casefold()
         if kind in {"r", "c"} and len(fields) >= 4:
             counts[kind] += 1
+            used_nodes.update(value.casefold() for value in fields[1:3])
         elif kind in {"m", "x"} and len(fields) >= 5:
             counts["m"] += 1
+            used_nodes.update(value.casefold() for value in fields[1:5])
     if counts["m"] == 0:
         raise ValueError("macro PEX contains no active devices")
+    disconnected = [port for port in port_order if port.casefold() not in used_nodes]
+    if disconnected:
+        raise ValueError(
+            "macro PEX has disconnected or collapsed external ports: "
+            + ", ".join(disconnected)
+        )
     return MacroPexTopology(subcircuit, counts["m"], counts["r"], counts["c"])
 
 

@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -85,7 +86,7 @@ backend = "magic"
 
     def test_prepares_a_generic_cellkit_macro_pex(self) -> None:
         spice = """.subckt macro OUT IN VDD VSS
-X1 OUT IN VSS VSS nmos w=1u l=0.4u
+X1 OUT IN VSS VDD nmos w=1u l=0.4u
 R1 OUT n1 10
 C1 n1 VSS 2f
 .ends macro
@@ -118,8 +119,11 @@ C1 n1 VSS 2f
     def test_prepares_macro_pex_in_the_manifest_port_order(self) -> None:
         spice = """.subckt macro VINP VINN IBIAS
 + VOUT VDD VSS
-X1 VOUT VINP VSS VSS nmos
+X1 VOUT VINP IBIAS VSS nmos
 + w=1u l=0.4u
+X2 nref VINN IBIAS VSS nmos
+X3 VOUT nref VDD VDD pmos
+X4 nref nref VDD VDD pmos
 .ends macro
 """
         technology = SimpleNamespace(
@@ -146,7 +150,7 @@ X1 VOUT VINP VSS VSS nmos
                 )
             )
             self.assertIn(
-                "X1 VOUT VINP VSS VSS nmos\n+ w=1u l=0.4u\n",
+                "X1 VOUT VINP IBIAS VSS nmos\n+ w=1u l=0.4u\n",
                 output.read_text(encoding="utf-8"),
             )
 
@@ -156,6 +160,14 @@ X1 VOUT VINP VSS VSS nmos
                 ".subckt macro IN OUT\nM1 OUT IN 0 0 nmos\n.ends macro\n",
                 ("OUT", "IN"),
             )
+
+    def test_generic_macro_pex_rejects_a_collapsed_external_port(self) -> None:
+        spice = """.subckt macro OUT IN VDD VSS
+X1 VDD IN VSS VSS nmos
+.ends macro
+"""
+        with self.assertRaisesRegex(ValueError, "collapsed external ports: OUT"):
+            validate_macro_pex(spice, ("OUT", "IN", "VDD", "VSS"))
 
     def test_cellkit_device_adapter_derives_topology_and_prepares_netlists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -974,6 +986,46 @@ vds = [0.5]
                     rendered.component.write_gds(output)
                     self.assertTrue(rendered.cell_name.startswith(primitive))
                     self.assertGreater(output.stat().st_size, 0)
+
+    @unittest.skipUnless(
+        _has_gf180_backend(),
+        "requires the GF180MCU layout backend with its pinned versions",
+    )
+    def test_gf180_cellkit_ota_macro_generates_six_port_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ.setdefault("MPLCONFIGDIR", directory)
+            output = Path(directory) / "ota.gds"
+            pdk_root = Path(directory) / "pdks"
+            rcfile = pdk_root / "gf180mcuD/libs.tech/magic/gf180mcuD.magicrc"
+            rcfile.parent.mkdir(parents=True)
+            rcfile.write_text("", encoding="ascii")
+            cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "gf180mcuD")
+            rendered = cellkit.catalog.macro_layout("ota_4t").render(
+                {
+                    "xdp": cellkit.geometry(0.4e-6, 0.22e-6, 2),
+                    "xcm": cellkit.geometry(0.4e-6, 0.22e-6, 1),
+                }
+            )
+            rendered.component.write_gds(output)
+            self.assertTrue(rendered.cell_name.startswith("ota_4t"))
+            self.assertEqual(
+                rendered.port_order,
+                ("VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"),
+            )
+            self.assertGreater(output.stat().st_size, 0)
+
+    def test_gf180_smoke_configuration_requests_device_correction(self) -> None:
+        config_path = ROOT / "configs/gf180mcuD_ota_magic_smoke.toml"
+        with config_path.open("rb") as handle:
+            raw = tomllib.load(handle)
+
+        correction = raw["device_capacitance_correction"]
+        self.assertEqual(correction["backend"], "ngspice")
+        self.assertEqual(correction["nf"], [1, 2])
+        self.assertEqual(correction["frequencies_hz"], [1.0e6, 1.0e7])
+        self.assertIn("simplediffpair", correction)
+        self.assertIn("currentmirror", correction)
+        self.assertIn("_v2_", raw["output"]["path"])
 
     @unittest.skipUnless(
         _has_ihp_backend(),
