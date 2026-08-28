@@ -12,9 +12,10 @@ use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::{PrimitiveBuildInput, PrimitiveBuildInputKind, PrimitiveBuildValue};
 
+use super::prebuild::PrimitiveInputConditions;
 use super::{
-    Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroExecutionConfig,
-    MacroExplorationResult, MacroSpecificationBounds,
+    Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroDesignVariableCondition,
+    MacroExecutionConfig, MacroExplorationResult, MacroSpecificationBounds,
 };
 
 /// Build data and local pre-exploration filters for one primitive instance.
@@ -22,6 +23,7 @@ use super::{
 pub struct PrimitiveInstanceExplorationInput {
     pub(super) build_input: PrimitiveBuildInput,
     pub(super) filters: Vec<CandidateFilter>,
+    pub(super) prebuild_conditions: PrimitiveInputConditions,
 }
 
 impl PrimitiveInstanceExplorationInput {
@@ -30,6 +32,7 @@ impl PrimitiveInstanceExplorationInput {
         Self {
             build_input,
             filters,
+            prebuild_conditions: HashMap::new(),
         }
     }
 
@@ -49,12 +52,12 @@ impl PrimitiveInstanceExplorationInput {
 pub struct CompactMacroInstanceExplorationInput {
     pub(super) candidates: CandidateSet,
     pub(super) filters: Vec<CandidateFilter>,
+    pub(super) interface_ports: Vec<String>,
     pub(super) provenance: Option<CompactMacroCandidateProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CompactMacroCandidateProvenance {
-    pub(super) interface_ports: Vec<String>,
     pub(super) source_result: Arc<MacroExplorationResult>,
     pub(super) accepted_indices: Vec<usize>,
 }
@@ -65,6 +68,7 @@ impl CompactMacroInstanceExplorationInput {
         Self {
             candidates,
             filters,
+            interface_ports: Vec::new(),
             provenance: None,
         }
     }
@@ -79,12 +83,21 @@ impl CompactMacroInstanceExplorationInput {
         Self {
             candidates,
             filters,
+            interface_ports,
             provenance: Some(CompactMacroCandidateProvenance {
-                interface_ports,
                 source_result,
                 accepted_indices,
             }),
         }
+    }
+
+    /// Creates one nominal compact candidate for an unexplored child instance.
+    pub fn from_seed(
+        macro_: &Macro,
+        instance_path: impl Into<String>,
+        filters: Vec<CandidateFilter>,
+    ) -> Result<Self, Vec<super::MacroCompactSeedError>> {
+        super::seed::build_compact_seed_input(macro_, instance_path.into(), filters)
     }
 
     /// Returns the candidate set projected by the explored child macro.
@@ -95,6 +108,11 @@ impl CompactMacroInstanceExplorationInput {
     /// Returns the filters applied locally to the projected candidates.
     pub fn filters(&self) -> &[CandidateFilter] {
         &self.filters
+    }
+
+    /// Returns public ports whose columns carry compact interface values.
+    pub fn interface_ports(&self) -> &[String] {
+        &self.interface_ports
     }
 }
 
@@ -109,6 +127,7 @@ pub struct MacroExplorationInput<'lut> {
     pub(super) primitive_instances: HashMap<String, PrimitiveInstanceExplorationInput>,
     pub(super) compact_macro_instances: HashMap<String, CompactMacroInstanceExplorationInput>,
     pub(super) design_variable_overrides: HashMap<String, PrimitiveBuildValue>,
+    pub(super) design_variable_conditions: HashMap<String, Vec<MacroDesignVariableCondition>>,
     pub(super) specification_overrides: HashMap<String, MacroSpecificationBounds>,
     pub(super) inherited_specification_bounds: HashMap<String, MacroSpecificationBounds>,
     pub(super) execution: MacroExecutionConfig,
@@ -180,6 +199,25 @@ impl<'lut> MacroExplorationInput<'lut> {
             );
         }
         self.design_variable_overrides.insert(variable, value);
+        Ok(())
+    }
+
+    /// Adds one inherited pre-build restriction to a public design variable.
+    ///
+    /// Multiple conditions are intersected in registration order.
+    pub fn register_design_variable_condition(
+        &mut self,
+        variable: impl Into<String>,
+        condition: MacroDesignVariableCondition,
+    ) -> Result<(), MacroExplorationInputRegistrationError> {
+        let variable = variable.into();
+        if variable.trim().is_empty() {
+            return Err(MacroExplorationInputRegistrationError::EmptyDesignVariable);
+        }
+        self.design_variable_conditions
+            .entry(variable)
+            .or_default()
+            .push(condition);
         Ok(())
     }
 
@@ -284,6 +322,13 @@ impl<'lut> MacroExplorationInput<'lut> {
         self.design_variable_overrides.get(variable)
     }
 
+    /// Returns pre-build restrictions registered for one public variable.
+    pub fn design_variable_conditions(&self, variable: &str) -> &[MacroDesignVariableCondition] {
+        self.design_variable_conditions
+            .get(variable)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Returns one runtime specification-bounds override.
     pub fn specification_override(&self, specification: &str) -> Option<MacroSpecificationBounds> {
         self.specification_overrides.get(specification).copied()
@@ -337,6 +382,19 @@ impl<'lut> MacroExplorationInput<'lut> {
             if runtime_input.build_input.lut_config.is_some() {
                 resolved_input.build_input.lut_config =
                     runtime_input.build_input.lut_config.clone();
+            }
+        }
+        for (variable_name, conditions) in &self.design_variable_conditions {
+            if let Some(variable) = macro_.exploration().design_variable(variable_name) {
+                for binding in variable.bindings() {
+                    if let Some(input) = resolved.get_mut(binding.instance_path()) {
+                        input
+                            .prebuild_conditions
+                            .entry(binding.input().to_owned())
+                            .or_default()
+                            .extend(conditions.iter().cloned());
+                    }
+                }
             }
         }
         self.primitive_instances = resolved;
@@ -432,6 +490,12 @@ fn merge_primitive_instance_input(
         base.build_input.lut_config = overlay.build_input.lut_config.clone();
     }
     base.filters.extend(overlay.filters.iter().cloned());
+    for (input, conditions) in &overlay.prebuild_conditions {
+        base.prebuild_conditions
+            .entry(input.clone())
+            .or_default()
+            .extend(conditions.iter().cloned());
+    }
 }
 
 /// Errors produced while registering runtime macro exploration inputs.
@@ -559,6 +623,10 @@ pub enum MacroExplorationInputValidationError {
         actual: PrimitiveBuildInputKind,
     },
     NonFiniteDesignVariable {
+        macro_name: String,
+        variable: String,
+    },
+    InvalidDesignVariableCondition {
         macro_name: String,
         variable: String,
     },
@@ -692,6 +760,13 @@ impl fmt::Display for MacroExplorationInputValidationError {
                 formatter,
                 "macro '{macro_name}' design variable '{variable}' contains a non-finite value"
             ),
+            Self::InvalidDesignVariableCondition {
+                macro_name,
+                variable,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' design variable '{variable}' has a non-finite pre-build condition"
+            ),
             Self::UnknownSpecificationOverride {
                 macro_name,
                 specification,
@@ -794,6 +869,31 @@ pub fn validate_macro_exploration_input(
         if !value.is_finite() {
             errors.push(
                 MacroExplorationInputValidationError::NonFiniteDesignVariable {
+                    macro_name: macro_.name().to_owned(),
+                    variable: variable_name.clone(),
+                },
+            );
+        }
+    }
+
+    for (variable_name, conditions) in &input.design_variable_conditions {
+        if macro_
+            .exploration()
+            .design_variable(variable_name)
+            .is_none()
+        {
+            let error = MacroExplorationInputValidationError::UnknownDesignVariable {
+                macro_name: macro_.name().to_owned(),
+                variable: variable_name.clone(),
+            };
+            if !errors.contains(&error) {
+                errors.push(error);
+            }
+            continue;
+        }
+        if conditions.iter().any(|condition| !condition.is_finite()) {
+            errors.push(
+                MacroExplorationInputValidationError::InvalidDesignVariableCondition {
                     macro_name: macro_.name().to_owned(),
                     variable: variable_name.clone(),
                 },
@@ -1349,6 +1449,12 @@ mod tests {
             .register_design_variable_override("current", PrimitiveBuildValue::Scalar(2.0))
             .unwrap();
         input
+            .register_design_variable_condition(
+                "current",
+                MacroDesignVariableCondition::range(Some(1.0), Some(4.0)),
+            )
+            .unwrap();
+        input
             .register_primitive_instance(
                 "x1",
                 PrimitiveInstanceExplorationInput::new(
@@ -1376,6 +1482,14 @@ mod tests {
             PrimitiveBuildValue::Vector(vec![0.5, 1.0])
         );
         assert_eq!(input.primitive_instance("x1").unwrap().filters().len(), 2);
+        assert_eq!(
+            input.primitive_instance("x1").unwrap().prebuild_conditions["current"].len(),
+            1
+        );
+        assert_eq!(
+            input.primitive_instance("x2").unwrap().prebuild_conditions["current"].len(),
+            1
+        );
     }
 
     #[test]
@@ -1433,12 +1547,25 @@ mod tests {
         input
             .register_design_variable_override("current", PrimitiveBuildValue::Vector(vec![1.0]))
             .unwrap();
+        input
+            .register_design_variable_condition(
+                "current",
+                MacroDesignVariableCondition::range(Some(f64::NAN), None),
+            )
+            .unwrap();
 
         let errors = validate_macro_exploration_input(&macro_, &primitives, &input);
 
         assert!(errors.iter().any(|error| matches!(
             error,
             MacroExplorationInputValidationError::DesignVariableKindMismatch {
+                variable,
+                ..
+            } if variable == "current"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroExplorationInputValidationError::InvalidDesignVariableCondition {
                 variable,
                 ..
             } if variable == "current"

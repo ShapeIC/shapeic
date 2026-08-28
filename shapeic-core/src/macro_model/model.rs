@@ -58,6 +58,18 @@ impl Macro {
         self
     }
 
+    /// Sets the nominal compact point used before this macro is explored as a child.
+    pub fn with_compact_seed(mut self, seed: MacroCompactSeed) -> Self {
+        self.exploration.compact_seed = Some(seed);
+        self
+    }
+
+    /// Adds one condition derived by this macro for a direct child instance.
+    pub fn with_derivation_rule(mut self, rule: MacroDerivationRule) -> Self {
+        self.exploration.derivation_rules.push(rule);
+        self
+    }
+
     /// Exposes one accepted result value as a compact-model parameter.
     pub fn with_compact_output(mut self, binding: MacroCompactOutputBinding) -> Self {
         self.exploration.compact_outputs.push(binding);
@@ -149,6 +161,8 @@ pub struct MacroExploration {
     specifications: Vec<MacroSpecification>,
     primitive_defaults: Vec<MacroPrimitiveDefault>,
     design_variables: Vec<MacroDesignVariable>,
+    compact_seed: Option<MacroCompactSeed>,
+    derivation_rules: Vec<MacroDerivationRule>,
     compact_outputs: Vec<MacroCompactOutputBinding>,
     interface_bindings: Vec<MacroInterfaceBinding>,
 }
@@ -180,6 +194,18 @@ impl MacroExploration {
     /// Adds one public design variable.
     pub fn with_design_variable(mut self, variable: MacroDesignVariable) -> Self {
         self.design_variables.push(variable);
+        self
+    }
+
+    /// Sets the nominal compact point used by a parent preview.
+    pub fn with_compact_seed(mut self, seed: MacroCompactSeed) -> Self {
+        self.compact_seed = Some(seed);
+        self
+    }
+
+    /// Adds one derivation rule targeting a direct child instance.
+    pub fn with_derivation_rule(mut self, rule: MacroDerivationRule) -> Self {
+        self.derivation_rules.push(rule);
         self
     }
 
@@ -241,6 +267,16 @@ impl MacroExploration {
         self.design_variables
             .iter()
             .find(|variable| variable.name == name)
+    }
+
+    /// Returns the nominal compact point, when this macro can seed a parent preview.
+    pub const fn compact_seed(&self) -> Option<&MacroCompactSeed> {
+        self.compact_seed.as_ref()
+    }
+
+    /// Returns child derivation rules in declaration order.
+    pub fn derivation_rules(&self) -> &[MacroDerivationRule] {
+        &self.derivation_rules
     }
 
     /// Returns compact-model output bindings in projected column order.
@@ -354,6 +390,222 @@ impl MacroDesignVariable {
     /// Returns all primitive inputs controlled by this variable.
     pub fn bindings(&self) -> &[MacroDesignVariableBinding] {
         &self.bindings
+    }
+}
+
+/// An inclusive pre-build restriction applied to a public design variable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MacroDesignVariableCondition {
+    /// Keeps values inside the inclusive numerical interval.
+    Range {
+        minimum: Option<f64>,
+        maximum: Option<f64>,
+    },
+    /// Keeps values exactly equal to one of the listed values.
+    AllowedValues(Vec<f64>),
+}
+
+impl MacroDesignVariableCondition {
+    /// Creates an inclusive range. An inverted range is a valid empty condition.
+    pub const fn range(minimum: Option<f64>, maximum: Option<f64>) -> Self {
+        Self::Range { minimum, maximum }
+    }
+
+    /// Creates an exact allowed-values condition. An empty list rejects every value.
+    pub fn allowed_values(values: impl IntoIterator<Item = f64>) -> Self {
+        Self::AllowedValues(values.into_iter().collect())
+    }
+
+    /// Returns whether one value satisfies this condition.
+    pub fn accepts(&self, value: f64) -> bool {
+        value.is_finite()
+            && match self {
+                Self::Range { minimum, maximum } => {
+                    minimum.is_none_or(|minimum| value >= minimum)
+                        && maximum.is_none_or(|maximum| value <= maximum)
+                }
+                Self::AllowedValues(values) => values.contains(&value),
+            }
+    }
+
+    pub(super) fn is_finite(&self) -> bool {
+        match self {
+            Self::Range { minimum, maximum } => {
+                minimum.is_none_or(f64::is_finite) && maximum.is_none_or(f64::is_finite)
+            }
+            Self::AllowedValues(values) => values.iter().all(|value| value.is_finite()),
+        }
+    }
+}
+
+/// One nominal parent-visible compact candidate for a macro used as a child.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MacroCompactSeed {
+    compact_parameters: Vec<(String, f64)>,
+    interface_values: Vec<(String, f64)>,
+}
+
+impl MacroCompactSeed {
+    /// Creates a seed from unscoped compact parameter and public interface names.
+    pub fn new<P, I, PN, IN>(compact_parameters: P, interface_values: I) -> Self
+    where
+        P: IntoIterator<Item = (PN, f64)>,
+        I: IntoIterator<Item = (IN, f64)>,
+        PN: Into<String>,
+        IN: Into<String>,
+    {
+        Self {
+            compact_parameters: compact_parameters
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+            interface_values: interface_values
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+        }
+    }
+
+    /// Returns unscoped compact-model parameter values.
+    pub fn compact_parameters(&self) -> &[(String, f64)] {
+        &self.compact_parameters
+    }
+
+    /// Returns unscoped public interface values.
+    pub fn interface_values(&self) -> &[(String, f64)] {
+        &self.interface_values
+    }
+}
+
+/// Aggregation applied to one derivation expression over accepted parent rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacroDerivationReduction {
+    /// Selects the smallest expression value.
+    Minimum,
+    /// Selects the largest expression value.
+    Maximum,
+    /// Produces the smallest and largest expression values.
+    Range,
+    /// Preserves exact distinct values in first-occurrence order.
+    UniqueValues,
+}
+
+impl MacroDerivationReduction {
+    /// Reduces values evaluated from accepted parent candidates.
+    pub fn reduce(
+        self,
+        values: impl IntoIterator<Item = f64>,
+    ) -> Result<MacroDerivedValue, super::MacroDerivationReductionError> {
+        super::derivation::reduce_derivation_values(self, values)
+    }
+}
+
+/// Shape produced by a derivation reduction before it is applied to a target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MacroDerivedValue {
+    /// One reduced scalar.
+    Scalar(f64),
+    /// Inclusive extrema of all source rows.
+    Range { minimum: f64, maximum: f64 },
+    /// Exact values in first-occurrence order.
+    UniqueValues(Vec<f64>),
+}
+
+/// Public child condition populated by a derivation rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MacroDerivationTarget {
+    /// Sets the child's effective specification minimum.
+    SpecificationMinimum { specification: String },
+    /// Sets the child's effective specification maximum.
+    SpecificationMaximum { specification: String },
+    /// Sets both bounds of a child specification.
+    SpecificationRange { specification: String },
+    /// Restricts a child design variable to an inclusive range.
+    DesignVariableRange { variable: String },
+    /// Restricts a child design variable to exact values.
+    DesignVariableAllowedValues { variable: String },
+}
+
+impl MacroDerivationTarget {
+    /// Targets the minimum of one child specification.
+    pub fn specification_minimum(specification: impl Into<String>) -> Self {
+        Self::SpecificationMinimum {
+            specification: specification.into(),
+        }
+    }
+
+    /// Targets the maximum of one child specification.
+    pub fn specification_maximum(specification: impl Into<String>) -> Self {
+        Self::SpecificationMaximum {
+            specification: specification.into(),
+        }
+    }
+
+    /// Targets the complete range of one child specification.
+    pub fn specification_range(specification: impl Into<String>) -> Self {
+        Self::SpecificationRange {
+            specification: specification.into(),
+        }
+    }
+
+    /// Targets an inclusive range on one child design variable.
+    pub fn design_variable_range(variable: impl Into<String>) -> Self {
+        Self::DesignVariableRange {
+            variable: variable.into(),
+        }
+    }
+
+    /// Targets exact allowed values on one child design variable.
+    pub fn design_variable_allowed_values(variable: impl Into<String>) -> Self {
+        Self::DesignVariableAllowedValues {
+            variable: variable.into(),
+        }
+    }
+}
+
+/// One parent-owned rule that derives a public condition for a direct child.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroDerivationRule {
+    child_instance: String,
+    expression: String,
+    reduction: MacroDerivationReduction,
+    target: MacroDerivationTarget,
+}
+
+impl MacroDerivationRule {
+    /// Creates a rule for one direct child instance.
+    pub fn new(
+        child_instance: impl Into<String>,
+        expression: impl Into<String>,
+        reduction: MacroDerivationReduction,
+        target: MacroDerivationTarget,
+    ) -> Self {
+        Self {
+            child_instance: child_instance.into(),
+            expression: expression.into(),
+            reduction,
+            target,
+        }
+    }
+
+    /// Returns the local child instance targeted by this rule.
+    pub fn child_instance(&self) -> &str {
+        &self.child_instance
+    }
+
+    /// Returns the expression evaluated on each accepted parent row.
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    /// Returns the aggregation applied to the expression values.
+    pub const fn reduction(&self) -> MacroDerivationReduction {
+        self.reduction
+    }
+
+    /// Returns the public child condition populated by the reduced value.
+    pub const fn target(&self) -> &MacroDerivationTarget {
+        &self.target
     }
 }
 

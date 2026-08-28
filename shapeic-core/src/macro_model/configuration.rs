@@ -8,7 +8,9 @@ use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
 use crate::primitive::build::PrimitiveBuildInputKind;
 
-use super::Macro;
+use super::{
+    Macro, MacroCatalog, MacroCompactSeedError, MacroDerivationReduction, MacroDerivationTarget,
+};
 
 /// One invalid primitive default or public design-variable declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +78,47 @@ pub enum MacroExplorationDefinitionError {
         input: String,
         expected: PrimitiveBuildInputKind,
         actual: PrimitiveBuildInputKind,
+    },
+    InvalidCompactSeed {
+        error: MacroCompactSeedError,
+    },
+    EmptyDerivationChild {
+        rule_index: usize,
+    },
+    EmptyDerivationExpression {
+        rule_index: usize,
+    },
+    InvalidDerivationExpression {
+        rule_index: usize,
+        reason: String,
+    },
+    UnknownDerivationChild {
+        rule_index: usize,
+        child_instance: String,
+    },
+    DerivationTargetsNonMacro {
+        rule_index: usize,
+        child_instance: String,
+    },
+    EmptyDerivationTarget {
+        rule_index: usize,
+    },
+    IncompatibleDerivationTarget {
+        rule_index: usize,
+    },
+    UnknownDerivationChildMacro {
+        rule_index: usize,
+        child_macro: String,
+    },
+    UnknownDerivedSpecification {
+        rule_index: usize,
+        child_macro: String,
+        specification: String,
+    },
+    UnknownDerivedDesignVariable {
+        rule_index: usize,
+        child_macro: String,
+        variable: String,
     },
 }
 
@@ -185,8 +228,131 @@ impl fmt::Display for MacroExplorationDefinitionError {
                 formatter,
                 "design variable '{variable}' declares {actual}, but '{instance_path}.{input}' expects {expected}"
             ),
+            Self::InvalidCompactSeed { error } => {
+                write!(formatter, "invalid compact seed: {error}")
+            }
+            Self::EmptyDerivationChild { rule_index } => write!(
+                formatter,
+                "derivation rule {rule_index} has an empty child instance"
+            ),
+            Self::EmptyDerivationExpression { rule_index } => write!(
+                formatter,
+                "derivation rule {rule_index} has an empty expression"
+            ),
+            Self::InvalidDerivationExpression { rule_index, reason } => write!(
+                formatter,
+                "derivation rule {rule_index} has an invalid expression: {reason}"
+            ),
+            Self::UnknownDerivationChild {
+                rule_index,
+                child_instance,
+            } => write!(
+                formatter,
+                "derivation rule {rule_index} references unknown child instance '{child_instance}'"
+            ),
+            Self::DerivationTargetsNonMacro {
+                rule_index,
+                child_instance,
+            } => write!(
+                formatter,
+                "derivation rule {rule_index} target '{child_instance}' is not a macro instance"
+            ),
+            Self::EmptyDerivationTarget { rule_index } => {
+                write!(
+                    formatter,
+                    "derivation rule {rule_index} has an empty target name"
+                )
+            }
+            Self::IncompatibleDerivationTarget { rule_index } => write!(
+                formatter,
+                "derivation rule {rule_index} reduction is incompatible with its target"
+            ),
+            Self::UnknownDerivationChildMacro {
+                rule_index,
+                child_macro,
+            } => write!(
+                formatter,
+                "derivation rule {rule_index} references unregistered child macro '{child_macro}'"
+            ),
+            Self::UnknownDerivedSpecification {
+                rule_index,
+                child_macro,
+                specification,
+            } => write!(
+                formatter,
+                "derivation rule {rule_index} targets unknown specification '{specification}' in child macro '{child_macro}'"
+            ),
+            Self::UnknownDerivedDesignVariable {
+                rule_index,
+                child_macro,
+                variable,
+            } => write!(
+                formatter,
+                "derivation rule {rule_index} targets unknown design variable '{variable}' in child macro '{child_macro}'"
+            ),
         }
     }
+}
+
+/// Resolves derivation targets against the definitions of direct child macros.
+pub fn validate_macro_derivation_targets(
+    macro_: &Macro,
+    macro_catalog: &MacroCatalog,
+) -> Vec<MacroExplorationDefinitionError> {
+    let mut errors = Vec::new();
+    for (rule_index, rule) in macro_.exploration().derivation_rules().iter().enumerate() {
+        let Some(instance) = macro_.circuit().instance(rule.child_instance()) else {
+            continue;
+        };
+        let BlockRef::Macro(child_macro_name) = instance.block() else {
+            continue;
+        };
+        let Some(child_macro) = macro_catalog.get(child_macro_name) else {
+            errors.push(
+                MacroExplorationDefinitionError::UnknownDerivationChildMacro {
+                    rule_index,
+                    child_macro: child_macro_name.clone(),
+                },
+            );
+            continue;
+        };
+        match rule.target() {
+            MacroDerivationTarget::SpecificationMinimum { specification }
+            | MacroDerivationTarget::SpecificationMaximum { specification }
+            | MacroDerivationTarget::SpecificationRange { specification } => {
+                if child_macro
+                    .exploration()
+                    .specification(specification)
+                    .is_none()
+                {
+                    errors.push(
+                        MacroExplorationDefinitionError::UnknownDerivedSpecification {
+                            rule_index,
+                            child_macro: child_macro_name.clone(),
+                            specification: specification.clone(),
+                        },
+                    );
+                }
+            }
+            MacroDerivationTarget::DesignVariableRange { variable }
+            | MacroDerivationTarget::DesignVariableAllowedValues { variable } => {
+                if child_macro
+                    .exploration()
+                    .design_variable(variable)
+                    .is_none()
+                {
+                    errors.push(
+                        MacroExplorationDefinitionError::UnknownDerivedDesignVariable {
+                            rule_index,
+                            child_macro: child_macro_name.clone(),
+                            variable: variable.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    errors
 }
 
 impl Error for MacroExplorationDefinitionError {}
@@ -263,7 +429,81 @@ pub fn validate_macro_exploration_definition(
             validate_variable_binding(macro_, primitive_catalog, variable, binding, &mut errors);
         }
     }
+    if let Some(seed) = macro_.exploration().compact_seed() {
+        errors.extend(
+            super::seed::validate_compact_seed(macro_, seed)
+                .into_iter()
+                .map(|error| MacroExplorationDefinitionError::InvalidCompactSeed { error }),
+        );
+    }
+    for (rule_index, rule) in macro_.exploration().derivation_rules().iter().enumerate() {
+        if rule.child_instance().trim().is_empty() {
+            errors.push(MacroExplorationDefinitionError::EmptyDerivationChild { rule_index });
+        } else {
+            match macro_.circuit().instance(rule.child_instance()) {
+                None => errors.push(MacroExplorationDefinitionError::UnknownDerivationChild {
+                    rule_index,
+                    child_instance: rule.child_instance().to_owned(),
+                }),
+                Some(instance) if !matches!(instance.block(), BlockRef::Macro(_)) => {
+                    errors.push(MacroExplorationDefinitionError::DerivationTargetsNonMacro {
+                        rule_index,
+                        child_instance: rule.child_instance().to_owned(),
+                    })
+                }
+                Some(_) => {}
+            }
+        }
+        if rule.expression().trim().is_empty() {
+            errors.push(MacroExplorationDefinitionError::EmptyDerivationExpression { rule_index });
+        } else if let Err(reason) =
+            super::specification::validate_numeric_expression(rule.expression())
+        {
+            errors.push(
+                MacroExplorationDefinitionError::InvalidDerivationExpression { rule_index, reason },
+            );
+        }
+        if derivation_target_name(rule.target()).trim().is_empty() {
+            errors.push(MacroExplorationDefinitionError::EmptyDerivationTarget { rule_index });
+        }
+        if !derivation_shapes_are_compatible(rule.reduction(), rule.target()) {
+            errors
+                .push(MacroExplorationDefinitionError::IncompatibleDerivationTarget { rule_index });
+        }
+    }
     errors
+}
+
+fn derivation_target_name(target: &MacroDerivationTarget) -> &str {
+    match target {
+        MacroDerivationTarget::SpecificationMinimum { specification }
+        | MacroDerivationTarget::SpecificationMaximum { specification }
+        | MacroDerivationTarget::SpecificationRange { specification } => specification,
+        MacroDerivationTarget::DesignVariableRange { variable }
+        | MacroDerivationTarget::DesignVariableAllowedValues { variable } => variable,
+    }
+}
+
+fn derivation_shapes_are_compatible(
+    reduction: MacroDerivationReduction,
+    target: &MacroDerivationTarget,
+) -> bool {
+    match reduction {
+        MacroDerivationReduction::Minimum | MacroDerivationReduction::Maximum => matches!(
+            target,
+            MacroDerivationTarget::SpecificationMinimum { .. }
+                | MacroDerivationTarget::SpecificationMaximum { .. }
+        ),
+        MacroDerivationReduction::Range => matches!(
+            target,
+            MacroDerivationTarget::SpecificationRange { .. }
+                | MacroDerivationTarget::DesignVariableRange { .. }
+        ),
+        MacroDerivationReduction::UniqueValues => matches!(
+            target,
+            MacroDerivationTarget::DesignVariableAllowedValues { .. }
+        ),
+    }
 }
 
 fn validate_default(
@@ -396,7 +636,9 @@ mod tests {
 
     use super::*;
     use crate::macro_model::{
-        MacroDesignVariable, MacroDesignVariableBinding, MacroPrimitiveDefault,
+        MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDesignVariable,
+        MacroDesignVariableBinding, MacroPrimitiveDefault, MacroSpecification,
+        MacroSpecificationBounds, MacroSpecificationSource,
     };
 
     fn primitive_catalog() -> PrimitiveCatalog {
@@ -496,5 +738,100 @@ mod tests {
             error,
             MacroExplorationDefinitionError::DuplicateDesignVariableBinding { .. }
         )));
+    }
+
+    #[test]
+    fn validates_derivation_shapes_and_resolves_public_child_targets() {
+        let child = Macro::new(
+            "child",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "OUT", "0", 1.0).build(),
+        )
+        .with_specification(MacroSpecification::new(
+            "gain",
+            MacroSpecificationSource::expression("1"),
+            MacroSpecificationBounds::unbounded(),
+        ))
+        .with_design_variable(MacroDesignVariable::new(
+            "biases",
+            PrimitiveBuildInputKind::Vector,
+            vec![MacroDesignVariableBinding::new("x1", "current")],
+        ));
+        let parent = Macro::new(
+            "parent",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xchild", "child", std::iter::empty::<(&str, &str)>())
+                .build(),
+            Circuit::builder().resistor("r", "OUT", "0", 1.0).build(),
+        )
+        .with_derivation_rule(MacroDerivationRule::new(
+            "xchild",
+            "parent_gain / 2",
+            MacroDerivationReduction::Minimum,
+            MacroDerivationTarget::specification_minimum("gain"),
+        ))
+        .with_derivation_rule(MacroDerivationRule::new(
+            "xchild",
+            "vout",
+            MacroDerivationReduction::UniqueValues,
+            MacroDerivationTarget::design_variable_allowed_values("biases"),
+        ));
+        let catalog = MacroCatalog::from_macros([child]).unwrap();
+
+        assert!(validate_macro_exploration_definition(&parent, &primitive_catalog()).is_empty());
+        assert!(validate_macro_derivation_targets(&parent, &catalog).is_empty());
+
+        let invalid = parent.with_derivation_rule(MacroDerivationRule::new(
+            "xchild",
+            "vout",
+            MacroDerivationReduction::UniqueValues,
+            MacroDerivationTarget::specification_range("gain"),
+        ));
+        assert!(
+            validate_macro_exploration_definition(&invalid, &primitive_catalog())
+                .iter()
+                .any(|error| matches!(
+                    error,
+                    MacroExplorationDefinitionError::IncompatibleDerivationTarget { rule_index: 2 }
+                ))
+        );
+    }
+
+    #[test]
+    fn accepts_only_shape_compatible_reduction_targets() {
+        let reductions = [
+            MacroDerivationReduction::Minimum,
+            MacroDerivationReduction::Maximum,
+            MacroDerivationReduction::Range,
+            MacroDerivationReduction::UniqueValues,
+        ];
+        let targets = [
+            MacroDerivationTarget::specification_minimum("x"),
+            MacroDerivationTarget::specification_maximum("x"),
+            MacroDerivationTarget::specification_range("x"),
+            MacroDerivationTarget::design_variable_range("x"),
+            MacroDerivationTarget::design_variable_allowed_values("x"),
+        ];
+        let compatible = reductions
+            .into_iter()
+            .flat_map(|reduction| {
+                targets
+                    .iter()
+                    .map(move |target| derivation_shapes_are_compatible(reduction, target))
+            })
+            .filter(|compatible| *compatible)
+            .count();
+
+        assert_eq!(compatible, 7);
+        assert!(derivation_shapes_are_compatible(
+            MacroDerivationReduction::Maximum,
+            &MacroDerivationTarget::specification_minimum("x"),
+        ));
+        assert!(!derivation_shapes_are_compatible(
+            MacroDerivationReduction::UniqueValues,
+            &MacroDerivationTarget::design_variable_range("x"),
+        ));
     }
 }

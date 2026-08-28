@@ -1492,6 +1492,7 @@ mod tests {
                 kind: super::super::MacroExplorationInstanceKind::Primitive,
                 candidates: CandidateSet::new("xcore", vec![candidate(1.0e-3), candidate(1.0e-5)]),
                 filter_report: CandidateFilterReport::default(),
+                interface_ports: Vec::new(),
                 compact_provenance: None,
             }],
         }

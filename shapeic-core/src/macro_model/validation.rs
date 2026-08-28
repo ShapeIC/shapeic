@@ -9,7 +9,7 @@ use super::specification::PreparedMacroSpecifications;
 use super::{
     Macro, MacroCatalog, MacroExplorationDefinitionError, MacroOutputSource,
     MacroSpecificationEvaluationError, MacroTestbenchSource,
-    validate_macro_exploration_definition,
+    validate_macro_derivation_targets, validate_macro_exploration_definition,
 };
 
 /// Identifies which circuit of a macro contains a validation error.
@@ -695,6 +695,14 @@ pub fn validate_macro(
     }
     errors.extend(
         validate_macro_exploration_definition(macro_, primitive_catalog)
+            .into_iter()
+            .map(|error| MacroValidationError::InvalidExplorationDefinition {
+                macro_name: macro_name.clone(),
+                error,
+            }),
+    );
+    errors.extend(
+        validate_macro_derivation_targets(macro_, macro_catalog)
             .into_iter()
             .map(|error| MacroValidationError::InvalidExplorationDefinition {
                 macro_name: macro_name.clone(),

@@ -413,6 +413,12 @@ fn expression_symbols(expression: &str) -> Result<Vec<String>, MacroSpecificatio
     )
 }
 
+pub(super) fn validate_numeric_expression(expression: &str) -> Result<(), String> {
+    ExpressionParser::new(expression, &HashMap::new())
+        .symbols()
+        .map(|_| ())
+}
+
 struct ExpressionParser<'a> {
     expression: &'a str,
     bytes: &'a [u8],

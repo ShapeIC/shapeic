@@ -4,15 +4,18 @@ mod candidates;
 mod catalog;
 mod combination;
 mod configuration;
+mod derivation;
 mod evaluate;
 mod execution;
 mod explore;
 mod input;
 mod model;
 mod physical;
+mod prebuild;
 mod prepare;
 mod projection;
 mod render;
+mod seed;
 mod specification;
 mod validation;
 
@@ -27,8 +30,10 @@ pub use combination::{
     plan_macro_candidate_combinations,
 };
 pub use configuration::{
-    MacroExplorationDefinitionError, validate_macro_exploration_definition,
+    MacroExplorationDefinitionError, validate_macro_derivation_targets,
+    validate_macro_exploration_definition,
 };
+pub use derivation::MacroDerivationReductionError;
 pub use evaluate::{
     MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,
     PreparedMacroAcCandidateEvaluatorError,
@@ -51,10 +56,12 @@ pub use input::{
     validate_macro_exploration_input,
 };
 pub use model::{
-    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroDesignVariable,
-    MacroDesignVariableBinding, MacroExploration, MacroInterfaceBinding, MacroOutputSource,
-    MacroPort, MacroPortRole, MacroPrimitiveDefault, MacroSpecification, MacroSpecificationBounds,
-    MacroSpecificationSource, MacroTestbenchSource,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroCompactSeed,
+    MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDerivedValue,
+    MacroDesignVariable,
+    MacroDesignVariableBinding, MacroDesignVariableCondition, MacroExploration,
+    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroPrimitiveDefault,
+    MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource, MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};
@@ -64,6 +71,7 @@ pub use prepare::{
 pub use projection::{
     MacroCandidateProjection, MacroCandidateProjectionError, MacroOutputResolutionError,
 };
+pub use seed::{MacroCompactSeedError, validate_macro_compact_seed};
 pub use render::{
     ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
     ResolvedPhysicalCandidateColumns, ResolvedPhysicalPort, ResolvedPhysicalPrimitive,

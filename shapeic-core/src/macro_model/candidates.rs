@@ -20,6 +20,7 @@ use super::input::{
     CompactMacroCandidateProvenance, CompactMacroInstanceExplorationInput,
     PrimitiveInstanceExplorationInput,
 };
+use super::prebuild::apply_prebuild_conditions;
 use super::{
     CandidateBuildExecution, Macro, MacroExplorationDefinitionError, MacroExplorationInput,
     MacroExplorationInputValidationError, MacroExplorationInstanceKind,
@@ -33,6 +34,7 @@ pub struct MacroInstanceCandidateSet {
     pub(super) kind: MacroExplorationInstanceKind,
     pub(super) candidates: CandidateSet,
     pub(super) filter_report: CandidateFilterReport,
+    pub(super) interface_ports: Vec<String>,
     pub(super) compact_provenance: Option<CompactMacroCandidateProvenance>,
 }
 
@@ -59,9 +61,7 @@ impl MacroInstanceCandidateSet {
 
     /// Returns projected public interface ports for a compact submacro.
     pub fn interface_ports(&self) -> &[String] {
-        self.compact_provenance
-            .as_ref()
-            .map_or(&[], |provenance| provenance.interface_ports.as_slice())
+        &self.interface_ports
     }
 }
 
@@ -385,15 +385,30 @@ fn build_candidate_task(
     task: CandidateBuildTask<'_>,
 ) -> Result<BuiltCandidateTask, MacroCandidateBuildError> {
     let start = Instant::now();
-    let (circuit_index, instance_path, kind, mut candidates, filters, mut provenance) = match task {
+    let (
+        circuit_index,
+        instance_path,
+        kind,
+        mut candidates,
+        filters,
+        interface_ports,
+        mut provenance,
+    ) = match task {
         CandidateBuildTask::Primitive {
             circuit_index,
             instance_path,
             primitive_name,
             model,
             primitive,
-            input,
+            mut input,
         } => {
+            if let Some(build_spec) = &primitive.build {
+                apply_prebuild_conditions(
+                    build_spec,
+                    &mut input.build_input,
+                    &input.prebuild_conditions,
+                );
+            }
             let candidates = build_candidate_set_for_primitive(
                 model,
                 &primitive,
@@ -412,6 +427,7 @@ fn build_candidate_task(
                 MacroExplorationInstanceKind::Primitive,
                 candidates,
                 input.filters,
+                Vec::new(),
                 None,
             )
         }
@@ -425,6 +441,7 @@ fn build_candidate_task(
             MacroExplorationInstanceKind::CompactMacro,
             input.candidates,
             input.filters,
+            input.interface_ports,
             input.provenance,
         ),
     };
@@ -454,6 +471,7 @@ fn build_candidate_task(
             kind,
             candidates,
             filter_report,
+            interface_ports,
             compact_provenance: provenance,
         },
         report: MacroCandidateBuildInstanceReport {
@@ -632,6 +650,12 @@ mod tests {
             )
             .unwrap();
         input
+            .register_design_variable_condition(
+                "stage_widths",
+                crate::macro_model::MacroDesignVariableCondition::allowed_values([3.0, 4.0]),
+            )
+            .unwrap();
+        input
             .register_compact_macro_instance(
                 "xload",
                 CompactMacroInstanceExplorationInput::new(
@@ -647,10 +671,57 @@ mod tests {
         let candidates = build_macro_candidate_sets(&macro_, &catalog, input).unwrap();
 
         let stage = candidates.instance("xstage").unwrap();
-        assert_eq!(stage.filter_report().input_count(), 3);
-        assert_eq!(stage.filter_report().retained_count(), 2);
-        assert_eq!(stage.candidates().points[0].get("xstage.width"), Some(2.0));
-        assert_eq!(stage.candidates().points[1].get("xstage.width"), Some(3.0));
+        assert_eq!(stage.filter_report().input_count(), 2);
+        assert_eq!(stage.filter_report().retained_count(), 1);
+        assert_eq!(stage.candidates().points[0].get("xstage.width"), Some(3.0));
+    }
+
+    #[test]
+    fn empty_prebuild_intersection_produces_zero_candidates() {
+        let table = fixture();
+        let model = table.model("fixture_nmos").unwrap();
+        let mut catalog = PrimitiveCatalog::new();
+        catalog.register(primitive());
+        let macro_ = macro_()
+            .with_primitive_default(MacroPrimitiveDefault::new(
+                "xstage",
+                PrimitiveBuildInput::new(HashMap::from([(
+                    "width".to_owned(),
+                    PrimitiveBuildValue::Vector(vec![1.0, 2.0]),
+                )])),
+                Vec::new(),
+            ))
+            .with_design_variable(MacroDesignVariable::new(
+                "stage_widths",
+                PrimitiveBuildInputKind::Vector,
+                vec![MacroDesignVariableBinding::new("xstage", "width")],
+            ));
+        let mut input = MacroExplorationInput::new();
+        input.register_device_model("nmos", model).unwrap();
+        input
+            .register_design_variable_condition(
+                "stage_widths",
+                crate::macro_model::MacroDesignVariableCondition::allowed_values(Vec::<f64>::new()),
+            )
+            .unwrap();
+        input
+            .register_compact_macro_instance(
+                "xload",
+                CompactMacroInstanceExplorationInput::new(
+                    CandidateSet::new(
+                        "load",
+                        vec![CandidatePoint::new(vec![("xload.score".to_owned(), 1.0)])],
+                    ),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+
+        let candidates = build_macro_candidate_sets(&macro_, &catalog, input).unwrap();
+
+        let stage = candidates.instance("xstage").unwrap();
+        assert!(stage.candidates().points.is_empty());
+        assert_eq!(stage.filter_report().input_count(), 0);
     }
 
     #[test]

@@ -481,6 +481,7 @@ mod tests {
             kind: MacroExplorationInstanceKind::Primitive,
             candidates: CandidateSet::new(name, points),
             filter_report: CandidateFilterReport::default(),
+            interface_ports: Vec::new(),
             compact_provenance: None,
         }
     }
