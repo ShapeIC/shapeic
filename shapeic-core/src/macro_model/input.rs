@@ -12,7 +12,10 @@ use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::PrimitiveBuildInput;
 
-use super::{Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroExplorationResult};
+use super::{
+    Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroExecutionConfig,
+    MacroExplorationResult,
+};
 
 /// Build data and local pre-exploration filters for one primitive instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +108,7 @@ pub struct MacroExplorationInput<'lut> {
     pub(super) physical_lut: Option<&'lut PhysicalLookupTable>,
     pub(super) primitive_instances: HashMap<String, PrimitiveInstanceExplorationInput>,
     pub(super) compact_macro_instances: HashMap<String, CompactMacroInstanceExplorationInput>,
+    pub(super) execution: MacroExecutionConfig,
 }
 
 impl<'lut> MacroExplorationInput<'lut> {
@@ -174,6 +178,16 @@ impl<'lut> MacroExplorationInput<'lut> {
     /// Returns the physical LUT shared by layout-aware testbenches.
     pub const fn physical_lut(&self) -> Option<&'lut PhysicalLookupTable> {
         self.physical_lut
+    }
+
+    /// Replaces the runtime execution policy for this exploration.
+    pub fn set_execution_config(&mut self, execution: MacroExecutionConfig) {
+        self.execution = execution;
+    }
+
+    /// Returns the runtime execution policy for this exploration.
+    pub const fn execution_config(&self) -> &MacroExecutionConfig {
+        &self.execution
     }
 
     /// Returns the input registered for one primitive instance path.
@@ -657,6 +671,32 @@ mod tests {
             Err(MacroExplorationInputRegistrationError::DuplicatePhysicalLut)
         );
         assert!(std::ptr::eq(input.physical_lut().unwrap(), &first));
+    }
+
+    #[test]
+    fn stores_an_explicit_execution_policy() {
+        use crate::macro_model::{ElectricalAnalysisExecution, MacroExecutionConfig};
+
+        let mut input = MacroExplorationInput::new();
+        assert_eq!(
+            input.execution_config().electrical_analysis(),
+            ElectricalAnalysisExecution::Sequential
+        );
+
+        input.set_execution_config(
+            MacroExecutionConfig::sequential()
+                .with_parallel_electrical_analysis(4)
+                .unwrap()
+                .with_electrical_batch_size(11)
+                .unwrap(),
+        );
+        assert_eq!(
+            input.execution_config().electrical_analysis(),
+            ElectricalAnalysisExecution::Parallel {
+                workers: 4,
+                batch_size: 11,
+            }
+        );
     }
 
     #[test]

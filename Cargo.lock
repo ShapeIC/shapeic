@@ -1076,6 +1076,7 @@ dependencies = [
  "ndarray",
  "ndarray-npy",
  "num-complex",
+ "rayon",
  "serde",
  "serde_json",
  "shapeic-layout",

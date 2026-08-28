@@ -3,6 +3,7 @@
 mod catalog;
 mod candidates;
 mod combination;
+mod execution;
 mod evaluate;
 mod explore;
 mod input;
@@ -21,6 +22,9 @@ pub use candidates::{
 pub use combination::{
     MacroCandidateCombinationError, MacroCandidateCombinationJoin,
     MacroCandidateCombinationPlan, plan_macro_candidate_combinations,
+};
+pub use execution::{
+    ElectricalAnalysisExecution, MacroExecutionConfig, MacroExecutionConfigError,
 };
 pub use evaluate::{
     MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,

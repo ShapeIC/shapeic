@@ -32,6 +32,56 @@ pub struct MacroCandidateCombinationJoin<'a> {
     selection_len: usize,
 }
 
+/// One deterministic selection copied from the lazy candidate join.
+#[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrdinalCandidateSelection {
+    pub(crate) ordinal: usize,
+    pub(crate) candidate_indices: Vec<usize>,
+}
+
+/// Lazy fixed-size batching over compatible candidate selections.
+#[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
+pub(crate) struct MacroCandidateCombinationBatchIter<'join, 'candidates> {
+    combinations: &'join mut MacroCandidateCombinationJoin<'candidates>,
+    batch_size: usize,
+    next_ordinal: usize,
+}
+
+impl<'join, 'candidates> MacroCandidateCombinationBatchIter<'join, 'candidates> {
+    #[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
+    pub(crate) fn new(
+        combinations: &'join mut MacroCandidateCombinationJoin<'candidates>,
+        batch_size: usize,
+    ) -> Self {
+        assert!(batch_size > 0, "candidate batch size must be greater than zero");
+        Self {
+            combinations,
+            batch_size,
+            next_ordinal: 0,
+        }
+    }
+}
+
+impl Iterator for MacroCandidateCombinationBatchIter<'_, '_> {
+    type Item = Vec<OrdinalCandidateSelection>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut batch = Vec::with_capacity(self.batch_size);
+        while batch.len() < self.batch_size {
+            let Some(candidate_indices) = self.combinations.next_selection() else {
+                break;
+            };
+            batch.push(OrdinalCandidateSelection {
+                ordinal: self.next_ordinal,
+                candidate_indices: candidate_indices.to_vec(),
+            });
+            self.next_ordinal += 1;
+        }
+        (!batch.is_empty()).then_some(batch)
+    }
+}
+
 impl<'a> MacroCandidateCombinationJoin<'a> {
     /// Builds the connectivity plan and its indexed lazy join.
     pub fn new(
@@ -572,6 +622,70 @@ mod tests {
 
         assert_eq!(join.selection_len(), 3);
         assert_eq!(join.next_selection(), None);
+    }
+
+    #[test]
+    fn batches_compatible_selections_without_changing_order() {
+        let (macro_, catalog, candidates) = two_instance_fixture("NB");
+        let mut join = MacroCandidateCombinationJoin::new(&macro_, &catalog, &candidates).unwrap();
+
+        let batches = MacroCandidateCombinationBatchIter::new(&mut join, 3).collect::<Vec<_>>();
+
+        assert_eq!(
+            batches,
+            [
+                vec![
+                    OrdinalCandidateSelection {
+                        ordinal: 0,
+                        candidate_indices: vec![0, 0],
+                    },
+                    OrdinalCandidateSelection {
+                        ordinal: 1,
+                        candidate_indices: vec![0, 1],
+                    },
+                    OrdinalCandidateSelection {
+                        ordinal: 2,
+                        candidate_indices: vec![1, 0],
+                    },
+                ],
+                vec![OrdinalCandidateSelection {
+                    ordinal: 3,
+                    candidate_indices: vec![1, 1],
+                }],
+            ]
+        );
+    }
+
+    #[test]
+    fn batches_exact_multiples_without_an_empty_trailing_batch() {
+        let (macro_, catalog, candidates) = two_instance_fixture("NB");
+        let mut join = MacroCandidateCombinationJoin::new(&macro_, &catalog, &candidates).unwrap();
+
+        let batches = MacroCandidateCombinationBatchIter::new(&mut join, 2).collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|batch| batch.len() == 2));
+        assert_eq!(
+            batches
+                .iter()
+                .flatten()
+                .map(|selection| selection.ordinal)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn batching_an_exhausted_join_produces_no_batches() {
+        let (macro_, catalog, mut candidates) = fixture();
+        candidates.instances[0].candidates.points.clear();
+        let mut join = MacroCandidateCombinationJoin::new(&macro_, &catalog, &candidates).unwrap();
+
+        assert!(
+            MacroCandidateCombinationBatchIter::new(&mut join, 4)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
