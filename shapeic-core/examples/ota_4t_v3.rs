@@ -37,7 +37,7 @@ const AC_MAX_HZ: f64 = 100.0e9;
 const AC_COARSE_POINTS_PER_DECADE: usize = 4;
 const AC_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
 const AC_MAX_REFINEMENT_STEPS: usize = 32;
-const MIN_DC_GAIN_DB: f64 = 25.0;
+const MIN_DC_GAIN_DB: f64 = 40.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
@@ -130,7 +130,7 @@ const GF180_SPEC: PdkSpec = PdkSpec {
     vin: 1.4,
     vbias_start: 0.3,
     vbias_stop: 0.6,
-    layout_policy: "symmetric-native-fingers-with-edge-dummies-v2",
+    layout_policy: "symmetric-native-fingers-with-edge-dummies-v3",
 };
 
 fn main() -> Result<(), Box<dyn Error>> {

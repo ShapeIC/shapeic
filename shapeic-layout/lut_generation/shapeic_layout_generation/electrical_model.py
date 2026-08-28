@@ -41,6 +41,7 @@ class ElectricalMosModel:
     width_parameter: str
     finger_parameter: str
     width_convention: str
+    capacitance_nf_mode: str
     geometry_unit_m: float
 
     @property
@@ -96,6 +97,11 @@ def load_electrical_model(
     width_convention = _string(device, "width_convention", "device")
     if width_convention not in {"total", "per_finger"}:
         raise ValueError("device.width_convention must be 'total' or 'per_finger'")
+    capacitance_nf_mode = str(device.get("capacitance_nf_mode", "simulate"))
+    if capacitance_nf_mode not in {"simulate", "linear"}:
+        raise ValueError(
+            "device.capacitance_nf_mode must be 'simulate' or 'linear'"
+        )
     geometry_unit_m = float(device.get("geometry_unit_m", 1.0))
     if not math.isfinite(geometry_unit_m) or geometry_unit_m <= 0.0:
         raise ValueError("device.geometry_unit_m must be positive and finite")
@@ -121,6 +127,7 @@ def load_electrical_model(
         width_parameter=_string(device, "width_parameter", "device"),
         finger_parameter=_string(device, "finger_parameter", "device"),
         width_convention=width_convention,
+        capacitance_nf_mode=capacitance_nf_mode,
         geometry_unit_m=geometry_unit_m,
     )
 

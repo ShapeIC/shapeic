@@ -114,25 +114,40 @@ def aggregate_primitive_spice(
     definition: PrimitiveDeviceDefinition,
     geometry: Geometry,
     device_parameters: Callable[[PrimitiveDeviceDefinition, Geometry], str],
+    *,
+    parallel_fingers: bool = False,
 ) -> str:
-    """Build the compact-model reference with the PCell's total device width."""
+    """Build the compact-model reference matching electrical nf semantics."""
     _validate_geometry(geometry)
-    parameters = device_parameters(definition, geometry)
+    device_geometry = (
+        Geometry(geometry.length, geometry.finger_width, 1)
+        if parallel_fingers
+        else geometry
+    )
+    parameters = device_parameters(definition, device_geometry)
     if not parameters.strip():
         raise ValueError("aggregate MOS parameters must not be empty")
-    devices = [
-        " ".join(
-            (
-                instance.name,
-                instance.drain,
-                instance.gate,
-                instance.source,
-                instance.bulk,
-                parameters,
+    devices = []
+    for instance in definition.instances:
+        copies = geometry.nf if parallel_fingers else 1
+        for finger in range(copies):
+            name = (
+                f"{instance.name}_F{finger + 1}"
+                if parallel_fingers
+                else instance.name
             )
-        )
-        for instance in definition.instances
-    ]
+            devices.append(
+                " ".join(
+                    (
+                        name,
+                        instance.drain,
+                        instance.gate,
+                        instance.source,
+                        instance.bulk,
+                        parameters,
+                    )
+                )
+            )
     return "\n".join(
         (
             f".subckt aggregate_{definition.name} {' '.join(definition.ports)}",

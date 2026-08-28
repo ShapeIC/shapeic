@@ -157,6 +157,9 @@ class CellKitDeviceCapacitanceAdapter:
             lambda definition, point: model.spice_geometry(
                 point.length, point.finger_width, point.nf
             ),
+            parallel_fingers=(
+                getattr(model, "capacitance_nf_mode", "simulate") == "linear"
+            ),
         )
 
 

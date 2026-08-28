@@ -148,6 +148,24 @@ class DeviceCapacitanceTest(unittest.TestCase):
         self.assertEqual(mirror.count("sg13_lv_pmos"), 2)
         self.assertIn("XCM2 DREF DREF S B", mirror)
 
+    def test_linear_aggregate_uses_parallel_unit_fingers(self) -> None:
+        geometry = Geometry(length=0.8e-6, finger_width=3.0e-6, nf=4)
+        netlist = aggregate_primitive_spice(
+            self.diff_pair,
+            geometry,
+            lambda definition, point: (
+                f"{definition.model} l={point.length:.17e} "
+                f"w={point.finger_width * point.nf:.17e} nf={point.nf}"
+            ),
+            parallel_fingers=True,
+        )
+
+        self.assertEqual(netlist.count("sg13_lv_nmos"), 8)
+        self.assertIn("XDP1_F1 DP GP S B", netlist)
+        self.assertIn("XDP1_F4 DP GP S B", netlist)
+        self.assertIn("w=3.00000000000000008e-06 nf=1", netlist)
+        self.assertNotIn("nf=4", netlist)
+
     def test_biases_are_source_referenced_for_both_primitives(self) -> None:
         bias = Bias(vbs=-0.2, vgs=0.3, vds=0.4)
         self.assertEqual(

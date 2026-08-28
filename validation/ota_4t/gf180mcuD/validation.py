@@ -57,7 +57,7 @@ def run_ngspice(
 
 if __name__ == "__main__":
     print(f"{'w_dp':>6} {'l_dp':>6} {'ng_dp':>6} {'w_cm':>6} {'l_cm':>6} {'ng_cm':>6} {'Vout':>6} {'gain':>12} {'simgain':>12} {'gain_error':>10} {'bw_error':>10} {'gbw':>12} {'simgbw':>12} {'error':>6}")
-    with open("../../shapeic-core/examples/ota_4t_v3/results.csv", newline="") as f:
+    with open("../../../shapeic-core/examples/ota_4t_v3/results.csv", newline="") as f:
         reader = csv.DictReader(f)
 
         for row in reader:
@@ -70,15 +70,15 @@ if __name__ == "__main__":
             nf_cm = float(row["cm_nf"])
 
             R1 = 100000000
-            R2 = 0.9*R1/(float(row["vout_v"])-0.9)
+            R2 = 1.4*R1/(float(row["vout_v"])-1.4)
 
             parameters = {"w_dp": w_dp, "l_dp": l_dp, "nf_dp": nf_dp,
                           "w_cm": w_cm, "l_cm": l_cm, "nf_cm": nf_cm,
-                          "VDD": 1.5, "VREF": 0.9, "R2": R2,
+                          "VDD": 3.3, "VREF": 1.4, "R2": R2,
                           "ac_results_path": "outputs/results.csv",
-                          "corner_model_path": "~/SSTADEX-prev/IHP-Open-PDK/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib",
-                          "psp_osdi": "~/SSTADEX-prev/IHP-Open-PDK/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi",
-                          "psp_nqs_osdi": "~/SSTADEX-prev/IHP-Open-PDK/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi"}
+                          "corner_model_path": "~/shapeic/pdks/gf180mcuD/libs.tech/ngspice/sm141064.ngspice",
+                          "include_model_path": "~/shapeic/pdks/gf180mcuD/libs.tech/ngspice/design.ngspice"
+                          }
 
             render_spice_template("ota_4t_validation.spice", "outputs/rendered.spice", parameters)
             run_ngspice("outputs/rendered.spice", "outputs/ngspice.log")
@@ -106,4 +106,6 @@ if __name__ == "__main__":
 
 
             
-            print(f"{w_dp:>6.2f} {l_dp:>6.1f} {nf_dp:>6.1f} {w_cm:>6.2f} {l_cm:>6.1f} {nf_cm:>6.1f} {float(row["vout_v"]):>6.2f} {shapeic_gain:>12.2f} {simulation_gain:>12.2f} {gain_error:>10.4f} {bw_error:>10.4f} {shapeic_gbw:>12.1f} {simulation_gbw:>12.1f} {gbw_error:>6.2f} {pm_error:>6.2f}")
+            print(f"{w_dp:>6.2f} {l_dp:>6.1f} {nf_dp:>6.1f} {w_cm:>6.2f} {l_cm:>6.1f} {nf_cm:>6.1f} {float(row["vout_v"]):>6.2f} {shapeic_gain:>12.2f} {simulation_gain:>12.2f} {gain_error:>10.4f} {shapeic_bw:>12.1f} {simulation_bw:>12.1f} {bw_error:>10.4f} {shapeic_gbw:>12.1f} {simulation_gbw:>12.1f} {gbw_error:>6.2f} {pm_error:>6.2f}")
+            break
+
