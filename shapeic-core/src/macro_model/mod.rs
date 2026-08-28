@@ -3,6 +3,7 @@
 mod candidates;
 mod catalog;
 mod combination;
+mod configuration;
 mod evaluate;
 mod execution;
 mod explore;
@@ -24,6 +25,9 @@ pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use combination::{
     MacroCandidateCombinationError, MacroCandidateCombinationJoin, MacroCandidateCombinationPlan,
     plan_macro_candidate_combinations,
+};
+pub use configuration::{
+    MacroExplorationDefinitionError, validate_macro_exploration_definition,
 };
 pub use evaluate::{
     MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,
@@ -47,9 +51,10 @@ pub use input::{
     validate_macro_exploration_input,
 };
 pub use model::{
-    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroExploration,
-    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroSpecification,
-    MacroSpecificationBounds, MacroSpecificationSource, MacroTestbenchSource,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroDesignVariable,
+    MacroDesignVariableBinding, MacroExploration, MacroInterfaceBinding, MacroOutputSource,
+    MacroPort, MacroPortRole, MacroPrimitiveDefault, MacroSpecification, MacroSpecificationBounds,
+    MacroSpecificationSource, MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};

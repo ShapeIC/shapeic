@@ -7,8 +7,9 @@ use crate::circuit::{BlockRef, Circuit, CircuitValue, LinearElement};
 
 use super::specification::PreparedMacroSpecifications;
 use super::{
-    Macro, MacroCatalog, MacroOutputSource, MacroSpecificationEvaluationError,
-    MacroTestbenchSource,
+    Macro, MacroCatalog, MacroExplorationDefinitionError, MacroOutputSource,
+    MacroSpecificationEvaluationError, MacroTestbenchSource,
+    validate_macro_exploration_definition,
 };
 
 /// Identifies which circuit of a macro contains a validation error.
@@ -264,6 +265,10 @@ pub enum MacroValidationError {
     InvalidSpecification {
         macro_name: String,
         error: MacroSpecificationEvaluationError,
+    },
+    InvalidExplorationDefinition {
+        macro_name: String,
+        error: MacroExplorationDefinitionError,
     },
     CyclicDependency {
         path: Vec<String>,
@@ -624,6 +629,10 @@ impl fmt::Display for MacroValidationError {
                 formatter,
                 "macro '{macro_name}' has an invalid specification: {error}"
             ),
+            Self::InvalidExplorationDefinition { macro_name, error } => write!(
+                formatter,
+                "macro '{macro_name}' has an invalid exploration definition: {error}"
+            ),
             Self::CyclicDependency { path } => {
                 write!(formatter, "cyclic macro dependency: {}", path.join(" -> "))
             }
@@ -684,6 +693,14 @@ pub fn validate_macro(
             error,
         });
     }
+    errors.extend(
+        validate_macro_exploration_definition(macro_, primitive_catalog)
+            .into_iter()
+            .map(|error| MacroValidationError::InvalidExplorationDefinition {
+                macro_name: macro_name.clone(),
+                error,
+            }),
+    );
     validate_output_bindings(macro_, &mut errors);
     errors
 }

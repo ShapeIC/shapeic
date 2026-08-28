@@ -21,8 +21,9 @@ use super::input::{
     PrimitiveInstanceExplorationInput,
 };
 use super::{
-    CandidateBuildExecution, Macro, MacroExplorationInput, MacroExplorationInputValidationError,
-    MacroExplorationInstanceKind, validate_macro_exploration_input,
+    CandidateBuildExecution, Macro, MacroExplorationDefinitionError, MacroExplorationInput,
+    MacroExplorationInputValidationError, MacroExplorationInstanceKind,
+    validate_macro_exploration_definition, validate_macro_exploration_input,
 };
 
 /// Candidates and local filtering statistics for one macro circuit instance.
@@ -153,6 +154,9 @@ impl MacroCandidateSets {
 /// Errors produced while constructing and filtering macro candidate sets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroCandidateBuildError {
+    InvalidDefinition {
+        errors: Vec<MacroExplorationDefinitionError>,
+    },
     InvalidInput {
         errors: Vec<MacroExplorationInputValidationError>,
     },
@@ -175,6 +179,17 @@ pub enum MacroCandidateBuildError {
 impl fmt::Display for MacroCandidateBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidDefinition { errors } => {
+                write!(
+                    formatter,
+                    "macro exploration definition has {} validation error(s)",
+                    errors.len()
+                )?;
+                for error in errors {
+                    write!(formatter, "; {error}")?;
+                }
+                Ok(())
+            }
             Self::InvalidInput { errors } => {
                 write!(
                     formatter,
@@ -214,7 +229,8 @@ impl Error for MacroCandidateBuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::CandidateFilter { error, .. } => Some(error),
-            Self::InvalidInput { .. }
+            Self::InvalidDefinition { .. }
+            | Self::InvalidInput { .. }
             | Self::PrimitiveBuild { .. }
             | Self::CandidateThreadPool { .. } => None,
         }
@@ -248,12 +264,19 @@ pub fn build_macro_candidate_sets_with_execution(
     execution: CandidateBuildExecution,
 ) -> Result<(MacroCandidateSets, MacroCandidateBuildReport), MacroCandidateBuildError> {
     let build_start = Instant::now();
+    let definition_errors = validate_macro_exploration_definition(macro_, primitive_catalog);
+    if !definition_errors.is_empty() {
+        return Err(MacroCandidateBuildError::InvalidDefinition {
+            errors: definition_errors,
+        });
+    }
     let validation_errors = validate_macro_exploration_input(macro_, primitive_catalog, &input);
     if !validation_errors.is_empty() {
         return Err(MacroCandidateBuildError::InvalidInput {
             errors: validation_errors,
         });
     }
+    input.resolve_primitive_defaults(macro_);
 
     let mut tasks = Vec::new();
     for (circuit_index, instance) in macro_.circuit().instances().iter().enumerate() {
@@ -460,7 +483,8 @@ mod tests {
 
     use super::*;
     use crate::macro_model::{
-        CompactMacroInstanceExplorationInput, PrimitiveInstanceExplorationInput,
+        CompactMacroInstanceExplorationInput, MacroDesignVariable, MacroDesignVariableBinding,
+        MacroPrimitiveDefault, PrimitiveInstanceExplorationInput,
     };
 
     fn primitive() -> PrimitiveManifest {
@@ -577,6 +601,56 @@ mod tests {
         assert_eq!(load.filter_report().input_count(), 2);
         assert_eq!(load.filter_report().retained_count(), 1);
         assert_eq!(load.candidates().points[0].get("xload.score"), Some(3.0));
+    }
+
+    #[test]
+    fn builds_primitive_candidates_from_macro_defaults_and_public_overrides() {
+        let table = fixture();
+        let model = table.model("fixture_nmos").unwrap();
+        let mut catalog = PrimitiveCatalog::new();
+        catalog.register(primitive());
+        let macro_ = macro_()
+            .with_primitive_default(MacroPrimitiveDefault::new(
+                "xstage",
+                PrimitiveBuildInput::new(HashMap::from([(
+                    "width".to_owned(),
+                    PrimitiveBuildValue::Vector(vec![1.0, 2.0, 3.0]),
+                )])),
+                vec![CandidateFilter::at_most("xstage.width", 3.0).unwrap()],
+            ))
+            .with_design_variable(MacroDesignVariable::new(
+                "stage_widths",
+                PrimitiveBuildInputKind::Vector,
+                vec![MacroDesignVariableBinding::new("xstage", "width")],
+            ));
+        let mut input = MacroExplorationInput::new();
+        input.register_device_model("nmos", model).unwrap();
+        input
+            .register_design_variable_override(
+                "stage_widths",
+                PrimitiveBuildValue::Vector(vec![2.0, 3.0, 4.0]),
+            )
+            .unwrap();
+        input
+            .register_compact_macro_instance(
+                "xload",
+                CompactMacroInstanceExplorationInput::new(
+                    CandidateSet::new(
+                        "load",
+                        vec![CandidatePoint::new(vec![("xload.score".to_owned(), 1.0)])],
+                    ),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+
+        let candidates = build_macro_candidate_sets(&macro_, &catalog, input).unwrap();
+
+        let stage = candidates.instance("xstage").unwrap();
+        assert_eq!(stage.filter_report().input_count(), 3);
+        assert_eq!(stage.filter_report().retained_count(), 2);
+        assert_eq!(stage.candidates().points[0].get("xstage.width"), Some(2.0));
+        assert_eq!(stage.candidates().points[1].get("xstage.width"), Some(3.0));
     }
 
     #[test]

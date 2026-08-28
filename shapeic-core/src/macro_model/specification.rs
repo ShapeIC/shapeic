@@ -6,17 +6,35 @@ use std::fmt;
 
 use crate::analysis::{AcMetric, AcMetrics};
 
-use super::{Macro, MacroAcceptedCandidate, MacroCandidateSets, MacroSpecificationSource};
+use super::{
+    Macro, MacroAcceptedCandidate, MacroCandidateSets, MacroSpecificationBounds,
+    MacroSpecificationSource,
+};
 
 /// Prepared dependency order for one macro's specifications.
 #[derive(Clone, Debug)]
 pub(super) struct PreparedMacroSpecifications {
     evaluation_order: Vec<usize>,
+    bounds: Vec<MacroSpecificationBounds>,
 }
 
 impl PreparedMacroSpecifications {
     pub(super) fn new(macro_: &Macro) -> Result<Self, MacroSpecificationEvaluationError> {
+        let bounds = macro_
+            .exploration()
+            .specifications()
+            .iter()
+            .map(|specification| specification.bounds())
+            .collect::<Vec<_>>();
+        Self::new_with_bounds(macro_, bounds)
+    }
+
+    pub(super) fn new_with_bounds(
+        macro_: &Macro,
+        bounds: Vec<MacroSpecificationBounds>,
+    ) -> Result<Self, MacroSpecificationEvaluationError> {
         let specifications = macro_.exploration().specifications();
+        debug_assert_eq!(specifications.len(), bounds.len());
         let mut names = HashMap::with_capacity(specifications.len());
         for (index, specification) in specifications.iter().enumerate() {
             if specification.name().trim().is_empty() {
@@ -27,12 +45,16 @@ impl PreparedMacroSpecifications {
                     name: specification.name().to_owned(),
                 });
             }
-            let bounds = specification.bounds();
-            if bounds.minimum().is_some_and(|value| !value.is_finite())
-                || bounds.maximum().is_some_and(|value| !value.is_finite())
-                || bounds
+            let effective_bounds = bounds[index];
+            if effective_bounds
+                .minimum()
+                .is_some_and(|value| !value.is_finite())
+                || effective_bounds
+                    .maximum()
+                    .is_some_and(|value| !value.is_finite())
+                || effective_bounds
                     .minimum()
-                    .zip(bounds.maximum())
+                    .zip(effective_bounds.maximum())
                     .is_some_and(|(minimum, maximum)| minimum > maximum)
             {
                 return Err(MacroSpecificationEvaluationError::InvalidBounds {
@@ -65,7 +87,14 @@ impl PreparedMacroSpecifications {
                 &mut evaluation_order,
             )?;
         }
-        Ok(Self { evaluation_order })
+        Ok(Self {
+            evaluation_order,
+            bounds,
+        })
+    }
+
+    pub(super) fn bounds(&self) -> &[MacroSpecificationBounds] {
+        &self.bounds
     }
 
     pub(super) fn validate_context(

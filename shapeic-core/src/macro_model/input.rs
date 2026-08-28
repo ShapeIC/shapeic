@@ -3,22 +3,22 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use shapeic_lut::DeviceLut;
 use shapeic_layout::PhysicalLookupTable;
+use shapeic_lut::DeviceLut;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
 use crate::exploration::candidate::CandidateSet;
 use crate::exploration::filter::CandidateFilter;
-use crate::primitive::build::PrimitiveBuildInput;
+use crate::primitive::build::{PrimitiveBuildInput, PrimitiveBuildInputKind, PrimitiveBuildValue};
 
 use super::{
     Macro, MacroAnalysisDomain, MacroCandidateProjection, MacroExecutionConfig,
-    MacroExplorationResult,
+    MacroExplorationResult, MacroSpecificationBounds,
 };
 
 /// Build data and local pre-exploration filters for one primitive instance.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PrimitiveInstanceExplorationInput {
     pub(super) build_input: PrimitiveBuildInput,
     pub(super) filters: Vec<CandidateFilter>,
@@ -108,6 +108,9 @@ pub struct MacroExplorationInput<'lut> {
     pub(super) physical_lut: Option<&'lut PhysicalLookupTable>,
     pub(super) primitive_instances: HashMap<String, PrimitiveInstanceExplorationInput>,
     pub(super) compact_macro_instances: HashMap<String, CompactMacroInstanceExplorationInput>,
+    pub(super) design_variable_overrides: HashMap<String, PrimitiveBuildValue>,
+    pub(super) specification_overrides: HashMap<String, MacroSpecificationBounds>,
+    pub(super) inherited_specification_bounds: HashMap<String, MacroSpecificationBounds>,
     pub(super) execution: MacroExecutionConfig,
 }
 
@@ -159,6 +162,76 @@ impl<'lut> MacroExplorationInput<'lut> {
         Ok(())
     }
 
+    /// Overrides one public macro design variable for this execution.
+    pub fn register_design_variable_override(
+        &mut self,
+        variable: impl Into<String>,
+        value: PrimitiveBuildValue,
+    ) -> Result<(), MacroExplorationInputRegistrationError> {
+        let variable = variable.into();
+        if variable.trim().is_empty() {
+            return Err(MacroExplorationInputRegistrationError::EmptyDesignVariable);
+        }
+        if self.design_variable_overrides.contains_key(&variable) {
+            return Err(
+                MacroExplorationInputRegistrationError::DuplicateDesignVariableOverride {
+                    variable,
+                },
+            );
+        }
+        self.design_variable_overrides.insert(variable, value);
+        Ok(())
+    }
+
+    /// Replaces the definition-owned bounds of one macro specification.
+    pub fn register_specification_override(
+        &mut self,
+        specification: impl Into<String>,
+        bounds: MacroSpecificationBounds,
+    ) -> Result<(), MacroExplorationInputRegistrationError> {
+        let specification = specification.into();
+        if specification.trim().is_empty() {
+            return Err(MacroExplorationInputRegistrationError::EmptySpecification);
+        }
+        if self.specification_overrides.contains_key(&specification) {
+            return Err(
+                MacroExplorationInputRegistrationError::DuplicateSpecificationOverride {
+                    specification,
+                },
+            );
+        }
+        self.specification_overrides.insert(specification, bounds);
+        Ok(())
+    }
+
+    /// Adds bounds inherited from a parent exploration.
+    ///
+    /// Inherited bounds are intersected with the default or runtime override;
+    /// they never widen a macro's effective specification.
+    pub fn register_inherited_specification_bounds(
+        &mut self,
+        specification: impl Into<String>,
+        bounds: MacroSpecificationBounds,
+    ) -> Result<(), MacroExplorationInputRegistrationError> {
+        let specification = specification.into();
+        if specification.trim().is_empty() {
+            return Err(MacroExplorationInputRegistrationError::EmptySpecification);
+        }
+        if self
+            .inherited_specification_bounds
+            .contains_key(&specification)
+        {
+            return Err(
+                MacroExplorationInputRegistrationError::DuplicateInheritedSpecificationBounds {
+                    specification,
+                },
+            );
+        }
+        self.inherited_specification_bounds
+            .insert(specification, bounds);
+        Ok(())
+    }
+
     /// Registers projected candidates and filters for one compact submacro path.
     pub fn register_compact_macro_instance(
         &mut self,
@@ -206,6 +279,126 @@ impl<'lut> MacroExplorationInput<'lut> {
         self.compact_macro_instances.get(instance_path)
     }
 
+    /// Returns one runtime design-variable override.
+    pub fn design_variable_override(&self, variable: &str) -> Option<&PrimitiveBuildValue> {
+        self.design_variable_overrides.get(variable)
+    }
+
+    /// Returns one runtime specification-bounds override.
+    pub fn specification_override(&self, specification: &str) -> Option<MacroSpecificationBounds> {
+        self.specification_overrides.get(specification).copied()
+    }
+
+    pub(super) fn resolve_primitive_defaults(&mut self, macro_: &Macro) {
+        let runtime = self.primitive_instances.clone();
+        let mut resolved = macro_
+            .exploration()
+            .primitive_defaults()
+            .iter()
+            .map(|default| {
+                (
+                    default.instance_path().to_owned(),
+                    PrimitiveInstanceExplorationInput::new(
+                        default.build_input().clone(),
+                        default.filters().to_vec(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        for (instance_path, runtime_input) in &runtime {
+            merge_primitive_instance_input(
+                resolved.entry(instance_path.clone()).or_default(),
+                runtime_input,
+            );
+        }
+        for (variable_name, value) in &self.design_variable_overrides {
+            if let Some(variable) = macro_.exploration().design_variable(variable_name) {
+                for binding in variable.bindings() {
+                    if let Some(input) = resolved.get_mut(binding.instance_path()) {
+                        input
+                            .build_input
+                            .values
+                            .insert(binding.input().to_owned(), value.clone());
+                    }
+                }
+            }
+        }
+        for (instance_path, runtime_input) in &runtime {
+            let resolved_input = resolved
+                .get_mut(instance_path)
+                .expect("runtime primitive input was inserted during default resolution");
+            for (name, value) in &runtime_input.build_input.values {
+                resolved_input
+                    .build_input
+                    .values
+                    .insert(name.clone(), value.clone());
+            }
+            if runtime_input.build_input.lut_config.is_some() {
+                resolved_input.build_input.lut_config =
+                    runtime_input.build_input.lut_config.clone();
+            }
+        }
+        self.primitive_instances = resolved;
+    }
+
+    pub(super) fn effective_specification_bounds(
+        &self,
+        macro_: &Macro,
+    ) -> Result<Vec<MacroSpecificationBounds>, MacroExplorationInputValidationError> {
+        macro_
+            .exploration()
+            .specifications()
+            .iter()
+            .map(|specification| {
+                let base = self
+                    .specification_overrides
+                    .get(specification.name())
+                    .copied()
+                    .unwrap_or_else(|| specification.bounds());
+                if !base.is_valid() {
+                    return Err(
+                        MacroExplorationInputValidationError::InvalidSpecificationBounds {
+                            macro_name: macro_.name().to_owned(),
+                            specification: specification.name().to_owned(),
+                        },
+                    );
+                }
+                let effective = if let Some(inherited) = self
+                    .inherited_specification_bounds
+                    .get(specification.name())
+                    .copied()
+                {
+                    if !inherited.is_valid() {
+                        return Err(
+                            MacroExplorationInputValidationError::InvalidSpecificationBounds {
+                                macro_name: macro_.name().to_owned(),
+                                specification: specification.name().to_owned(),
+                            },
+                        );
+                    }
+                    base.intersection(inherited).ok_or_else(|| {
+                        MacroExplorationInputValidationError::ConflictingSpecificationBounds {
+                            macro_name: macro_.name().to_owned(),
+                            specification: specification.name().to_owned(),
+                        }
+                    })?
+                } else {
+                    base
+                };
+                if !effective.is_valid() {
+                    return Err(
+                        MacroExplorationInputValidationError::InvalidSpecificationBounds {
+                            macro_name: macro_.name().to_owned(),
+                            specification: specification.name().to_owned(),
+                        },
+                    );
+                }
+                Ok(effective)
+            })
+            .collect()
+    }
+
     fn validate_new_instance_path(
         &self,
         instance_path: String,
@@ -224,6 +417,23 @@ impl<'lut> MacroExplorationInput<'lut> {
     }
 }
 
+fn merge_primitive_instance_input(
+    base: &mut PrimitiveInstanceExplorationInput,
+    overlay: &PrimitiveInstanceExplorationInput,
+) {
+    base.build_input.values.extend(
+        overlay
+            .build_input
+            .values
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    if overlay.build_input.lut_config.is_some() {
+        base.build_input.lut_config = overlay.build_input.lut_config.clone();
+    }
+    base.filters.extend(overlay.filters.iter().cloned());
+}
+
 /// Errors produced while registering runtime macro exploration inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroExplorationInputRegistrationError {
@@ -232,6 +442,11 @@ pub enum MacroExplorationInputRegistrationError {
     DuplicateDeviceModel { device_type: String },
     DuplicatePhysicalLut,
     DuplicateInstanceInput { instance_path: String },
+    EmptyDesignVariable,
+    EmptySpecification,
+    DuplicateDesignVariableOverride { variable: String },
+    DuplicateSpecificationOverride { specification: String },
+    DuplicateInheritedSpecificationBounds { specification: String },
 }
 
 impl fmt::Display for MacroExplorationInputRegistrationError {
@@ -251,6 +466,20 @@ impl fmt::Display for MacroExplorationInputRegistrationError {
             Self::DuplicateInstanceInput { instance_path } => write!(
                 formatter,
                 "exploration input for instance '{instance_path}' is already registered"
+            ),
+            Self::EmptyDesignVariable => formatter.write_str("design variable cannot be empty"),
+            Self::EmptySpecification => formatter.write_str("specification cannot be empty"),
+            Self::DuplicateDesignVariableOverride { variable } => write!(
+                formatter,
+                "design variable '{variable}' already has a runtime override"
+            ),
+            Self::DuplicateSpecificationOverride { specification } => write!(
+                formatter,
+                "specification '{specification}' already has a runtime override"
+            ),
+            Self::DuplicateInheritedSpecificationBounds { specification } => write!(
+                formatter,
+                "specification '{specification}' already has inherited bounds"
             ),
         }
     }
@@ -318,6 +547,58 @@ pub enum MacroExplorationInputValidationError {
         instance_path: String,
         primitive: String,
         device_type: String,
+    },
+    UnknownDesignVariable {
+        macro_name: String,
+        variable: String,
+    },
+    DesignVariableKindMismatch {
+        macro_name: String,
+        variable: String,
+        expected: PrimitiveBuildInputKind,
+        actual: PrimitiveBuildInputKind,
+    },
+    NonFiniteDesignVariable {
+        macro_name: String,
+        variable: String,
+    },
+    UnknownSpecificationOverride {
+        macro_name: String,
+        specification: String,
+    },
+    InvalidSpecificationBounds {
+        macro_name: String,
+        specification: String,
+    },
+    ConflictingSpecificationBounds {
+        macro_name: String,
+        specification: String,
+    },
+    UnknownPrimitiveInput {
+        macro_name: String,
+        instance_path: String,
+        primitive: String,
+        input: String,
+    },
+    MissingRequiredPrimitiveInput {
+        macro_name: String,
+        instance_path: String,
+        primitive: String,
+        input: String,
+    },
+    PrimitiveInputKindMismatch {
+        macro_name: String,
+        instance_path: String,
+        primitive: String,
+        input: String,
+        expected: PrimitiveBuildInputKind,
+        actual: PrimitiveBuildInputKind,
+    },
+    NonFinitePrimitiveInput {
+        macro_name: String,
+        instance_path: String,
+        primitive: String,
+        input: String,
     },
 }
 
@@ -388,6 +669,88 @@ impl fmt::Display for MacroExplorationInputValidationError {
                 formatter,
                 "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' requires missing device model '{device_type}'"
             ),
+            Self::UnknownDesignVariable {
+                macro_name,
+                variable,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' has an override for unknown design variable '{variable}'"
+            ),
+            Self::DesignVariableKindMismatch {
+                macro_name,
+                variable,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' design variable '{variable}' expects {expected}, found {actual}"
+            ),
+            Self::NonFiniteDesignVariable {
+                macro_name,
+                variable,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' design variable '{variable}' contains a non-finite value"
+            ),
+            Self::UnknownSpecificationOverride {
+                macro_name,
+                specification,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' has bounds for unknown specification '{specification}'"
+            ),
+            Self::InvalidSpecificationBounds {
+                macro_name,
+                specification,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' specification '{specification}' has invalid effective bounds"
+            ),
+            Self::ConflictingSpecificationBounds {
+                macro_name,
+                specification,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' specification '{specification}' has contradictory inherited bounds"
+            ),
+            Self::UnknownPrimitiveInput {
+                macro_name,
+                instance_path,
+                primitive,
+                input,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' has no build input named '{input}'"
+            ),
+            Self::MissingRequiredPrimitiveInput {
+                macro_name,
+                instance_path,
+                primitive,
+                input,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' is missing required build input '{input}'"
+            ),
+            Self::PrimitiveInputKindMismatch {
+                macro_name,
+                instance_path,
+                primitive,
+                input,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' input '{input}' expects {expected}, found {actual}"
+            ),
+            Self::NonFinitePrimitiveInput {
+                macro_name,
+                instance_path,
+                primitive,
+                input,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' instance '{instance_path}' primitive '{primitive}' input '{input}' contains a non-finite value"
+            ),
         }
     }
 }
@@ -404,6 +767,66 @@ pub fn validate_macro_exploration_input(
     input: &MacroExplorationInput<'_>,
 ) -> Vec<MacroExplorationInputValidationError> {
     let mut errors = Vec::new();
+    let mut effective_input = input.clone();
+    effective_input.resolve_primitive_defaults(macro_);
+    let input = &effective_input;
+
+    for (variable_name, value) in &input.design_variable_overrides {
+        let Some(variable) = macro_.exploration().design_variable(variable_name) else {
+            errors.push(
+                MacroExplorationInputValidationError::UnknownDesignVariable {
+                    macro_name: macro_.name().to_owned(),
+                    variable: variable_name.clone(),
+                },
+            );
+            continue;
+        };
+        if !variable.kind().accepts(value.kind()) {
+            errors.push(
+                MacroExplorationInputValidationError::DesignVariableKindMismatch {
+                    macro_name: macro_.name().to_owned(),
+                    variable: variable_name.clone(),
+                    expected: variable.kind(),
+                    actual: value.kind(),
+                },
+            );
+        }
+        if !value.is_finite() {
+            errors.push(
+                MacroExplorationInputValidationError::NonFiniteDesignVariable {
+                    macro_name: macro_.name().to_owned(),
+                    variable: variable_name.clone(),
+                },
+            );
+        }
+    }
+
+    for (specification, bounds) in input
+        .specification_overrides
+        .iter()
+        .chain(&input.inherited_specification_bounds)
+    {
+        if macro_.exploration().specification(specification).is_none() {
+            errors.push(
+                MacroExplorationInputValidationError::UnknownSpecificationOverride {
+                    macro_name: macro_.name().to_owned(),
+                    specification: specification.clone(),
+                },
+            );
+        } else if !bounds.is_valid() {
+            errors.push(
+                MacroExplorationInputValidationError::InvalidSpecificationBounds {
+                    macro_name: macro_.name().to_owned(),
+                    specification: specification.clone(),
+                },
+            );
+        }
+    }
+    if let Err(error) = input.effective_specification_bounds(macro_) {
+        if !errors.contains(&error) {
+            errors.push(error);
+        }
+    }
 
     if input.physical_lut.is_none() {
         errors.extend(
@@ -412,10 +835,12 @@ pub fn validate_macro_exploration_input(
                 .testbenches()
                 .iter()
                 .filter(|testbench| testbench.domain() == MacroAnalysisDomain::LayoutAware)
-                .map(|testbench| MacroExplorationInputValidationError::MissingPhysicalLut {
-                    macro_name: macro_.name().to_owned(),
-                    testbench: testbench.name().to_owned(),
-                }),
+                .map(
+                    |testbench| MacroExplorationInputValidationError::MissingPhysicalLut {
+                        macro_name: macro_.name().to_owned(),
+                        testbench: testbench.name().to_owned(),
+                    },
+                ),
         );
     }
 
@@ -479,6 +904,19 @@ pub fn validate_macro_exploration_input(
                         device_type: device_type.to_owned(),
                     });
                 }
+                if let (Some(instance_input), Some(build_spec)) = (
+                    input.primitive_instances.get(instance.name()),
+                    &manifest.build,
+                ) {
+                    validate_primitive_build_input(
+                        macro_.name(),
+                        instance.name(),
+                        primitive,
+                        build_spec,
+                        &instance_input.build_input,
+                        &mut errors,
+                    );
+                }
             }
             BlockRef::Macro(referenced_macro) => {
                 if !input.compact_macro_instances.contains_key(instance.name()) {
@@ -496,6 +934,63 @@ pub fn validate_macro_exploration_input(
     }
 
     errors
+}
+
+fn validate_primitive_build_input(
+    macro_name: &str,
+    instance_path: &str,
+    primitive: &str,
+    build_spec: &crate::primitive::build::PrimitiveBuildSpec,
+    input: &PrimitiveBuildInput,
+    errors: &mut Vec<MacroExplorationInputValidationError>,
+) {
+    for (name, value) in &input.values {
+        let Some(input_spec) = build_spec.inputs.iter().find(|input| input.name == *name) else {
+            errors.push(
+                MacroExplorationInputValidationError::UnknownPrimitiveInput {
+                    macro_name: macro_name.to_owned(),
+                    instance_path: instance_path.to_owned(),
+                    primitive: primitive.to_owned(),
+                    input: name.clone(),
+                },
+            );
+            continue;
+        };
+        if !input_spec.kind.accepts(value.kind()) {
+            errors.push(
+                MacroExplorationInputValidationError::PrimitiveInputKindMismatch {
+                    macro_name: macro_name.to_owned(),
+                    instance_path: instance_path.to_owned(),
+                    primitive: primitive.to_owned(),
+                    input: name.clone(),
+                    expected: input_spec.kind,
+                    actual: value.kind(),
+                },
+            );
+        }
+        if !value.is_finite() {
+            errors.push(
+                MacroExplorationInputValidationError::NonFinitePrimitiveInput {
+                    macro_name: macro_name.to_owned(),
+                    instance_path: instance_path.to_owned(),
+                    primitive: primitive.to_owned(),
+                    input: name.clone(),
+                },
+            );
+        }
+    }
+    for input_spec in &build_spec.inputs {
+        if input_spec.required && !input.values.contains_key(&input_spec.name) {
+            errors.push(
+                MacroExplorationInputValidationError::MissingRequiredPrimitiveInput {
+                    macro_name: macro_name.to_owned(),
+                    instance_path: instance_path.to_owned(),
+                    primitive: primitive.to_owned(),
+                    input: input_spec.name.clone(),
+                },
+            );
+        }
+    }
 }
 
 fn validate_registered_instance_kind(
@@ -528,6 +1023,7 @@ fn validate_registered_instance_kind(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use shapeic_lut::LookupTable;
@@ -537,6 +1033,15 @@ mod tests {
     };
     use crate::circuit::Circuit;
     use crate::exploration::candidate::{CandidatePoint, CandidateSet};
+    use crate::exploration::filter::CandidateFilter;
+    use crate::macro_model::{
+        MacroDesignVariable, MacroDesignVariableBinding, MacroPrimitiveDefault, MacroSpecification,
+        MacroSpecificationSource,
+    };
+    use crate::primitive::build::{
+        PrimitiveBuildInputKind, PrimitiveBuildInputSpec, PrimitiveBuildSpec, PrimitiveBuildValue,
+        SweepMode,
+    };
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::testbench::{AcAnalysis, TransferFunction};
 
@@ -613,6 +1118,45 @@ mod tests {
         LookupTable::open(path).expect("LUT fixture should load")
     }
 
+    fn macro_with_defaults_and_design_variable() -> Macro {
+        let default_input = |current| {
+            PrimitiveBuildInput::new(HashMap::from([
+                ("current".to_owned(), PrimitiveBuildValue::Scalar(current)),
+                (
+                    "vout".to_owned(),
+                    PrimitiveBuildValue::Vector(vec![0.5, 1.0]),
+                ),
+            ]))
+        };
+        Macro::new(
+            "defaults",
+            Vec::new(),
+            Circuit::builder()
+                .primitive("x1", "device", [("OUT", "N1")])
+                .primitive("x2", "device", [("OUT", "N2")])
+                .build(),
+            Circuit::builder().resistor("r", "N1", "0", 1.0).build(),
+        )
+        .with_primitive_default(MacroPrimitiveDefault::new(
+            "x1",
+            default_input(1.0),
+            vec![CandidateFilter::at_least("x1.width", 1.0).unwrap()],
+        ))
+        .with_primitive_default(MacroPrimitiveDefault::new(
+            "x2",
+            default_input(1.0),
+            Vec::new(),
+        ))
+        .with_design_variable(MacroDesignVariable::new(
+            "current",
+            PrimitiveBuildInputKind::Scalar,
+            vec![
+                MacroDesignVariableBinding::new("x1", "current"),
+                MacroDesignVariableBinding::new("x2", "current"),
+            ],
+        ))
+    }
+
     #[test]
     fn registers_borrowed_models_and_typed_instance_inputs() {
         let table = fixture();
@@ -654,14 +1198,8 @@ mod tests {
 
     #[test]
     fn registers_only_one_shared_physical_lut() {
-        let first = crate::macro_model::physical::tests::physical_lut_for(
-            "pair",
-            &["P", "N"],
-        );
-        let second = crate::macro_model::physical::tests::physical_lut_for(
-            "pair",
-            &["P", "N"],
-        );
+        let first = crate::macro_model::physical::tests::physical_lut_for("pair", &["P", "N"]);
+        let second = crate::macro_model::physical::tests::physical_lut_for("pair", &["P", "N"]);
         let mut input = MacroExplorationInput::new();
 
         input.register_physical_lut(&first).unwrap();
@@ -711,12 +1249,12 @@ mod tests {
             &MacroExplorationInput::new(),
         );
 
-        assert!(errors.contains(
-            &MacroExplorationInputValidationError::MissingPhysicalLut {
+        assert!(
+            errors.contains(&MacroExplorationInputValidationError::MissingPhysicalLut {
                 macro_name: "ota".to_owned(),
                 testbench: "layout".to_owned(),
-            }
-        ));
+            })
+        );
     }
 
     #[test]
@@ -801,5 +1339,109 @@ mod tests {
                 referenced_macro: "active_load".to_owned(),
             }
         ));
+    }
+
+    #[test]
+    fn resolves_defaults_design_variables_and_direct_overrides_by_precedence() {
+        let macro_ = macro_with_defaults_and_design_variable();
+        let mut input = MacroExplorationInput::new();
+        input
+            .register_design_variable_override("current", PrimitiveBuildValue::Scalar(2.0))
+            .unwrap();
+        input
+            .register_primitive_instance(
+                "x1",
+                PrimitiveInstanceExplorationInput::new(
+                    PrimitiveBuildInput::new(HashMap::from([(
+                        "current".to_owned(),
+                        PrimitiveBuildValue::Scalar(3.0),
+                    )])),
+                    vec![CandidateFilter::at_most("x1.width", 10.0).unwrap()],
+                ),
+            )
+            .unwrap();
+
+        input.resolve_primitive_defaults(&macro_);
+
+        assert_eq!(
+            input.primitive_instance("x1").unwrap().build_input().values["current"],
+            PrimitiveBuildValue::Scalar(3.0)
+        );
+        assert_eq!(
+            input.primitive_instance("x2").unwrap().build_input().values["current"],
+            PrimitiveBuildValue::Scalar(2.0)
+        );
+        assert_eq!(
+            input.primitive_instance("x1").unwrap().build_input().values["vout"],
+            PrimitiveBuildValue::Vector(vec![0.5, 1.0])
+        );
+        assert_eq!(input.primitive_instance("x1").unwrap().filters().len(), 2);
+    }
+
+    #[test]
+    fn resolves_specification_override_before_inherited_intersection() {
+        let macro_ =
+            macro_with_defaults_and_design_variable().with_specification(MacroSpecification::new(
+                "gain",
+                MacroSpecificationSource::expression("1"),
+                MacroSpecificationBounds::between(0.0, 100.0),
+            ));
+        let mut input = MacroExplorationInput::new();
+        input
+            .register_specification_override("gain", MacroSpecificationBounds::between(10.0, 90.0))
+            .unwrap();
+        input
+            .register_inherited_specification_bounds(
+                "gain",
+                MacroSpecificationBounds::between(20.0, 80.0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            input.effective_specification_bounds(&macro_).unwrap(),
+            [MacroSpecificationBounds::between(20.0, 80.0)]
+        );
+    }
+
+    #[test]
+    fn validates_runtime_variable_and_primitive_input_types() {
+        let macro_ = macro_with_defaults_and_design_variable();
+        let mut primitive = primitive("device", Some("nmos"));
+        primitive.build = Some(PrimitiveBuildSpec {
+            inputs: vec![
+                PrimitiveBuildInputSpec {
+                    name: "current".to_owned(),
+                    kind: PrimitiveBuildInputKind::Scalar,
+                    required: true,
+                    source: None,
+                },
+                PrimitiveBuildInputSpec {
+                    name: "vout".to_owned(),
+                    kind: PrimitiveBuildInputKind::Vector,
+                    required: true,
+                    source: None,
+                },
+            ],
+            sweep_mode: SweepMode::Cartesian,
+            derived: Vec::new(),
+            lut: Vec::new(),
+            columns: Vec::new(),
+        });
+        let mut primitives = PrimitiveCatalog::new();
+        primitives.register(primitive);
+        let mut input = MacroExplorationInput::new();
+        input
+            .register_design_variable_override("current", PrimitiveBuildValue::Vector(vec![1.0]))
+            .unwrap();
+
+        let errors = validate_macro_exploration_input(&macro_, &primitives, &input);
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroExplorationInputValidationError::DesignVariableKindMismatch {
+                variable,
+                ..
+            } if variable == "current"
+        )));
     }
 }

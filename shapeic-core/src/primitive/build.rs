@@ -76,6 +76,28 @@ pub enum PrimitiveBuildInputKind {
     Vector,
 }
 
+impl PrimitiveBuildInputKind {
+    /// Returns whether a supplied value kind is valid for this declared input.
+    ///
+    /// A scalar is a valid single-point value for a vector sweep input, while
+    /// a vector cannot be supplied to a scalar-only input.
+    pub const fn accepts(self, supplied: Self) -> bool {
+        matches!(
+            (self, supplied),
+            (Self::Scalar, Self::Scalar) | (Self::Vector, Self::Scalar | Self::Vector)
+        )
+    }
+}
+
+impl std::fmt::Display for PrimitiveBuildInputKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Scalar => formatter.write_str("scalar input"),
+            Self::Vector => formatter.write_str("vector input"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SweepMode {
@@ -162,6 +184,19 @@ pub enum PrimitiveBuildValue {
 }
 
 impl PrimitiveBuildValue {
+    /// Returns whether this value is scalar or vector-valued.
+    pub const fn kind(&self) -> PrimitiveBuildInputKind {
+        match self {
+            Self::Scalar(_) => PrimitiveBuildInputKind::Scalar,
+            Self::Vector(_) => PrimitiveBuildInputKind::Vector,
+        }
+    }
+
+    /// Returns whether every contained number is finite.
+    pub fn is_finite(&self) -> bool {
+        self.values().iter().all(|value| value.is_finite())
+    }
+
     fn values(&self) -> &[f64] {
         match self {
             Self::Scalar(value) => std::slice::from_ref(value),

@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::AcMetric;
 use crate::circuit::Circuit;
+use crate::exploration::filter::CandidateFilter;
+use crate::primitive::build::{PrimitiveBuildInput, PrimitiveBuildInputKind};
 use crate::testbench::AcAnalysis;
 
 /// A reusable analog macro with an implementation, compact model, and
@@ -41,6 +43,18 @@ impl Macro {
     /// Adds one acceptance specification independent from its source analysis.
     pub fn with_specification(mut self, specification: MacroSpecification) -> Self {
         self.exploration.specifications.push(specification);
+        self
+    }
+
+    /// Adds base build data and filters for one primitive implementation instance.
+    pub fn with_primitive_default(mut self, default: MacroPrimitiveDefault) -> Self {
+        self.exploration.primitive_defaults.push(default);
+        self
+    }
+
+    /// Exposes one public design variable backed by primitive build inputs.
+    pub fn with_design_variable(mut self, variable: MacroDesignVariable) -> Self {
+        self.exploration.design_variables.push(variable);
         self
     }
 
@@ -133,6 +147,8 @@ pub enum MacroPortRole {
 pub struct MacroExploration {
     testbenches: Vec<MacroAcTestbench>,
     specifications: Vec<MacroSpecification>,
+    primitive_defaults: Vec<MacroPrimitiveDefault>,
+    design_variables: Vec<MacroDesignVariable>,
     compact_outputs: Vec<MacroCompactOutputBinding>,
     interface_bindings: Vec<MacroInterfaceBinding>,
 }
@@ -152,6 +168,18 @@ impl MacroExploration {
     /// Adds one macro-level acceptance specification.
     pub fn with_specification(mut self, specification: MacroSpecification) -> Self {
         self.specifications.push(specification);
+        self
+    }
+
+    /// Adds base build data and filters for one primitive instance.
+    pub fn with_primitive_default(mut self, default: MacroPrimitiveDefault) -> Self {
+        self.primitive_defaults.push(default);
+        self
+    }
+
+    /// Adds one public design variable.
+    pub fn with_design_variable(mut self, variable: MacroDesignVariable) -> Self {
+        self.design_variables.push(variable);
         self
     }
 
@@ -191,6 +219,30 @@ impl MacroExploration {
             .find(|specification| specification.name == name)
     }
 
+    /// Returns primitive defaults in declaration order.
+    pub fn primitive_defaults(&self) -> &[MacroPrimitiveDefault] {
+        &self.primitive_defaults
+    }
+
+    /// Finds base build data for one local primitive instance path.
+    pub fn primitive_default(&self, instance_path: &str) -> Option<&MacroPrimitiveDefault> {
+        self.primitive_defaults
+            .iter()
+            .find(|default| default.instance_path == instance_path)
+    }
+
+    /// Returns public design variables in declaration order.
+    pub fn design_variables(&self) -> &[MacroDesignVariable] {
+        &self.design_variables
+    }
+
+    /// Finds one public design variable by name.
+    pub fn design_variable(&self, name: &str) -> Option<&MacroDesignVariable> {
+        self.design_variables
+            .iter()
+            .find(|variable| variable.name == name)
+    }
+
     /// Returns compact-model output bindings in projected column order.
     pub fn compact_outputs(&self) -> &[MacroCompactOutputBinding] {
         &self.compact_outputs
@@ -199,6 +251,109 @@ impl MacroExploration {
     /// Returns public interface bindings in projected column order.
     pub fn interface_bindings(&self) -> &[MacroInterfaceBinding] {
         &self.interface_bindings
+    }
+}
+
+/// Base candidate-build input and filters owned by a macro definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroPrimitiveDefault {
+    instance_path: String,
+    build_input: PrimitiveBuildInput,
+    filters: Vec<CandidateFilter>,
+}
+
+impl MacroPrimitiveDefault {
+    /// Creates base exploration data for one local primitive instance.
+    pub fn new(
+        instance_path: impl Into<String>,
+        build_input: PrimitiveBuildInput,
+        filters: Vec<CandidateFilter>,
+    ) -> Self {
+        Self {
+            instance_path: instance_path.into(),
+            build_input,
+            filters,
+        }
+    }
+
+    /// Returns the local primitive instance path.
+    pub fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    /// Returns the base primitive build input.
+    pub const fn build_input(&self) -> &PrimitiveBuildInput {
+        &self.build_input
+    }
+
+    /// Returns filters applied before any runtime filters.
+    pub fn filters(&self) -> &[CandidateFilter] {
+        &self.filters
+    }
+}
+
+/// One primitive input controlled by a public macro design variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroDesignVariableBinding {
+    instance_path: String,
+    input: String,
+}
+
+impl MacroDesignVariableBinding {
+    /// Creates a binding to one local primitive build input.
+    pub fn new(instance_path: impl Into<String>, input: impl Into<String>) -> Self {
+        Self {
+            instance_path: instance_path.into(),
+            input: input.into(),
+        }
+    }
+
+    /// Returns the local primitive instance path.
+    pub fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    /// Returns the primitive build-input name.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+/// Public design variable that fans out to one or more primitive inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroDesignVariable {
+    name: String,
+    kind: PrimitiveBuildInputKind,
+    bindings: Vec<MacroDesignVariableBinding>,
+}
+
+impl MacroDesignVariable {
+    /// Creates a public variable with its required input type and bindings.
+    pub fn new(
+        name: impl Into<String>,
+        kind: PrimitiveBuildInputKind,
+        bindings: Vec<MacroDesignVariableBinding>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            bindings,
+        }
+    }
+
+    /// Returns the public variable name used by hierarchical rules.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the primitive input type required by every binding.
+    pub const fn kind(&self) -> PrimitiveBuildInputKind {
+        self.kind
+    }
+
+    /// Returns all primitive inputs controlled by this variable.
+    pub fn bindings(&self) -> &[MacroDesignVariableBinding] {
+        &self.bindings
     }
 }
 
@@ -253,6 +408,28 @@ impl MacroSpecificationBounds {
         value.is_finite()
             && self.minimum.is_none_or(|minimum| value >= minimum)
             && self.maximum.is_none_or(|maximum| value <= maximum)
+    }
+
+    pub(super) fn is_valid(self) -> bool {
+        self.minimum.is_none_or(f64::is_finite)
+            && self.maximum.is_none_or(f64::is_finite)
+            && self
+                .minimum
+                .zip(self.maximum)
+                .is_none_or(|(minimum, maximum)| minimum <= maximum)
+    }
+
+    pub(super) fn intersection(self, other: Self) -> Option<Self> {
+        let minimum = match (self.minimum, other.minimum) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => left.or(right),
+        };
+        let maximum = match (self.maximum, other.maximum) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        let intersection = Self::new(minimum, maximum);
+        intersection.is_valid().then_some(intersection)
     }
 }
 

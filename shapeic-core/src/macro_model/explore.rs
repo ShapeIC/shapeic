@@ -544,19 +544,27 @@ impl Macro {
         let total_start = Instant::now();
         let physical_lut = input.physical_lut();
         let execution = *input.execution_config();
+        let specification_bounds = input
+            .effective_specification_bounds(self)
+            .map_err(|error| {
+                MacroExplorationError::BuildCandidates(MacroCandidateBuildError::InvalidInput {
+                    errors: vec![error],
+                })
+            })?;
         let (candidate_sets, candidate_build) = build_macro_candidate_sets_with_execution(
             self,
             primitive_catalog,
             input,
             execution.candidate_build(),
         )?;
-        let mut result = explore_macro_ac_candidates_with_execution(
+        let mut result = explore_macro_ac_candidates_with_execution_and_bounds(
             self,
             primitive_catalog,
             macro_catalog,
             candidate_sets,
             physical_lut,
             execution,
+            Some(specification_bounds),
         )
         .map_err(MacroExplorationError::from)?;
         result.execution.candidate_build_execution = candidate_build.execution();
@@ -618,6 +626,26 @@ pub fn explore_macro_ac_candidates_with_execution(
     physical_lut: Option<&PhysicalLookupTable>,
     execution: MacroExecutionConfig,
 ) -> Result<MacroExplorationResult, MacroAcExplorationError> {
+    explore_macro_ac_candidates_with_execution_and_bounds(
+        macro_,
+        primitive_catalog,
+        macro_catalog,
+        candidate_sets,
+        physical_lut,
+        execution,
+        None,
+    )
+}
+
+fn explore_macro_ac_candidates_with_execution_and_bounds(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    candidate_sets: MacroCandidateSets,
+    physical_lut: Option<&PhysicalLookupTable>,
+    execution: MacroExecutionConfig,
+    specification_bounds: Option<Vec<super::MacroSpecificationBounds>>,
+) -> Result<MacroExplorationResult, MacroAcExplorationError> {
     let total_start = Instant::now();
     let mut execution_report = MacroExecutionReport {
         electrical_execution: execution.electrical_analysis(),
@@ -629,8 +657,12 @@ pub fn explore_macro_ac_candidates_with_execution(
         .iter()
         .map(|testbench| testbench.name().to_owned())
         .collect::<Vec<_>>();
-    let prepared_specifications =
-        PreparedMacroSpecifications::new(macro_).map_err(MacroAcExplorationError::Specification)?;
+    let prepared_specifications = if let Some(bounds) = specification_bounds {
+        PreparedMacroSpecifications::new_with_bounds(macro_, bounds)
+    } else {
+        PreparedMacroSpecifications::new(macro_)
+    }
+    .map_err(MacroAcExplorationError::Specification)?;
     prepared_specifications
         .validate_context(macro_, &candidate_sets)
         .map_err(MacroAcExplorationError::Specification)?;
@@ -856,13 +888,9 @@ fn apply_macro_specifications(
             specification_statistics.evaluated_candidates += 1;
         }
         let mut rejected = false;
-        for (index, (specification, value)) in specifications
-            .iter()
-            .zip(values.iter().copied())
-            .enumerate()
-        {
+        for (index, value) in values.iter().copied().enumerate() {
             let specification_statistics = &mut statistics.specifications[index];
-            if !specification.bounds().accepts(value) {
+            if !prepared.bounds()[index].accepts(value) {
                 specification_statistics.rejected_candidates += 1;
                 rejected = true;
                 break;
@@ -1602,6 +1630,48 @@ mod tests {
                 .evaluated_candidates(),
             2
         );
+    }
+
+    #[test]
+    fn filters_with_effective_runtime_specification_bounds() {
+        let macro_ = macro_().with_specification(MacroSpecification::new(
+            "raw_width",
+            MacroSpecificationSource::candidate_column("xcore", "xcore.width_m1"),
+            MacroSpecificationBounds::at_most(20.0),
+        ));
+        let mut accepted = vec![
+            MacroAcceptedCandidate {
+                candidate_indices: vec![0],
+                ac_outcomes: Vec::new(),
+                specification_values: Vec::new(),
+            },
+            MacroAcceptedCandidate {
+                candidate_indices: vec![1],
+                ac_outcomes: Vec::new(),
+                specification_values: Vec::new(),
+            },
+        ];
+        let mut statistics = MacroExplorationStatistics::default();
+        statistics.compatible_candidates = 2;
+        statistics.accepted_candidates = 2;
+        let prepared = PreparedMacroSpecifications::new_with_bounds(
+            &macro_,
+            vec![MacroSpecificationBounds::at_least(100.0)],
+        )
+        .unwrap();
+
+        apply_macro_specifications(
+            &macro_,
+            &candidates(),
+            &prepared,
+            &mut accepted,
+            &mut statistics,
+        )
+        .unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].candidate_indices(), [0]);
+        assert_eq!(accepted[0].specification_value("raw_width"), Some(1000.0));
     }
 
     #[test]
