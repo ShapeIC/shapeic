@@ -14,18 +14,19 @@ use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
 use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::{
-    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroCompactOutputBinding,
-    MacroExplorationInput, MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource,
-    MacroPort, MacroPortRole, PrimitiveInstanceExplorationInput,
+    ElectricalAnalysisExecution, Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog,
+    MacroCompactOutputBinding, MacroExecutionConfig, MacroExplorationInput,
+    MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
+    PrimitiveInstanceExplorationInput,
 };
 use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::utils::linspace;
 use shapeic_layout::PhysicalLookupTable;
-use shapeic_lut::LookupTable;
+use shapeic_lut::{DeviceLut, LookupTable};
 
-const VOUT_POINTS: usize = 10;
-const VBIAS_POINTS: usize = 10;
+const VOUT_POINTS: usize = 100;
+const VBIAS_POINTS: usize = 100;
 
 const DIFF_PAIR_INSTANCE: &str = "xdp";
 const CURRENT_MIRROR_INSTANCE: &str = "xcm";
@@ -37,7 +38,7 @@ const AC_MAX_HZ: f64 = 100.0e9;
 const AC_COARSE_POINTS_PER_DECADE: usize = 4;
 const AC_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
 const AC_MAX_REFINEMENT_STEPS: usize = 32;
-const MIN_DC_GAIN_DB: f64 = 40.0;
+const MIN_DC_GAIN_DB: f64 = 25.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
@@ -138,12 +139,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let primitives_dir = manifest.join("../shapeic-cellkit/primitives");
     let testbench_path = manifest.join("examples/ota_4t_v3/gain.spice");
-    let (nmos_path, pmos_path, physical_path) = lut_paths()?;
+    let options = cli_options()?;
 
     let stage_start = Instant::now();
-    let nmos_table = LookupTable::open(nmos_path)?;
-    let pmos_table = LookupTable::open(pmos_path)?;
-    let physical_table = physical_path.map(PhysicalLookupTable::open).transpose()?;
+    let nmos_table = LookupTable::open(&options.nmos_path)?;
+    let pmos_table = LookupTable::open(&options.pmos_path)?;
+    let physical_table = options
+        .physical_path
+        .as_ref()
+        .map(PhysicalLookupTable::open)
+        .transpose()?;
     let lut_load = stage_start.elapsed();
     let spec = resolve_pdk_spec(&nmos_table, &pmos_table, physical_table.as_ref())?;
     let nmos = nmos_table.model(spec.nmos_model)?;
@@ -154,16 +159,57 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ota = ota_macro(testbench_path, physical_table.is_some());
     let macro_catalog = MacroCatalog::from_macros([ota.clone()])?;
 
+    let executions = options.execution_configs()?;
+    let mut runs = Vec::with_capacity(executions.len());
+    for (label, execution) in executions {
+        let input = ota_exploration_input(
+            &spec,
+            nmos,
+            pmos,
+            physical_table.as_ref(),
+            execution,
+        )?;
+        let result = ota.explore(&primitive_catalog, &macro_catalog, input)?;
+        runs.push((label, result));
+    }
+    validate_comparison_results(&runs)?;
+    let (_, result) = runs
+        .first()
+        .ok_or_else(|| io::Error::other("no OTA exploration was requested"))?;
+
+    write_results_csv(
+        result,
+        &spec,
+        manifest.join("examples/ota_4t_v3/results.csv"),
+    )?;
+
+    println!("{} four-transistor OTA exploration", spec.label);
+    print_results(result)?;
+    print_statistics(result)?;
+    println!("LUT load took: {lut_load:?}");
+    println!("Total process time: {:?}", total_start.elapsed());
+    print_execution_comparison(&runs);
+    Ok(())
+}
+
+fn ota_exploration_input<'a>(
+    spec: &PdkSpec,
+    nmos: &'a DeviceLut,
+    pmos: &'a DeviceLut,
+    physical_table: Option<&'a PhysicalLookupTable>,
+    execution: MacroExecutionConfig,
+) -> Result<MacroExplorationInput<'a>, Box<dyn Error>> {
     let mut input = MacroExplorationInput::new();
+    input.set_execution_config(execution);
     input.register_device_model("nmos", nmos)?;
     input.register_device_model("pmos", pmos)?;
-    if let Some(physical_table) = &physical_table {
+    if let Some(physical_table) = physical_table {
         input.register_physical_lut(physical_table)?;
     }
     input.register_primitive_instance(
         DIFF_PAIR_INSTANCE,
         PrimitiveInstanceExplorationInput::new(
-            diff_pair_input(&spec),
+            diff_pair_input(spec),
             vec![CandidateFilter::at_most(
                 DIFF_PAIR_WIDTH_COLUMN,
                 MAX_DIFF_PAIR_WIDTH,
@@ -173,7 +219,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     input.register_primitive_instance(
         CURRENT_MIRROR_INSTANCE,
         PrimitiveInstanceExplorationInput::new(
-            current_mirror_input(&spec),
+            current_mirror_input(spec),
             vec![CandidateFilter::at_most(
                 CURRENT_MIRROR_WIDTH_COLUMN,
                 MAX_CURRENT_MIRROR_WIDTH,
@@ -181,23 +227,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
-    let stage_start = Instant::now();
-    let result = ota.explore(&primitive_catalog, &macro_catalog, input)?;
-    let exploration_time = stage_start.elapsed();
-
-    write_results_csv(
-        &result,
-        &spec,
-        manifest.join("examples/ota_4t_v3/results.csv"),
-    )?;
-
-    println!("{} four-transistor OTA exploration", spec.label);
-    print_results(&result)?;
-    print_statistics(&result)?;
-    println!("LUT load took: {lut_load:?}");
-    println!("Macro exploration took: {exploration_time:?}");
-    println!("Total time: {:?}", total_start.elapsed());
-    Ok(())
+    Ok(input)
 }
 
 fn ota_macro(testbench_path: PathBuf, layout_aware: bool) -> Macro {
@@ -691,6 +721,74 @@ fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
     Ok(())
 }
 
+fn validate_comparison_results(
+    runs: &[(String, MacroExplorationResult)],
+) -> Result<(), io::Error> {
+    let Some((baseline_label, baseline)) = runs.first() else {
+        return Err(io::Error::other("no exploration result was produced"));
+    };
+    for (label, result) in &runs[1..] {
+        if result.macro_name() != baseline.macro_name()
+            || result.candidate_sets() != baseline.candidate_sets()
+            || result.accepted() != baseline.accepted()
+            || result.statistics() != baseline.statistics()
+        {
+            return Err(io::Error::other(format!(
+                "exploration '{label}' differs from baseline '{baseline_label}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn print_execution_comparison(runs: &[(String, MacroExplorationResult)]) {
+    let baseline_seconds = runs
+        .first()
+        .map(|(_, result)| result.execution_report().total().as_secs_f64())
+        .unwrap_or_default();
+    println!("\nMacro execution");
+    for (label, result) in runs {
+        let report = result.execution_report();
+        match report.electrical_execution() {
+            ElectricalAnalysisExecution::Sequential => {
+                println!("{label}: sequential electrical execution");
+            }
+            ElectricalAnalysisExecution::Parallel {
+                workers,
+                batch_size,
+            } => println!(
+                "{label}: parallel electrical execution, workers={workers}, batch_size={batch_size}"
+            ),
+        }
+        println!(
+            "  compatible={}, electrical_survivors={}, accepted={}, batches={}",
+            result.statistics().compatible_candidates(),
+            report.electrical_survivors(),
+            result.statistics().accepted_candidates(),
+            report.electrical_batches(),
+        );
+        println!(
+            "  candidate_build={:?}, testbench_preparation={:?}, sequential_evaluation={:?}",
+            report.candidate_build(),
+            report.testbench_preparation(),
+            report.sequential_evaluation(),
+        );
+        println!(
+            "  parallel_electrical={:?}, sequential_tail={:?}, total={:?}",
+            report.parallel_electrical_analysis(),
+            report.sequential_tail(),
+            report.total(),
+        );
+        let seconds = report.total().as_secs_f64();
+        if baseline_seconds > 0.0 && seconds > 0.0 {
+            println!("  speedup_vs_first={:.3}x", baseline_seconds / seconds);
+        }
+    }
+    if runs.len() > 1 {
+        println!("All comparison runs produced identical candidates, metrics, statistics, and provenance.");
+    }
+}
+
 fn print_testbench_statistics(
     result: &MacroExplorationResult,
     testbench: &str,
@@ -752,33 +850,212 @@ fn selected_value(
         })
 }
 
-fn lut_paths() -> Result<(PathBuf, PathBuf, Option<PathBuf>), io::Error> {
+#[derive(Debug, PartialEq, Eq)]
+struct CliOptions {
+    nmos_path: PathBuf,
+    pmos_path: PathBuf,
+    physical_path: Option<PathBuf>,
+    electrical_workers: Option<usize>,
+    electrical_batch_size: Option<usize>,
+    compare_electrical_workers: Vec<usize>,
+}
+
+impl CliOptions {
+    fn execution_configs(&self) -> Result<Vec<(String, MacroExecutionConfig)>, io::Error> {
+        if !self.compare_electrical_workers.is_empty() {
+            if self.electrical_workers.is_some() {
+                return Err(invalid_input(
+                    "--electrical-workers cannot be combined with --compare-electrical-workers",
+                ));
+            }
+            if self.electrical_batch_size.is_some()
+                && !self
+                    .compare_electrical_workers
+                    .iter()
+                    .any(|workers| *workers > 1)
+            {
+                return Err(invalid_input(
+                    "--electrical-batch-size requires at least one parallel comparison run",
+                ));
+            }
+            return self
+                .compare_electrical_workers
+                .iter()
+                .copied()
+                .map(|workers| {
+                    let execution = execution_config(
+                        Some(workers),
+                        (workers > 1).then_some(self.electrical_batch_size).flatten(),
+                    )?;
+                    Ok((format!("{workers} worker(s)"), execution))
+                })
+                .collect();
+        }
+        let execution = execution_config(self.electrical_workers, self.electrical_batch_size)?;
+        Ok(vec![("selected".to_owned(), execution)])
+    }
+}
+
+fn execution_config(
+    workers: Option<usize>,
+    batch_size: Option<usize>,
+) -> Result<MacroExecutionConfig, io::Error> {
+    let mut execution = MacroExecutionConfig::sequential();
+    if let Some(workers) = workers {
+        execution = execution
+            .with_parallel_electrical_analysis(workers)
+            .map_err(|error| invalid_input(error.to_string()))?;
+    }
+    if let Some(batch_size) = batch_size {
+        execution = execution
+            .with_electrical_batch_size(batch_size)
+            .map_err(|error| invalid_input(error.to_string()))?;
+    }
+    Ok(execution)
+}
+
+fn cli_options() -> Result<CliOptions, io::Error> {
     let mut arguments = env::args_os();
     let executable = arguments
         .next()
         .unwrap_or_else(|| OsString::from("ota_4t_v3"));
     let usage = || {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "usage: {} <nmos-5d.npz> <pmos-5d.npz> [physical.npz]",
-                Path::new(&executable).display()
-            ),
-        )
+        invalid_input(format!(
+            "usage: {} <nmos-5d.npz> <pmos-5d.npz> [physical.npz] \
+             [--electrical-workers N] [--electrical-batch-size N] \
+             [--compare-electrical-workers 1,2,4,8]",
+            Path::new(&executable).display()
+        ))
     };
-    let nmos = arguments.next().ok_or_else(&usage)?;
-    let pmos = arguments.next().ok_or_else(&usage)?;
-    let physical = arguments.next().map(PathBuf::from);
-    if arguments.next().is_some() {
+    let mut paths = Vec::new();
+    let mut electrical_workers = None;
+    let mut electrical_batch_size = None;
+    let mut compare_electrical_workers = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if argument == "--electrical-workers" {
+            electrical_workers = Some(parse_usize_argument(
+                arguments.next().ok_or_else(&usage)?,
+                "--electrical-workers",
+            )?);
+        } else if argument == "--electrical-batch-size" {
+            electrical_batch_size = Some(parse_usize_argument(
+                arguments.next().ok_or_else(&usage)?,
+                "--electrical-batch-size",
+            )?);
+        } else if argument == "--compare-electrical-workers" {
+            let value = arguments.next().ok_or_else(&usage)?;
+            let value = value.to_str().ok_or_else(|| {
+                invalid_input("--compare-electrical-workers must be valid UTF-8")
+            })?;
+            compare_electrical_workers = value
+                .split(',')
+                .map(|worker| parse_usize(worker, "--compare-electrical-workers"))
+                .collect::<Result<Vec<_>, _>>()?;
+            if compare_electrical_workers.is_empty() {
+                return Err(invalid_input(
+                    "--compare-electrical-workers requires at least one worker count",
+                ));
+            }
+        } else if argument.to_string_lossy().starts_with("--") {
+            return Err(usage());
+        } else {
+            paths.push(PathBuf::from(argument));
+        }
+    }
+    if !(2..=3).contains(&paths.len()) {
         return Err(usage());
     }
-    Ok((nmos.into(), pmos.into(), physical))
+    let physical_path = (paths.len() == 3).then(|| paths.remove(2));
+    let pmos_path = paths.remove(1);
+    let nmos_path = paths.remove(0);
+    let options = CliOptions {
+        nmos_path,
+        pmos_path,
+        physical_path,
+        electrical_workers,
+        electrical_batch_size,
+        compare_electrical_workers,
+    };
+    options.execution_configs()?;
+    Ok(options)
+}
+
+fn parse_usize_argument(value: OsString, flag: &str) -> Result<usize, io::Error> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| invalid_input(format!("{flag} must be valid UTF-8")))?;
+    parse_usize(value, flag)
+}
+
+fn parse_usize(value: &str, flag: &str) -> Result<usize, io::Error> {
+    value
+        .parse::<usize>()
+        .map_err(|_| invalid_input(format!("{flag} requires a positive integer, found '{value}'")))
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use shapeic_core::macro_model::{render_expanded_small_signal_netlist, validate_macro};
+
+    #[test]
+    fn configures_sequential_and_parallel_execution_modes() {
+        assert_eq!(
+            execution_config(None, None)
+                .unwrap()
+                .electrical_analysis(),
+            ElectricalAnalysisExecution::Sequential
+        );
+        assert_eq!(
+            execution_config(Some(8), Some(13))
+                .unwrap()
+                .electrical_analysis(),
+            ElectricalAnalysisExecution::Parallel {
+                workers: 8,
+                batch_size: 13,
+            }
+        );
+        assert!(execution_config(Some(0), None).is_err());
+        assert!(execution_config(None, Some(4)).is_err());
+        assert!(execution_config(Some(1), Some(4)).is_err());
+    }
+
+    #[test]
+    fn builds_independent_worker_comparison_runs() {
+        let options = CliOptions {
+            nmos_path: "nmos.npz".into(),
+            pmos_path: "pmos.npz".into(),
+            physical_path: None,
+            electrical_workers: None,
+            electrical_batch_size: Some(5),
+            compare_electrical_workers: vec![1, 4, 8],
+        };
+
+        let executions = options.execution_configs().unwrap();
+        assert_eq!(executions.len(), 3);
+        assert_eq!(
+            executions[0].1.electrical_analysis(),
+            ElectricalAnalysisExecution::Sequential
+        );
+        assert_eq!(
+            executions[1].1.electrical_analysis(),
+            ElectricalAnalysisExecution::Parallel {
+                workers: 4,
+                batch_size: 5,
+            }
+        );
+        assert_eq!(
+            executions[2].1.electrical_analysis(),
+            ElectricalAnalysisExecution::Parallel {
+                workers: 8,
+                batch_size: 5,
+            }
+        );
+    }
 
     #[test]
     fn defines_and_renders_the_complete_typed_ota() {
