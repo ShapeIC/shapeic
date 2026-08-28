@@ -12,6 +12,7 @@ mod physical;
 mod prepare;
 mod projection;
 mod render;
+mod specification;
 mod validation;
 
 pub use candidates::{
@@ -36,8 +37,8 @@ pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
     MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExecutionReport,
     MacroExplorationError, MacroExplorationResult, MacroExplorationStatistics,
-    explore_macro_ac_candidates, explore_macro_ac_candidates_with_execution,
-    explore_macro_ac_candidates_with_physical_lut,
+    MacroSpecificationStatistics, explore_macro_ac_candidates,
+    explore_macro_ac_candidates_with_execution, explore_macro_ac_candidates_with_physical_lut,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,
@@ -47,7 +48,8 @@ pub use input::{
 };
 pub use model::{
     Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroExploration,
-    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroTestbenchSource,
+    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroSpecification,
+    MacroSpecificationBounds, MacroSpecificationSource, MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};
@@ -62,6 +64,7 @@ pub use render::{
     ResolvedPhysicalCandidateColumns, ResolvedPhysicalPort, ResolvedPhysicalPrimitive,
     ResolvedPrimitiveBranch, render_expanded_small_signal_netlist, render_small_signal_netlist,
 };
+pub use specification::MacroSpecificationEvaluationError;
 pub use validation::{
     MacroCircuitKind, MacroValidationError, validate_macro, validate_macro_catalog,
 };

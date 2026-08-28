@@ -11,22 +11,24 @@ use crate::exploration::candidate::CandidatePoint;
 use shapeic_layout::PhysicalLookupTable;
 
 use super::combination::MacroCandidateCombinationBatchIter;
+use super::specification::PreparedMacroSpecifications;
 use super::{
     CandidateBuildExecution, ElectricalAnalysisExecution, Macro, MacroAcCandidateAnalysisError,
     MacroAcCandidateEvaluation, MacroAnalysisDomain, MacroCandidateBuildError,
     MacroCandidateBuildInstanceReport, MacroCandidateCombinationError,
     MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroExecutionConfig,
-    MacroExplorationInput, MacroRenderMode, MacroTestbenchPrepareError,
-    PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError,
-    PreparedMacroAcTestbench, build_macro_candidate_sets_with_execution,
-    prepare_macro_ac_testbench,
+    MacroExplorationInput, MacroRenderMode, MacroSpecificationEvaluationError,
+    MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
+    PreparedMacroAcCandidateEvaluatorError, PreparedMacroAcTestbench,
+    build_macro_candidate_sets_with_execution, prepare_macro_ac_testbench,
 };
 
 /// One accepted macro candidate and all AC outcomes evaluated for it.
 #[derive(Debug, PartialEq)]
 pub struct MacroAcceptedCandidate {
-    candidate_indices: Vec<usize>,
-    ac_outcomes: Vec<MacroAcTestbenchOutcome>,
+    pub(super) candidate_indices: Vec<usize>,
+    pub(super) ac_outcomes: Vec<MacroAcTestbenchOutcome>,
+    specification_values: Vec<(String, f64)>,
 }
 
 impl MacroAcceptedCandidate {
@@ -39,13 +41,58 @@ impl MacroAcceptedCandidate {
     pub fn ac_outcomes(&self) -> &[MacroAcTestbenchOutcome] {
         &self.ac_outcomes
     }
+
+    /// Returns specification values in macro declaration order.
+    pub fn specification_values(&self) -> &[(String, f64)] {
+        &self.specification_values
+    }
+
+    /// Finds one evaluated macro specification value by name.
+    pub fn specification_value(&self, name: &str) -> Option<f64> {
+        self.specification_values
+            .iter()
+            .find_map(|(candidate_name, value)| (candidate_name == name).then_some(*value))
+    }
 }
 
 /// Indexed AC outcome retained for an accepted macro candidate.
 #[derive(Debug, PartialEq)]
 pub struct MacroAcTestbenchOutcome {
-    testbench_index: usize,
-    outcome: AdaptiveAcOutcome,
+    pub(super) testbench_index: usize,
+    pub(super) outcome: AdaptiveAcOutcome,
+}
+
+/// Evaluation and rejection counts for one analysis-independent specification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroSpecificationStatistics {
+    specification: String,
+    evaluated_candidates: usize,
+    rejected_candidates: usize,
+}
+
+impl MacroSpecificationStatistics {
+    fn new(specification: impl Into<String>) -> Self {
+        Self {
+            specification: specification.into(),
+            evaluated_candidates: 0,
+            rejected_candidates: 0,
+        }
+    }
+
+    /// Returns the macro-local specification name.
+    pub fn specification(&self) -> &str {
+        &self.specification
+    }
+
+    /// Returns candidates for which this specification produced a value.
+    pub const fn evaluated_candidates(&self) -> usize {
+        self.evaluated_candidates
+    }
+
+    /// Returns candidates rejected by this specification.
+    pub const fn rejected_candidates(&self) -> usize {
+        self.rejected_candidates
+    }
 }
 
 impl MacroAcTestbenchOutcome {
@@ -149,6 +196,7 @@ pub struct MacroExplorationStatistics {
     compatible_candidates: usize,
     accepted_candidates: usize,
     testbenches: Vec<MacroAcTestbenchStatistics>,
+    specifications: Vec<MacroSpecificationStatistics>,
 }
 
 impl MacroExplorationStatistics {
@@ -177,6 +225,18 @@ impl MacroExplorationStatistics {
         self.testbenches
             .iter()
             .find(|testbench| testbench.testbench == name)
+    }
+
+    /// Returns per-specification statistics in declaration order.
+    pub fn specifications(&self) -> &[MacroSpecificationStatistics] {
+        &self.specifications
+    }
+
+    /// Finds statistics for one macro-local specification.
+    pub fn specification(&self, name: &str) -> Option<&MacroSpecificationStatistics> {
+        self.specifications
+            .iter()
+            .find(|specification| specification.specification == name)
     }
 
     /// Returns all numerical frequency evaluations across every testbench.
@@ -374,6 +434,8 @@ pub enum MacroAcExplorationError {
         candidate_indices: Vec<usize>,
         reason: &'static str,
     },
+    /// A macro specification could not be prepared or evaluated.
+    Specification(MacroSpecificationEvaluationError),
     /// Rayon could not construct the requested local worker pool.
     BuildElectricalThreadPool(rayon::ThreadPoolBuildError),
 }
@@ -406,6 +468,7 @@ impl fmt::Display for MacroAcExplorationError {
                 formatter,
                 "AC testbench '{testbench}' returned an inconsistent outcome for candidate selection {candidate_indices:?}: {reason}"
             ),
+            Self::Specification(error) => error.fmt(formatter),
             Self::BuildElectricalThreadPool(error) => {
                 write!(
                     formatter,
@@ -424,6 +487,7 @@ impl Error for MacroAcExplorationError {
             Self::PrepareCandidateEvaluator { error, .. } => Some(error.as_ref()),
             Self::AnalyzeCandidate { error, .. } => Some(error.as_ref()),
             Self::InconsistentOutcome { .. } => None,
+            Self::Specification(error) => Some(error),
             Self::BuildElectricalThreadPool(error) => Some(error),
         }
     }
@@ -565,7 +629,12 @@ pub fn explore_macro_ac_candidates_with_execution(
         .iter()
         .map(|testbench| testbench.name().to_owned())
         .collect::<Vec<_>>();
-    let (accepted, statistics) = {
+    let prepared_specifications =
+        PreparedMacroSpecifications::new(macro_).map_err(MacroAcExplorationError::Specification)?;
+    prepared_specifications
+        .validate_context(macro_, &candidate_sets)
+        .map_err(MacroAcExplorationError::Specification)?;
+    let (mut accepted, mut statistics) = {
         let mut combinations =
             MacroCandidateCombinationJoin::new(macro_, primitive_catalog, &candidate_sets)
                 .map_err(MacroAcExplorationError::CandidateCombination)?;
@@ -670,6 +739,13 @@ pub fn explore_macro_ac_candidates_with_execution(
     if execution_report.electrical_survivors == 0 {
         execution_report.electrical_survivors = electrical_survivor_count(macro_, &statistics);
     }
+    apply_macro_specifications(
+        macro_,
+        &candidate_sets,
+        &prepared_specifications,
+        &mut accepted,
+        &mut statistics,
+    )?;
     execution_report.total = total_start.elapsed();
 
     Ok(MacroExplorationResult {
@@ -751,7 +827,59 @@ impl MacroExplorationStatistics {
             destination.rejections.phase_margin += source.rejections.phase_margin;
             destination.physical_domain_rejections += source.physical_domain_rejections;
         }
+        debug_assert!(other.specifications.is_empty());
     }
+}
+
+fn apply_macro_specifications(
+    macro_: &Macro,
+    candidate_sets: &MacroCandidateSets,
+    prepared: &PreparedMacroSpecifications,
+    accepted: &mut Vec<MacroAcceptedCandidate>,
+    statistics: &mut MacroExplorationStatistics,
+) -> Result<(), MacroAcExplorationError> {
+    let specifications = macro_.exploration().specifications();
+    statistics.specifications = specifications
+        .iter()
+        .map(|specification| MacroSpecificationStatistics::new(specification.name()))
+        .collect();
+    if specifications.is_empty() {
+        return Ok(());
+    }
+
+    let mut retained = Vec::with_capacity(accepted.len());
+    for mut candidate in accepted.drain(..) {
+        let values = prepared
+            .evaluate(macro_, candidate_sets, &candidate)
+            .map_err(MacroAcExplorationError::Specification)?;
+        for specification_statistics in &mut statistics.specifications {
+            specification_statistics.evaluated_candidates += 1;
+        }
+        let mut rejected = false;
+        for (index, (specification, value)) in specifications
+            .iter()
+            .zip(values.iter().copied())
+            .enumerate()
+        {
+            let specification_statistics = &mut statistics.specifications[index];
+            if !specification.bounds().accepts(value) {
+                specification_statistics.rejected_candidates += 1;
+                rejected = true;
+                break;
+            }
+        }
+        if !rejected {
+            candidate.specification_values = specifications
+                .iter()
+                .zip(values)
+                .map(|(specification, value)| (specification.name().to_owned(), value))
+                .collect();
+            retained.push(candidate);
+        }
+    }
+    *accepted = retained;
+    statistics.accepted_candidates = accepted.len();
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1134,6 +1262,7 @@ fn evaluate_candidate_selection<E>(
     Ok(Some(MacroAcceptedCandidate {
         candidate_indices: candidate_indices.to_vec(),
         ac_outcomes,
+        specification_values: Vec::new(),
     }))
 }
 
@@ -1179,8 +1308,8 @@ mod tests {
     use crate::macro_model::{
         CompactMacroInstanceExplorationInput, MacroAcTestbench, MacroCompactOutputBinding,
         MacroExplorationInput, MacroInstanceCandidateSet, MacroInterfaceBinding, MacroOutputSource,
-        MacroPort, MacroPortRole, MacroRenderMode, build_macro_candidate_sets,
-        render_small_signal_netlist,
+        MacroPort, MacroPortRole, MacroRenderMode, MacroSpecification, MacroSpecificationBounds,
+        MacroSpecificationSource, build_macro_candidate_sets, render_small_signal_netlist,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::{PrimitiveBuildSpec, SweepMode};
@@ -1383,6 +1512,134 @@ mod tests {
         );
         assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
         assert_eq!(statistics.frequency_evaluations(), 8);
+    }
+
+    #[test]
+    fn evaluates_and_filters_analysis_independent_macro_specifications() {
+        let macro_ = macro_()
+            .with_specification(MacroSpecification::new(
+                "score",
+                MacroSpecificationSource::expression("gain_value + raw_width / 100"),
+                MacroSpecificationBounds::at_most(30.0),
+            ))
+            .with_specification(MacroSpecification::new(
+                "raw_width",
+                MacroSpecificationSource::candidate_column("xcore", "xcore.width_m1"),
+                MacroSpecificationBounds::unbounded(),
+            ))
+            .with_specification(MacroSpecification::new(
+                "gain_value",
+                MacroSpecificationSource::ac_metric("gain", AcMetric::DcGainDb),
+                MacroSpecificationBounds::at_least(10.0),
+            ));
+        let mut first_outcome = passing_outcome(0);
+        first_outcome.metrics.dc_gain_db = Some(40.0);
+        let mut second_outcome = passing_outcome(0);
+        second_outcome.metrics.dc_gain_db = Some(20.0);
+        let mut accepted = vec![
+            MacroAcceptedCandidate {
+                candidate_indices: vec![0],
+                ac_outcomes: vec![MacroAcTestbenchOutcome {
+                    testbench_index: 0,
+                    outcome: first_outcome,
+                }],
+                specification_values: Vec::new(),
+            },
+            MacroAcceptedCandidate {
+                candidate_indices: vec![1],
+                ac_outcomes: vec![MacroAcTestbenchOutcome {
+                    testbench_index: 0,
+                    outcome: second_outcome,
+                }],
+                specification_values: Vec::new(),
+            },
+        ];
+        let mut statistics = MacroExplorationStatistics::new(&["gain".to_owned()]);
+        statistics.compatible_candidates = 2;
+        statistics.accepted_candidates = 2;
+        let prepared = PreparedMacroSpecifications::new(&macro_).unwrap();
+
+        apply_macro_specifications(
+            &macro_,
+            &candidates(),
+            &prepared,
+            &mut accepted,
+            &mut statistics,
+        )
+        .unwrap();
+
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].candidate_indices(), [1]);
+        assert_eq!(accepted[0].specification_value("score"), Some(20.1));
+        assert_eq!(accepted[0].specification_value("raw_width"), Some(10.0));
+        assert_eq!(accepted[0].specification_value("gain_value"), Some(20.0));
+        assert_eq!(statistics.accepted_candidates(), 1);
+        assert_eq!(
+            statistics
+                .specification("score")
+                .unwrap()
+                .evaluated_candidates(),
+            2
+        );
+        assert_eq!(
+            statistics
+                .specification("score")
+                .unwrap()
+                .rejected_candidates(),
+            1
+        );
+        assert_eq!(
+            statistics
+                .specification("raw_width")
+                .unwrap()
+                .evaluated_candidates(),
+            2
+        );
+        assert_eq!(
+            statistics
+                .specification("gain_value")
+                .unwrap()
+                .evaluated_candidates(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_cyclic_macro_specification_dependencies() {
+        let macro_ = macro_()
+            .with_specification(MacroSpecification::new(
+                "first",
+                MacroSpecificationSource::expression("second + 1"),
+                MacroSpecificationBounds::unbounded(),
+            ))
+            .with_specification(MacroSpecification::new(
+                "second",
+                MacroSpecificationSource::expression("first + 1"),
+                MacroSpecificationBounds::unbounded(),
+            ));
+
+        assert!(matches!(
+            PreparedMacroSpecifications::new(&macro_),
+            Err(MacroSpecificationEvaluationError::DependencyCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_macro_specification_symbols_before_analysis() {
+        let macro_ = macro_().with_specification(MacroSpecification::new(
+            "score",
+            MacroSpecificationSource::expression("missing_value + 1"),
+            MacroSpecificationBounds::unbounded(),
+        ));
+        let prepared = PreparedMacroSpecifications::new(&macro_).unwrap();
+
+        assert!(matches!(
+            prepared.validate_context(&macro_, &candidates()),
+            Err(MacroSpecificationEvaluationError::MissingSymbol {
+                specification,
+                symbol,
+            }) if specification == "score" && symbol == "missing_value"
+        ));
     }
 
     #[test]
@@ -1630,6 +1887,7 @@ mod tests {
                     candidate: MacroAcceptedCandidate {
                         candidate_indices: vec![0],
                         ac_outcomes: Vec::new(),
+                        specification_values: Vec::new(),
                     },
                 },
                 OrdinalAcceptedCandidate {
@@ -1637,6 +1895,7 @@ mod tests {
                     candidate: MacroAcceptedCandidate {
                         candidate_indices: vec![2],
                         ac_outcomes: Vec::new(),
+                        specification_values: Vec::new(),
                     },
                 },
             ],
@@ -1723,6 +1982,7 @@ mod tests {
             accepted: vec![MacroAcceptedCandidate {
                 candidate_indices: vec![0],
                 ac_outcomes: Vec::new(),
+                specification_values: Vec::new(),
             }],
             statistics: MacroExplorationStatistics::default(),
             execution: MacroExecutionReport::default(),
@@ -1891,6 +2151,7 @@ mod tests {
                         testbench_index: 0,
                         outcome: first_outcome,
                     }],
+                    specification_values: Vec::new(),
                 },
                 MacroAcceptedCandidate {
                     candidate_indices: vec![1],
@@ -1898,12 +2159,14 @@ mod tests {
                         testbench_index: 0,
                         outcome: second_outcome,
                     }],
+                    specification_values: Vec::new(),
                 },
             ],
             statistics: MacroExplorationStatistics {
                 compatible_candidates: 2,
                 accepted_candidates: 2,
                 testbenches: vec![MacroAcTestbenchStatistics::new("gain")],
+                specifications: Vec::new(),
             },
             execution: MacroExecutionReport::default(),
         });
@@ -1989,11 +2252,13 @@ mod tests {
             accepted: vec![MacroAcceptedCandidate {
                 candidate_indices: vec![0, 0],
                 ac_outcomes: Vec::new(),
+                specification_values: Vec::new(),
             }],
             statistics: MacroExplorationStatistics {
                 compatible_candidates: 1,
                 accepted_candidates: 1,
                 testbenches: Vec::new(),
+                specifications: Vec::new(),
             },
             execution: MacroExecutionReport::default(),
         };

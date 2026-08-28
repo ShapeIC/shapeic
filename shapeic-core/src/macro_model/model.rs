@@ -38,6 +38,12 @@ impl Macro {
         self
     }
 
+    /// Adds one acceptance specification independent from its source analysis.
+    pub fn with_specification(mut self, specification: MacroSpecification) -> Self {
+        self.exploration.specifications.push(specification);
+        self
+    }
+
     /// Exposes one accepted result value as a compact-model parameter.
     pub fn with_compact_output(mut self, binding: MacroCompactOutputBinding) -> Self {
         self.exploration.compact_outputs.push(binding);
@@ -126,6 +132,7 @@ pub enum MacroPortRole {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MacroExploration {
     testbenches: Vec<MacroAcTestbench>,
+    specifications: Vec<MacroSpecification>,
     compact_outputs: Vec<MacroCompactOutputBinding>,
     interface_bindings: Vec<MacroInterfaceBinding>,
 }
@@ -139,6 +146,12 @@ impl MacroExploration {
     /// Adds one unprepared AC testbench.
     pub fn with_ac_testbench(mut self, testbench: MacroAcTestbench) -> Self {
         self.testbenches.push(testbench);
+        self
+    }
+
+    /// Adds one macro-level acceptance specification.
+    pub fn with_specification(mut self, specification: MacroSpecification) -> Self {
+        self.specifications.push(specification);
         self
     }
 
@@ -166,6 +179,18 @@ impl MacroExploration {
             .find(|testbench| testbench.name == name)
     }
 
+    /// Returns macro specifications in declaration order.
+    pub fn specifications(&self) -> &[MacroSpecification] {
+        &self.specifications
+    }
+
+    /// Finds a macro specification by name.
+    pub fn specification(&self, name: &str) -> Option<&MacroSpecification> {
+        self.specifications
+            .iter()
+            .find(|specification| specification.name == name)
+    }
+
     /// Returns compact-model output bindings in projected column order.
     pub fn compact_outputs(&self) -> &[MacroCompactOutputBinding] {
         &self.compact_outputs
@@ -174,6 +199,143 @@ impl MacroExploration {
     /// Returns public interface bindings in projected column order.
     pub fn interface_bindings(&self) -> &[MacroInterfaceBinding] {
         &self.interface_bindings
+    }
+}
+
+/// Inclusive numerical limits applied independently from an analysis engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MacroSpecificationBounds {
+    minimum: Option<f64>,
+    maximum: Option<f64>,
+}
+
+impl MacroSpecificationBounds {
+    /// Creates an unbounded specification that only exposes its value.
+    pub const fn unbounded() -> Self {
+        Self {
+            minimum: None,
+            maximum: None,
+        }
+    }
+
+    /// Creates inclusive lower and upper limits.
+    pub const fn new(minimum: Option<f64>, maximum: Option<f64>) -> Self {
+        Self { minimum, maximum }
+    }
+
+    /// Creates an inclusive minimum.
+    pub const fn at_least(minimum: f64) -> Self {
+        Self::new(Some(minimum), None)
+    }
+
+    /// Creates an inclusive maximum.
+    pub const fn at_most(maximum: f64) -> Self {
+        Self::new(None, Some(maximum))
+    }
+
+    /// Creates an inclusive closed range.
+    pub const fn between(minimum: f64, maximum: f64) -> Self {
+        Self::new(Some(minimum), Some(maximum))
+    }
+
+    /// Returns the inclusive minimum, when configured.
+    pub const fn minimum(self) -> Option<f64> {
+        self.minimum
+    }
+
+    /// Returns the inclusive maximum, when configured.
+    pub const fn maximum(self) -> Option<f64> {
+        self.maximum
+    }
+
+    /// Returns whether a finite value lies inside the configured limits.
+    pub fn accepts(self, value: f64) -> bool {
+        value.is_finite()
+            && self.minimum.is_none_or(|minimum| value >= minimum)
+            && self.maximum.is_none_or(|maximum| value <= maximum)
+    }
+}
+
+/// Source evaluated to obtain one macro specification value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MacroSpecificationSource {
+    /// Reads one exact column from a selected local candidate.
+    CandidateColumn {
+        /// Circuit instance path owning the candidate set.
+        instance_path: String,
+        /// Exact candidate column name.
+        column: String,
+    },
+    /// Reads one metric produced by a macro-local AC testbench.
+    AcMetric {
+        /// Macro-local testbench name.
+        testbench: String,
+        /// Requested AC metric.
+        metric: AcMetric,
+    },
+    /// Evaluates an arithmetic expression over candidate columns, AC metrics,
+    /// and other named specifications.
+    Expression(String),
+}
+
+impl MacroSpecificationSource {
+    /// Selects one exact column from a circuit instance candidate.
+    pub fn candidate_column(instance_path: impl Into<String>, column: impl Into<String>) -> Self {
+        Self::CandidateColumn {
+            instance_path: instance_path.into(),
+            column: column.into(),
+        }
+    }
+
+    /// Selects one metric from a macro-local AC testbench.
+    pub fn ac_metric(testbench: impl Into<String>, metric: AcMetric) -> Self {
+        Self::AcMetric {
+            testbench: testbench.into(),
+            metric,
+        }
+    }
+
+    /// Creates an arithmetic expression source.
+    pub fn expression(expression: impl Into<String>) -> Self {
+        Self::Expression(expression.into())
+    }
+}
+
+/// One reusable acceptance criterion owned by a macro.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroSpecification {
+    name: String,
+    source: MacroSpecificationSource,
+    bounds: MacroSpecificationBounds,
+}
+
+impl MacroSpecification {
+    /// Creates a named specification with an independent source and limits.
+    pub fn new(
+        name: impl Into<String>,
+        source: MacroSpecificationSource,
+        bounds: MacroSpecificationBounds,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            bounds,
+        }
+    }
+
+    /// Returns the macro-local specification name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the value source.
+    pub const fn source(&self) -> &MacroSpecificationSource {
+        &self.source
+    }
+
+    /// Returns the inclusive acceptance limits.
+    pub const fn bounds(&self) -> MacroSpecificationBounds {
+        self.bounds
     }
 }
 

@@ -5,7 +5,11 @@ use std::fmt;
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::{BlockRef, Circuit, CircuitValue, LinearElement};
 
-use super::{Macro, MacroCatalog, MacroOutputSource, MacroTestbenchSource};
+use super::specification::PreparedMacroSpecifications;
+use super::{
+    Macro, MacroCatalog, MacroOutputSource, MacroSpecificationEvaluationError,
+    MacroTestbenchSource,
+};
 
 /// Identifies which circuit of a macro contains a validation error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +260,10 @@ pub enum MacroValidationError {
         macro_name: String,
         target: String,
         reason: String,
+    },
+    InvalidSpecification {
+        macro_name: String,
+        error: MacroSpecificationEvaluationError,
     },
     CyclicDependency {
         path: Vec<String>,
@@ -612,6 +620,10 @@ impl fmt::Display for MacroValidationError {
                 formatter,
                 "macro '{macro_name}' output binding '{target}' has an invalid source: {reason}"
             ),
+            Self::InvalidSpecification { macro_name, error } => write!(
+                formatter,
+                "macro '{macro_name}' has an invalid specification: {error}"
+            ),
             Self::CyclicDependency { path } => {
                 write!(formatter, "cyclic macro dependency: {}", path.join(" -> "))
             }
@@ -666,6 +678,12 @@ pub fn validate_macro(
         &mut errors,
     );
     validate_testbenches(macro_, &mut errors);
+    if let Err(error) = PreparedMacroSpecifications::new(macro_) {
+        errors.push(MacroValidationError::InvalidSpecification {
+            macro_name: macro_name.clone(),
+            error,
+        });
+    }
     validate_output_bindings(macro_, &mut errors);
     errors
 }
