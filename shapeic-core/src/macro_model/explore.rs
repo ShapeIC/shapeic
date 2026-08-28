@@ -1,17 +1,22 @@
 use std::error::Error;
 use std::fmt;
 
+use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::ThreadPoolBuilder;
+
 use crate::analysis::{AcCompletion, AcMetric, AdaptiveAcOutcome};
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::exploration::candidate::CandidatePoint;
 use shapeic_layout::PhysicalLookupTable;
 
+use super::combination::MacroCandidateCombinationBatchIter;
 use super::{
-    Macro, MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, MacroCandidateBuildError,
-    MacroCandidateCombinationError, MacroCandidateCombinationJoin, MacroCandidateSets,
-    MacroCatalog, MacroExplorationInput, MacroRenderMode, MacroTestbenchPrepareError,
+    ElectricalAnalysisExecution, Macro, MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation,
+    MacroAnalysisDomain, MacroCandidateBuildError, MacroCandidateCombinationError,
+    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroExecutionConfig,
+    MacroExplorationInput, MacroRenderMode, MacroTestbenchPrepareError,
     PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError,
-    build_macro_candidate_sets, prepare_macro_ac_testbench,
+    PreparedMacroAcTestbench, build_macro_candidate_sets, prepare_macro_ac_testbench,
 };
 
 /// One accepted macro candidate and all AC outcomes evaluated for it.
@@ -298,6 +303,8 @@ pub enum MacroAcExplorationError {
         candidate_indices: Vec<usize>,
         reason: &'static str,
     },
+    /// Rayon could not construct the requested local worker pool.
+    BuildElectricalThreadPool(rayon::ThreadPoolBuildError),
 }
 
 impl fmt::Display for MacroAcExplorationError {
@@ -328,6 +335,9 @@ impl fmt::Display for MacroAcExplorationError {
                 formatter,
                 "AC testbench '{testbench}' returned an inconsistent outcome for candidate selection {candidate_indices:?}: {reason}"
             ),
+            Self::BuildElectricalThreadPool(error) => {
+                write!(formatter, "could not build electrical analysis worker pool: {error}")
+            }
         }
     }
 }
@@ -340,6 +350,7 @@ impl Error for MacroAcExplorationError {
             Self::PrepareCandidateEvaluator { error, .. } => Some(error.as_ref()),
             Self::AnalyzeCandidate { error, .. } => Some(error.as_ref()),
             Self::InconsistentOutcome { .. } => None,
+            Self::BuildElectricalThreadPool(error) => Some(error),
         }
     }
 }
@@ -393,13 +404,15 @@ impl Macro {
         input: MacroExplorationInput<'_>,
     ) -> Result<MacroExplorationResult, MacroExplorationError> {
         let physical_lut = input.physical_lut();
+        let execution = *input.execution_config();
         let candidate_sets = build_macro_candidate_sets(self, primitive_catalog, input)?;
-        explore_macro_ac_candidates_with_physical_lut(
+        explore_macro_ac_candidates_with_execution(
             self,
             primitive_catalog,
             macro_catalog,
             candidate_sets,
             physical_lut,
+            execution,
         )
         .map_err(Into::into)
     }
@@ -433,6 +446,29 @@ pub fn explore_macro_ac_candidates_with_physical_lut(
     candidate_sets: MacroCandidateSets,
     physical_lut: Option<&PhysicalLookupTable>,
 ) -> Result<MacroExplorationResult, MacroAcExplorationError> {
+    explore_macro_ac_candidates_with_execution(
+        macro_,
+        primitive_catalog,
+        macro_catalog,
+        candidate_sets,
+        physical_lut,
+        MacroExecutionConfig::sequential(),
+    )
+}
+
+/// Executes macro AC testbenches using an explicit runtime policy.
+///
+/// In this stage parallel execution is applied when every declared testbench
+/// is electrical. Mixed electrical/layout-aware flows retain the established
+/// sequential path until their ordered second stage is introduced.
+pub fn explore_macro_ac_candidates_with_execution(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    candidate_sets: MacroCandidateSets,
+    physical_lut: Option<&PhysicalLookupTable>,
+    execution: MacroExecutionConfig,
+) -> Result<MacroExplorationResult, MacroAcExplorationError> {
     let testbench_names = macro_
         .exploration()
         .testbenches()
@@ -454,7 +490,8 @@ pub fn explore_macro_ac_candidates_with_physical_lut(
             )
         } else {
             let candidate_refs = candidate_sets.candidate_sets().collect::<Vec<_>>();
-            let mut evaluators = Vec::with_capacity(macro_.exploration().testbenches().len());
+            let mut prepared_testbenches =
+                Vec::with_capacity(macro_.exploration().testbenches().len());
             for testbench in macro_.exploration().testbenches() {
                 let prepared = prepare_macro_ac_testbench(
                     macro_,
@@ -467,46 +504,58 @@ pub fn explore_macro_ac_candidates_with_physical_lut(
                     testbench: testbench.name().to_owned(),
                     error,
                 })?;
-                let evaluator = PreparedMacroAcCandidateEvaluator::new_with_physical_lut(
-                    prepared,
-                    &candidate_refs,
-                    physical_lut,
-                )
-                .map_err(|error| {
-                    MacroAcExplorationError::PrepareCandidateEvaluator {
-                        testbench: testbench.name().to_owned(),
-                        error: Box::new(error),
-                    }
-                })?;
-                evaluators.push(evaluator);
+                prepared_testbenches.push(prepared);
             }
-            evaluate_candidate_combinations(
-                &mut combinations,
-                &testbench_names,
-                |testbench_index, candidate_indices| {
-                    evaluators[testbench_index].evaluate(candidate_indices)
-                },
-            )
-            .map_err(|error| match error {
-                CandidateEvaluationLoopError::Analysis {
-                    testbench_index,
-                    candidate_indices,
-                    error,
-                } => MacroAcExplorationError::AnalyzeCandidate {
-                    testbench: testbench_names[testbench_index].clone(),
-                    candidate_indices,
-                    error: Box::new(error),
-                },
-                CandidateEvaluationLoopError::InconsistentOutcome {
-                    testbench_index,
-                    candidate_indices,
-                    reason,
-                } => MacroAcExplorationError::InconsistentOutcome {
-                    testbench: testbench_names[testbench_index].clone(),
-                    candidate_indices,
-                    reason,
-                },
-            })?
+
+            let parallel_electrical = match execution.electrical_analysis() {
+                ElectricalAnalysisExecution::Parallel {
+                    workers,
+                    batch_size,
+                } if prepared_testbenches
+                    .iter()
+                    .all(|testbench| testbench.domain() == MacroAnalysisDomain::Electrical) =>
+                {
+                    Some((workers, batch_size))
+                }
+                _ => None,
+            };
+
+            if let Some((workers, batch_size)) = parallel_electrical {
+                evaluate_electrical_candidate_combinations_parallel(
+                    &mut combinations,
+                    &testbench_names,
+                    &prepared_testbenches,
+                    &candidate_refs,
+                    workers,
+                    batch_size,
+                )?
+            } else {
+                let mut evaluators = Vec::with_capacity(prepared_testbenches.len());
+                for (testbench_index, prepared) in
+                    prepared_testbenches.into_iter().enumerate()
+                {
+                    let evaluator = PreparedMacroAcCandidateEvaluator::new_with_physical_lut(
+                        prepared,
+                        &candidate_refs,
+                        physical_lut,
+                    )
+                    .map_err(|error| {
+                        MacroAcExplorationError::PrepareCandidateEvaluator {
+                            testbench: testbench_names[testbench_index].clone(),
+                            error: Box::new(error),
+                        }
+                    })?;
+                    evaluators.push(evaluator);
+                }
+                evaluate_candidate_combinations(
+                    &mut combinations,
+                    &testbench_names,
+                    |testbench_index, candidate_indices| {
+                        evaluators[testbench_index].evaluate(candidate_indices)
+                    },
+                )
+                .map_err(|error| map_candidate_loop_error(error, &testbench_names))?
+            }
         }
     };
 
@@ -518,6 +567,32 @@ pub fn explore_macro_ac_candidates_with_physical_lut(
     })
 }
 
+fn map_candidate_loop_error(
+    error: CandidateEvaluationLoopError<MacroAcCandidateAnalysisError>,
+    testbench_names: &[String],
+) -> MacroAcExplorationError {
+    match error {
+        CandidateEvaluationLoopError::Analysis {
+            testbench_index,
+            candidate_indices,
+            error,
+        } => MacroAcExplorationError::AnalyzeCandidate {
+            testbench: testbench_names[testbench_index].clone(),
+            candidate_indices,
+            error: Box::new(error),
+        },
+        CandidateEvaluationLoopError::InconsistentOutcome {
+            testbench_index,
+            candidate_indices,
+            reason,
+        } => MacroAcExplorationError::InconsistentOutcome {
+            testbench: testbench_names[testbench_index].clone(),
+            candidate_indices,
+            reason,
+        },
+    }
+}
+
 impl MacroExplorationStatistics {
     fn new(testbench_names: &[String]) -> Self {
         Self {
@@ -527,6 +602,22 @@ impl MacroExplorationStatistics {
                 .map(MacroAcTestbenchStatistics::new)
                 .collect(),
             ..Self::default()
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.compatible_candidates += other.compatible_candidates;
+        self.accepted_candidates += other.accepted_candidates;
+        debug_assert_eq!(self.testbenches.len(), other.testbenches.len());
+        for (destination, source) in self.testbenches.iter_mut().zip(other.testbenches) {
+            debug_assert_eq!(destination.testbench, source.testbench);
+            destination.evaluated_candidates += source.evaluated_candidates;
+            destination.frequency_evaluations += source.frequency_evaluations;
+            destination.rejections.dc_gain += source.rejections.dc_gain;
+            destination.rejections.bandwidth_3db += source.rejections.bandwidth_3db;
+            destination.rejections.unity_gain += source.rejections.unity_gain;
+            destination.rejections.phase_margin += source.rejections.phase_margin;
+            destination.physical_domain_rejections += source.physical_domain_rejections;
         }
     }
 }
@@ -545,6 +636,111 @@ enum CandidateEvaluationLoopError<E> {
     },
 }
 
+fn evaluate_electrical_candidate_combinations_parallel(
+    combinations: &mut MacroCandidateCombinationJoin<'_>,
+    testbench_names: &[String],
+    prepared_testbenches: &[PreparedMacroAcTestbench],
+    candidate_sets: &[&crate::exploration::candidate::CandidateSet],
+    workers: usize,
+    batch_size: usize,
+) -> Result<
+    (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
+    MacroAcExplorationError,
+> {
+    let prototypes = prepared_testbenches
+        .iter()
+        .enumerate()
+        .map(|(testbench_index, prepared)| {
+            PreparedMacroAcCandidateEvaluator::new(prepared.clone(), candidate_sets).map_err(
+                |error| MacroAcExplorationError::PrepareCandidateEvaluator {
+                    testbench: testbench_names[testbench_index].clone(),
+                    error: Box::new(error),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map_err(MacroAcExplorationError::BuildElectricalThreadPool)?;
+    let batches = MacroCandidateCombinationBatchIter::new(combinations, batch_size);
+    let mut results = pool.install(|| {
+        batches
+            .par_bridge()
+            .map_init(
+                || {
+                    prototypes
+                        .iter()
+                        .map(PreparedMacroAcCandidateEvaluator::fork_electrical)
+                        .collect::<Vec<_>>()
+                },
+                |evaluators, batch| {
+                    let first_ordinal = batch[0].ordinal;
+                    let result = evaluate_candidate_batch(
+                        &batch,
+                        testbench_names,
+                        |testbench_index, candidate_indices| {
+                            evaluators[testbench_index].evaluate(candidate_indices)
+                        },
+                    );
+                    (first_ordinal, result)
+                },
+            )
+            .collect::<Vec<_>>()
+    });
+    merge_candidate_batch_results(&mut results, testbench_names)
+        .map_err(|error| map_candidate_loop_error(error, testbench_names))
+}
+
+fn merge_candidate_batch_results<E>(
+    results: &mut Vec<(
+        usize,
+        Result<
+            (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
+            CandidateEvaluationLoopError<E>,
+        >,
+    )>,
+    testbench_names: &[String],
+) -> Result<
+    (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
+    CandidateEvaluationLoopError<E>,
+> {
+    results.sort_by_key(|(first_ordinal, _)| *first_ordinal);
+    let mut accepted = Vec::new();
+    let mut statistics = MacroExplorationStatistics::new(testbench_names);
+    for (_, result) in results.drain(..) {
+        let (mut batch_accepted, batch_statistics) = result?;
+        accepted.append(&mut batch_accepted);
+        statistics.merge(batch_statistics);
+    }
+    debug_assert_eq!(statistics.accepted_candidates, accepted.len());
+    Ok((accepted, statistics))
+}
+
+fn evaluate_candidate_batch<E>(
+    batch: &[super::combination::OrdinalCandidateSelection],
+    testbench_names: &[String],
+    mut analyze: impl FnMut(usize, &[usize]) -> Result<MacroAcCandidateEvaluation, E>,
+) -> Result<
+    (Vec<MacroAcceptedCandidate>, MacroExplorationStatistics),
+    CandidateEvaluationLoopError<E>,
+> {
+    let mut statistics = MacroExplorationStatistics::new(testbench_names);
+    let mut accepted = Vec::new();
+    for selection in batch {
+        if let Some(candidate) = evaluate_candidate_selection(
+            &selection.candidate_indices,
+            testbench_names.len(),
+            &mut statistics,
+            &mut analyze,
+        )? {
+            accepted.push(candidate);
+        }
+    }
+    statistics.accepted_candidates = accepted.len();
+    Ok((accepted, statistics))
+}
+
 fn evaluate_candidate_combinations<E>(
     combinations: &mut MacroCandidateCombinationJoin<'_>,
     testbench_names: &[String],
@@ -557,52 +753,13 @@ fn evaluate_candidate_combinations<E>(
     let mut accepted = Vec::new();
 
     while let Some(candidate_indices) = combinations.next_selection() {
-        statistics.compatible_candidates += 1;
-        let mut ac_outcomes = Vec::with_capacity(testbench_names.len());
-        let mut rejected = false;
-
-        for testbench_index in 0..testbench_names.len() {
-            let evaluation = analyze(testbench_index, candidate_indices).map_err(|error| {
-                CandidateEvaluationLoopError::Analysis {
-                    testbench_index,
-                    candidate_indices: candidate_indices.to_vec(),
-                    error,
-                }
-            })?;
-            let testbench_statistics = &mut statistics.testbenches[testbench_index];
-            testbench_statistics.evaluated_candidates += 1;
-            let outcome = match evaluation {
-                MacroAcCandidateEvaluation::PhysicalDomainRejected => {
-                    testbench_statistics.physical_domain_rejections += 1;
-                    rejected = true;
-                    break;
-                }
-                MacroAcCandidateEvaluation::Outcome(outcome) => outcome,
-            };
-            testbench_statistics.frequency_evaluations += outcome.frequency_evaluations;
-
-            if let Some(metric) = rejection_metric(&outcome).map_err(|reason| {
-                CandidateEvaluationLoopError::InconsistentOutcome {
-                    testbench_index,
-                    candidate_indices: candidate_indices.to_vec(),
-                    reason,
-                }
-            })? {
-                testbench_statistics.rejections.record(metric);
-                rejected = true;
-                break;
-            }
-            ac_outcomes.push(MacroAcTestbenchOutcome {
-                testbench_index,
-                outcome,
-            });
-        }
-
-        if !rejected {
-            accepted.push(MacroAcceptedCandidate {
-                candidate_indices: candidate_indices.to_vec(),
-                ac_outcomes,
-            });
+        if let Some(candidate) = evaluate_candidate_selection(
+            candidate_indices,
+            testbench_names.len(),
+            &mut statistics,
+            &mut analyze,
+        )? {
+            accepted.push(candidate);
         }
     }
 
@@ -619,6 +776,56 @@ fn evaluate_candidate_combinations<E>(
                 .sum::<usize>()
     );
     Ok((accepted, statistics))
+}
+
+fn evaluate_candidate_selection<E>(
+    candidate_indices: &[usize],
+    testbench_count: usize,
+    statistics: &mut MacroExplorationStatistics,
+    analyze: &mut impl FnMut(usize, &[usize]) -> Result<MacroAcCandidateEvaluation, E>,
+) -> Result<Option<MacroAcceptedCandidate>, CandidateEvaluationLoopError<E>> {
+    statistics.compatible_candidates += 1;
+    let mut ac_outcomes = Vec::with_capacity(testbench_count);
+
+    for testbench_index in 0..testbench_count {
+        let evaluation = analyze(testbench_index, candidate_indices).map_err(|error| {
+            CandidateEvaluationLoopError::Analysis {
+                testbench_index,
+                candidate_indices: candidate_indices.to_vec(),
+                error,
+            }
+        })?;
+        let testbench_statistics = &mut statistics.testbenches[testbench_index];
+        testbench_statistics.evaluated_candidates += 1;
+        let outcome = match evaluation {
+            MacroAcCandidateEvaluation::PhysicalDomainRejected => {
+                testbench_statistics.physical_domain_rejections += 1;
+                return Ok(None);
+            }
+            MacroAcCandidateEvaluation::Outcome(outcome) => outcome,
+        };
+        testbench_statistics.frequency_evaluations += outcome.frequency_evaluations;
+
+        if let Some(metric) = rejection_metric(&outcome).map_err(|reason| {
+            CandidateEvaluationLoopError::InconsistentOutcome {
+                testbench_index,
+                candidate_indices: candidate_indices.to_vec(),
+                reason,
+            }
+        })? {
+            testbench_statistics.rejections.record(metric);
+            return Ok(None);
+        }
+        ac_outcomes.push(MacroAcTestbenchOutcome {
+            testbench_index,
+            outcome,
+        });
+    }
+
+    Ok(Some(MacroAcceptedCandidate {
+        candidate_indices: candidate_indices.to_vec(),
+        ac_outcomes,
+    }))
 }
 
 fn rejection_metric(outcome: &AdaptiveAcOutcome) -> Result<Option<AcMetric>, &'static str> {
@@ -864,6 +1071,152 @@ mod tests {
         );
         assert_eq!(statistics.testbenches()[1].evaluated_candidates(), 1);
         assert_eq!(statistics.frequency_evaluations(), 8);
+    }
+
+    #[test]
+    fn merging_out_of_order_batches_matches_sequential_evaluation() {
+        let macro_ = macro_();
+        let primitives = primitive_catalog();
+        let candidates = candidates();
+        let testbench_names = vec!["first".to_owned(), "second".to_owned()];
+        let analyze = |testbench_index: usize, candidate_indices: &[usize]| {
+            if testbench_index == 0 && candidate_indices[0] == 1 {
+                Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(rejected_outcome(
+                    AcMetric::DcGainDb,
+                    2,
+                )))
+            } else {
+                Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(passing_outcome(3)))
+            }
+        };
+        let mut combinations =
+            MacroCandidateCombinationJoin::new(&macro_, &primitives, &candidates).unwrap();
+        let expected =
+            evaluate_candidate_combinations(&mut combinations, &testbench_names, analyze).unwrap();
+
+        let first = vec![super::super::combination::OrdinalCandidateSelection {
+            ordinal: 0,
+            candidate_indices: vec![0],
+        }];
+        let second = vec![super::super::combination::OrdinalCandidateSelection {
+            ordinal: 1,
+            candidate_indices: vec![1],
+        }];
+        let mut batches = vec![
+            (
+                1,
+                evaluate_candidate_batch(&second, &testbench_names, analyze),
+            ),
+            (
+                0,
+                evaluate_candidate_batch(&first, &testbench_names, analyze),
+            ),
+        ];
+
+        let actual = merge_candidate_batch_results(&mut batches, &testbench_names).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn parallel_batches_match_sequential_results_across_worker_counts() {
+        let macro_ = macro_();
+        let primitives = primitive_catalog();
+        let mut candidates = candidates();
+        candidates.instances[0].candidates.points = (0..17)
+            .map(|index| candidate((index + 1) as f64 * 1.0e-5))
+            .collect();
+        let testbench_names = vec!["first".to_owned(), "second".to_owned()];
+        let analyze = |testbench_index: usize, candidate_indices: &[usize]| {
+            if testbench_index == 0 && candidate_indices[0] % 3 == 0 {
+                Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(rejected_outcome(
+                    AcMetric::DcGainDb,
+                    2,
+                )))
+            } else {
+                Ok::<_, ()>(MacroAcCandidateEvaluation::Outcome(passing_outcome(3)))
+            }
+        };
+        let mut sequential_join =
+            MacroCandidateCombinationJoin::new(&macro_, &primitives, &candidates).unwrap();
+        let expected = evaluate_candidate_combinations(
+            &mut sequential_join,
+            &testbench_names,
+            analyze,
+        )
+        .unwrap();
+
+        for (workers, batch_size) in [(2, 1), (4, 3), (8, 10)] {
+            let mut join =
+                MacroCandidateCombinationJoin::new(&macro_, &primitives, &candidates).unwrap();
+            let batches = MacroCandidateCombinationBatchIter::new(&mut join, batch_size);
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut batch_results = pool.install(|| {
+                batches
+                    .par_bridge()
+                    .map(|batch| {
+                        let first_ordinal = batch[0].ordinal;
+                        (
+                            first_ordinal,
+                            evaluate_candidate_batch(&batch, &testbench_names, analyze),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let actual =
+                merge_candidate_batch_results(&mut batch_results, &testbench_names).unwrap();
+            assert_eq!(actual, expected, "workers={workers}, batch_size={batch_size}");
+        }
+    }
+
+    #[test]
+    fn batch_merge_reports_the_earliest_candidate_error() {
+        let testbench_names = vec!["gain".to_owned()];
+        let first = vec![super::super::combination::OrdinalCandidateSelection {
+            ordinal: 0,
+            candidate_indices: vec![0],
+        }];
+        let second = vec![super::super::combination::OrdinalCandidateSelection {
+            ordinal: 1,
+            candidate_indices: vec![1],
+        }];
+        let mut batches = vec![
+            (
+                1,
+                evaluate_candidate_batch(&second, &testbench_names, |_, _| {
+                    Err::<MacroAcCandidateEvaluation, _>("later")
+                }),
+            ),
+            (
+                0,
+                evaluate_candidate_batch(&first, &testbench_names, |_, _| {
+                    Err::<MacroAcCandidateEvaluation, _>("earlier")
+                }),
+            ),
+        ];
+
+        assert!(matches!(
+            merge_candidate_batch_results(&mut batches, &testbench_names),
+            Err(CandidateEvaluationLoopError::Analysis {
+                candidate_indices,
+                error: "earlier",
+                ..
+            }) if candidate_indices == [0]
+        ));
+    }
+
+    #[test]
+    fn parallel_shared_inputs_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_send<T: Send>() {}
+
+        assert_send_sync::<CandidateSet>();
+        assert_send_sync::<PreparedMacroAcTestbench>();
+        assert_send_sync::<shapeic_lut::DeviceLut>();
+        assert_send_sync::<shapeic_layout::PhysicalLookupTable>();
+        assert_send::<PreparedMacroAcCandidateEvaluator<'static>>();
     }
 
     #[test]

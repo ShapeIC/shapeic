@@ -33,7 +33,6 @@ pub struct MacroCandidateCombinationJoin<'a> {
 }
 
 /// One deterministic selection copied from the lazy candidate join.
-#[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OrdinalCandidateSelection {
     pub(crate) ordinal: usize,
@@ -41,7 +40,6 @@ pub(crate) struct OrdinalCandidateSelection {
 }
 
 /// Lazy fixed-size batching over compatible candidate selections.
-#[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
 pub(crate) struct MacroCandidateCombinationBatchIter<'join, 'candidates> {
     combinations: &'join mut MacroCandidateCombinationJoin<'candidates>,
     batch_size: usize,
@@ -49,7 +47,6 @@ pub(crate) struct MacroCandidateCombinationBatchIter<'join, 'candidates> {
 }
 
 impl<'join, 'candidates> MacroCandidateCombinationBatchIter<'join, 'candidates> {
-    #[allow(dead_code)] // Consumed by the parallel electrical stage introduced in Step 2.
     pub(crate) fn new(
         combinations: &'join mut MacroCandidateCombinationJoin<'candidates>,
         batch_size: usize,

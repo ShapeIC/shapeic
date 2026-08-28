@@ -19,7 +19,7 @@ const MOS_CAPACITANCE_PARAMETER_COUNT: usize =
 ///
 /// Column lookup and schema validation happen once in [`Self::new`]. The hot
 /// path then uses only precomputed set and column offsets.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CandidateParameterBinder<'a> {
     candidate_sets: Vec<&'a CandidateSet>,
     parameter_names: Vec<String>,
@@ -342,7 +342,7 @@ impl Error for CandidateParameterBindingError {}
 ///
 /// Branch topology and column lookup are resolved once during construction.
 /// Bound capacitances follow [`Self::branches`] in the same deterministic order.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CandidateCapacitanceBinder<'a> {
     branches: Vec<ResolvedPrimitiveBranch>,
     parameters: CandidateParameterBinder<'a>,

@@ -34,7 +34,7 @@ pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
     MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationError,
     MacroExplorationResult, MacroExplorationStatistics, explore_macro_ac_candidates,
-    explore_macro_ac_candidates_with_physical_lut,
+    explore_macro_ac_candidates_with_execution, explore_macro_ac_candidates_with_physical_lut,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

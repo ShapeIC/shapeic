@@ -101,6 +101,23 @@ impl<'a> PreparedMacroAcCandidateEvaluator<'a> {
         &self.testbench
     }
 
+    /// Creates a worker-private evaluator for an electrical testbench.
+    ///
+    /// The compiled testbench and immutable bindings are cloned, while all hot
+    /// path scratch buffers are allocated independently for the worker.
+    pub(crate) fn fork_electrical(&self) -> Self {
+        assert_eq!(self.testbench.domain(), MacroAnalysisDomain::Electrical);
+        Self {
+            testbench: self.testbench.clone(),
+            parameters: self.parameters.clone(),
+            capacitances: self.capacitances.clone(),
+            parameter_values: vec![0.0; self.parameter_values.len()],
+            capacitance_scratch: vec![0.0; self.capacitance_scratch.len()],
+            capacitance_values: vec![ZERO_CAPACITANCES; self.capacitance_values.len()],
+            physical: None,
+        }
+    }
+
     /// Binds, instantiates, and capacitance-stamps one candidate selection.
     pub fn instantiate(
         &mut self,
