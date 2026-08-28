@@ -1,5 +1,10 @@
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, Instant};
+
+use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
+use shapeic_lut::DeviceLut;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
@@ -9,10 +14,14 @@ use crate::exploration::filter::{
     retain_candidate_set_with_indices,
 };
 use crate::primitive::build::{PrimitiveBuildError, build_candidate_set_for_primitive};
+use crate::primitive::manifest::PrimitiveManifest;
 
-use super::input::CompactMacroCandidateProvenance;
+use super::input::{
+    CompactMacroCandidateProvenance, CompactMacroInstanceExplorationInput,
+    PrimitiveInstanceExplorationInput,
+};
 use super::{
-    Macro, MacroExplorationInput, MacroExplorationInputValidationError,
+    CandidateBuildExecution, Macro, MacroExplorationInput, MacroExplorationInputValidationError,
     MacroExplorationInstanceKind, validate_macro_exploration_input,
 };
 
@@ -59,6 +68,55 @@ impl MacroInstanceCandidateSet {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MacroCandidateSets {
     pub(super) instances: Vec<MacroInstanceCandidateSet>,
+}
+
+/// Candidate-build timing and row counts for one explorable circuit instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroCandidateBuildInstanceReport {
+    instance_path: String,
+    duration: Duration,
+    input_candidates: usize,
+    retained_candidates: usize,
+}
+
+impl MacroCandidateBuildInstanceReport {
+    pub fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    pub const fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    pub const fn input_candidates(&self) -> usize {
+        self.input_candidates
+    }
+
+    pub const fn retained_candidates(&self) -> usize {
+        self.retained_candidates
+    }
+}
+
+/// Execution policy and timings produced while constructing macro candidates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MacroCandidateBuildReport {
+    execution: CandidateBuildExecution,
+    duration: Duration,
+    instances: Vec<MacroCandidateBuildInstanceReport>,
+}
+
+impl MacroCandidateBuildReport {
+    pub const fn execution(&self) -> CandidateBuildExecution {
+        self.execution
+    }
+
+    pub const fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    pub fn instances(&self) -> &[MacroCandidateBuildInstanceReport] {
+        &self.instances
+    }
 }
 
 impl MacroCandidateSets {
@@ -109,6 +167,9 @@ pub enum MacroCandidateBuildError {
         instance_path: String,
         error: CandidateFilterError,
     },
+    CandidateThreadPool {
+        reason: String,
+    },
 }
 
 impl fmt::Display for MacroCandidateBuildError {
@@ -142,6 +203,9 @@ impl fmt::Display for MacroCandidateBuildError {
                 formatter,
                 "could not filter macro '{macro_name}' instance '{instance_path}': {error}"
             ),
+            Self::CandidateThreadPool { reason } => {
+                write!(formatter, "could not build candidate worker pool: {reason}")
+            }
         }
     }
 }
@@ -150,7 +214,9 @@ impl Error for MacroCandidateBuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::CandidateFilter { error, .. } => Some(error),
-            Self::InvalidInput { .. } | Self::PrimitiveBuild { .. } => None,
+            Self::InvalidInput { .. }
+            | Self::PrimitiveBuild { .. }
+            | Self::CandidateThreadPool { .. } => None,
         }
     }
 }
@@ -163,8 +229,25 @@ impl Error for MacroCandidateBuildError {
 pub fn build_macro_candidate_sets(
     macro_: &Macro,
     primitive_catalog: &PrimitiveCatalog,
-    mut input: MacroExplorationInput<'_>,
+    input: MacroExplorationInput<'_>,
 ) -> Result<MacroCandidateSets, MacroCandidateBuildError> {
+    build_macro_candidate_sets_with_execution(
+        macro_,
+        primitive_catalog,
+        input,
+        CandidateBuildExecution::Sequential,
+    )
+    .map(|(candidates, _)| candidates)
+}
+
+/// Builds candidate sets using an explicit per-instance execution policy.
+pub fn build_macro_candidate_sets_with_execution(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    mut input: MacroExplorationInput<'_>,
+    execution: CandidateBuildExecution,
+) -> Result<(MacroCandidateSets, MacroCandidateBuildReport), MacroCandidateBuildError> {
+    let build_start = Instant::now();
     let validation_errors = validate_macro_exploration_input(macro_, primitive_catalog, &input);
     if !validation_errors.is_empty() {
         return Err(MacroCandidateBuildError::InvalidInput {
@@ -172,9 +255,9 @@ pub fn build_macro_candidate_sets(
         });
     }
 
-    let mut instances = Vec::new();
-    for instance in macro_.circuit().instances() {
-        let (kind, mut candidates, filters, mut compact_provenance) = match instance.block() {
+    let mut tasks = Vec::new();
+    for (circuit_index, instance) in macro_.circuit().instances().iter().enumerate() {
+        let task = match instance.block() {
             BlockRef::Primitive(primitive_name) => {
                 let primitive = primitive_catalog
                     .get(primitive_name)
@@ -192,68 +275,171 @@ pub fn build_macro_candidate_sets(
                     .primitive_instances
                     .remove(instance.name())
                     .expect("macro exploration input validation resolved the primitive input");
-                let candidates = build_candidate_set_for_primitive(
-                    model,
-                    primitive,
-                    instance.name(),
-                    primitive_input.build_input,
-                )
-                .map_err(|error| MacroCandidateBuildError::PrimitiveBuild {
-                    macro_name: macro_.name().to_owned(),
+                CandidateBuildTask::Primitive {
+                    circuit_index,
                     instance_path: instance.name().to_owned(),
-                    primitive: primitive_name.clone(),
-                    error,
-                })?;
-                (
-                    MacroExplorationInstanceKind::Primitive,
-                    candidates,
-                    primitive_input.filters,
-                    None,
-                )
+                    primitive_name: primitive_name.clone(),
+                    model,
+                    primitive: primitive.clone(),
+                    input: primitive_input,
+                }
             }
             BlockRef::Macro(_) => {
                 let compact_input = input
                     .compact_macro_instances
                     .remove(instance.name())
                     .expect("macro exploration input validation resolved the compact input");
-                (
-                    MacroExplorationInstanceKind::CompactMacro,
-                    compact_input.candidates,
-                    compact_input.filters,
-                    compact_input.provenance,
-                )
+                CandidateBuildTask::CompactMacro {
+                    circuit_index,
+                    instance_path: instance.name().to_owned(),
+                    input: compact_input,
+                }
             }
             BlockRef::Element(_) => continue,
         };
+        tasks.push(task);
+    }
 
-        let filter_error = |error| MacroCandidateBuildError::CandidateFilter {
-            macro_name: macro_.name().to_owned(),
-            instance_path: instance.name().to_owned(),
-            error,
-        };
-        let filter_report = if let Some(provenance) = &mut compact_provenance {
-            debug_assert_eq!(provenance.accepted_indices.len(), candidates.points.len());
-            let (report, retained_indices) =
-                retain_candidate_set_with_indices(&mut candidates, &filters)
-                    .map_err(filter_error)?;
-            provenance.accepted_indices = retained_indices
-                .into_iter()
-                .map(|index| provenance.accepted_indices[index])
-                .collect();
-            report
-        } else {
-            retain_candidate_set(&mut candidates, &filters).map_err(filter_error)?
-        };
-        instances.push(MacroInstanceCandidateSet {
-            instance_path: instance.name().to_owned(),
+    let macro_name = macro_.name();
+    let results = match execution {
+        CandidateBuildExecution::Sequential => tasks
+            .into_iter()
+            .map(|task| build_candidate_task(macro_name, task))
+            .collect::<Vec<_>>(),
+        CandidateBuildExecution::Parallel { workers } => {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .map_err(|error| MacroCandidateBuildError::CandidateThreadPool {
+                    reason: error.to_string(),
+                })?;
+            pool.install(|| {
+                tasks
+                    .into_par_iter()
+                    .map(|task| build_candidate_task(macro_name, task))
+                    .collect::<Vec<_>>()
+            })
+        }
+    };
+    let mut built = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    built.sort_by_key(|result| result.circuit_index);
+    let (instances, instance_reports) = built
+        .into_iter()
+        .map(|result| (result.candidates, result.report))
+        .unzip();
+    let report = MacroCandidateBuildReport {
+        execution,
+        duration: build_start.elapsed(),
+        instances: instance_reports,
+    };
+    Ok((MacroCandidateSets { instances }, report))
+}
+
+enum CandidateBuildTask<'lut> {
+    Primitive {
+        circuit_index: usize,
+        instance_path: String,
+        primitive_name: String,
+        model: &'lut DeviceLut,
+        primitive: PrimitiveManifest,
+        input: PrimitiveInstanceExplorationInput,
+    },
+    CompactMacro {
+        circuit_index: usize,
+        instance_path: String,
+        input: CompactMacroInstanceExplorationInput,
+    },
+}
+
+struct BuiltCandidateTask {
+    circuit_index: usize,
+    candidates: MacroInstanceCandidateSet,
+    report: MacroCandidateBuildInstanceReport,
+}
+
+fn build_candidate_task(
+    macro_name: &str,
+    task: CandidateBuildTask<'_>,
+) -> Result<BuiltCandidateTask, MacroCandidateBuildError> {
+    let start = Instant::now();
+    let (circuit_index, instance_path, kind, mut candidates, filters, mut provenance) = match task {
+        CandidateBuildTask::Primitive {
+            circuit_index,
+            instance_path,
+            primitive_name,
+            model,
+            primitive,
+            input,
+        } => {
+            let candidates = build_candidate_set_for_primitive(
+                model,
+                &primitive,
+                &instance_path,
+                input.build_input,
+            )
+            .map_err(|error| MacroCandidateBuildError::PrimitiveBuild {
+                macro_name: macro_name.to_owned(),
+                instance_path: instance_path.clone(),
+                primitive: primitive_name,
+                error,
+            })?;
+            (
+                circuit_index,
+                instance_path,
+                MacroExplorationInstanceKind::Primitive,
+                candidates,
+                input.filters,
+                None,
+            )
+        }
+        CandidateBuildTask::CompactMacro {
+            circuit_index,
+            instance_path,
+            input,
+        } => (
+            circuit_index,
+            instance_path,
+            MacroExplorationInstanceKind::CompactMacro,
+            input.candidates,
+            input.filters,
+            input.provenance,
+        ),
+    };
+    let input_candidates = candidates.points.len();
+    let filter_error = |error| MacroCandidateBuildError::CandidateFilter {
+        macro_name: macro_name.to_owned(),
+        instance_path: instance_path.clone(),
+        error,
+    };
+    let filter_report = if let Some(provenance) = &mut provenance {
+        debug_assert_eq!(provenance.accepted_indices.len(), candidates.points.len());
+        let (report, retained_indices) =
+            retain_candidate_set_with_indices(&mut candidates, &filters).map_err(filter_error)?;
+        provenance.accepted_indices = retained_indices
+            .into_iter()
+            .map(|index| provenance.accepted_indices[index])
+            .collect();
+        report
+    } else {
+        retain_candidate_set(&mut candidates, &filters).map_err(filter_error)?
+    };
+    let retained_candidates = candidates.points.len();
+    Ok(BuiltCandidateTask {
+        circuit_index,
+        candidates: MacroInstanceCandidateSet {
+            instance_path: instance_path.clone(),
             kind,
             candidates,
             filter_report,
-            compact_provenance,
-        });
-    }
-
-    Ok(MacroCandidateSets { instances })
+            compact_provenance: provenance,
+        },
+        report: MacroCandidateBuildInstanceReport {
+            instance_path,
+            duration: start.elapsed(),
+            input_candidates,
+            retained_candidates,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -391,6 +577,74 @@ mod tests {
         assert_eq!(load.filter_report().input_count(), 2);
         assert_eq!(load.filter_report().retained_count(), 1);
         assert_eq!(load.candidates().points[0].get("xload.score"), Some(3.0));
+    }
+
+    #[test]
+    fn parallel_build_matches_sequential_order_candidates_and_counts() {
+        let table = fixture();
+        let model = table.model("fixture_nmos").unwrap();
+        let mut catalog = PrimitiveCatalog::new();
+        catalog.register(primitive());
+
+        let (sequential, sequential_report) = build_macro_candidate_sets_with_execution(
+            &macro_(),
+            &catalog,
+            input(model),
+            CandidateBuildExecution::Sequential,
+        )
+        .unwrap();
+        let (parallel, parallel_report) = build_macro_candidate_sets_with_execution(
+            &macro_(),
+            &catalog,
+            input(model),
+            CandidateBuildExecution::Parallel { workers: 2 },
+        )
+        .unwrap();
+
+        assert_eq!(parallel, sequential);
+        assert_eq!(parallel_report.instances().len(), 2);
+        for (parallel, sequential) in parallel_report
+            .instances()
+            .iter()
+            .zip(sequential_report.instances())
+        {
+            assert_eq!(parallel.instance_path(), sequential.instance_path());
+            assert_eq!(parallel.input_candidates(), sequential.input_candidates());
+            assert_eq!(
+                parallel.retained_candidates(),
+                sequential.retained_candidates()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_build_reports_the_first_error_in_circuit_order() {
+        let table = fixture();
+        let model = table.model("fixture_nmos").unwrap();
+        let mut catalog = PrimitiveCatalog::new();
+        catalog.register(primitive());
+        let mut input = input(model);
+        input.primitive_instances.get_mut("xstage").unwrap().filters =
+            vec![CandidateFilter::at_most("xstage.first_missing", 2.0).unwrap()];
+        input
+            .compact_macro_instances
+            .get_mut("xload")
+            .unwrap()
+            .filters = vec![CandidateFilter::at_most("xload.second_missing", 2.0).unwrap()];
+
+        let error = build_macro_candidate_sets_with_execution(
+            &macro_(),
+            &catalog,
+            input,
+            CandidateBuildExecution::Parallel { workers: 2 },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MacroCandidateBuildError::CandidateFilter { instance_path, .. }
+                if instance_path == "xstage"
+        ));
     }
 
     #[test]

@@ -5,11 +5,11 @@ const DEFAULT_BATCHES_PER_WORKER: usize = 8;
 
 /// Runtime policy used to execute one macro exploration.
 ///
-/// Exploration remains sequential unless parallel electrical analysis is
-/// enabled explicitly. Candidate construction has a separate future control
-/// and is intentionally unaffected by this configuration.
+/// Exploration remains sequential unless candidate construction or electrical
+/// analysis is enabled explicitly. Both stages are configured independently.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MacroExecutionConfig {
+    candidate_build: CandidateBuildExecution,
     electrical_analysis: ElectricalAnalysisExecution,
 }
 
@@ -17,8 +17,30 @@ impl MacroExecutionConfig {
     /// Creates the default sequential execution policy.
     pub const fn sequential() -> Self {
         Self {
+            candidate_build: CandidateBuildExecution::Sequential,
             electrical_analysis: ElectricalAnalysisExecution::Sequential,
         }
+    }
+
+    /// Enables independent candidate-set construction using `workers`.
+    pub fn with_parallel_candidate_build(
+        mut self,
+        workers: usize,
+    ) -> Result<Self, MacroExecutionConfigError> {
+        if workers == 0 {
+            return Err(MacroExecutionConfigError::ZeroCandidateBuildWorkers);
+        }
+        self.candidate_build = if workers == 1 {
+            CandidateBuildExecution::Sequential
+        } else {
+            CandidateBuildExecution::Parallel { workers }
+        };
+        Ok(self)
+    }
+
+    /// Returns the configured candidate-build execution policy.
+    pub const fn candidate_build(&self) -> CandidateBuildExecution {
+        self.candidate_build
     }
 
     /// Enables batched electrical analysis using a local pool of `workers`.
@@ -71,6 +93,16 @@ impl MacroExecutionConfig {
     }
 }
 
+/// Execution mode for independent primitive and compact-macro candidate sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CandidateBuildExecution {
+    #[default]
+    Sequential,
+    Parallel {
+        workers: usize,
+    },
+}
+
 /// Execution mode for the electrical prefix of a macro's testbenches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ElectricalAnalysisExecution {
@@ -85,6 +117,7 @@ pub enum ElectricalAnalysisExecution {
 /// Invalid macro execution configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacroExecutionConfigError {
+    ZeroCandidateBuildWorkers,
     ZeroElectricalWorkers,
     ZeroElectricalBatchSize,
     ElectricalBatchSizeOverflow { workers: usize },
@@ -94,6 +127,9 @@ pub enum MacroExecutionConfigError {
 impl fmt::Display for MacroExecutionConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ZeroCandidateBuildWorkers => {
+                formatter.write_str("candidate-build worker count must be greater than zero")
+            }
             Self::ZeroElectricalWorkers => {
                 formatter.write_str("electrical analysis worker count must be greater than zero")
             }
@@ -162,6 +198,10 @@ mod tests {
     #[test]
     fn rejects_invalid_parallel_settings() {
         assert_eq!(
+            MacroExecutionConfig::sequential().with_parallel_candidate_build(0),
+            Err(MacroExecutionConfigError::ZeroCandidateBuildWorkers)
+        );
+        assert_eq!(
             MacroExecutionConfig::sequential().with_parallel_electrical_analysis(0),
             Err(MacroExecutionConfigError::ZeroElectricalWorkers)
         );
@@ -175,6 +215,27 @@ mod tests {
                 .unwrap()
                 .with_electrical_batch_size(0),
             Err(MacroExecutionConfigError::ZeroElectricalBatchSize)
+        );
+    }
+
+    #[test]
+    fn configures_candidate_build_independently_from_electrical_analysis() {
+        let execution = MacroExecutionConfig::sequential()
+            .with_parallel_candidate_build(3)
+            .unwrap();
+        assert_eq!(
+            execution.candidate_build(),
+            super::CandidateBuildExecution::Parallel { workers: 3 }
+        );
+        assert_eq!(
+            execution.electrical_analysis(),
+            ElectricalAnalysisExecution::Sequential
+        );
+
+        let sequential = execution.with_parallel_candidate_build(1).unwrap();
+        assert_eq!(
+            sequential.candidate_build(),
+            super::CandidateBuildExecution::Sequential
         );
     }
 }

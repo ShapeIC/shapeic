@@ -1,10 +1,10 @@
 //! Reusable macros, compact circuit models, and their exploration definitions.
 
-mod catalog;
 mod candidates;
+mod catalog;
 mod combination;
-mod execution;
 mod evaluate;
+mod execution;
 mod explore;
 mod input;
 mod model;
@@ -14,28 +14,30 @@ mod projection;
 mod render;
 mod validation;
 
-pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use candidates::{
-    MacroCandidateBuildError, MacroCandidateSets, MacroInstanceCandidateSet,
-    build_macro_candidate_sets,
+    MacroCandidateBuildError, MacroCandidateBuildInstanceReport, MacroCandidateBuildReport,
+    MacroCandidateSets, MacroInstanceCandidateSet, build_macro_candidate_sets,
+    build_macro_candidate_sets_with_execution,
 };
+pub use catalog::{MacroCatalog, MacroCatalogError};
 pub use combination::{
-    MacroCandidateCombinationError, MacroCandidateCombinationJoin,
-    MacroCandidateCombinationPlan, plan_macro_candidate_combinations,
-};
-pub use execution::{
-    ElectricalAnalysisExecution, MacroExecutionConfig, MacroExecutionConfigError,
+    MacroCandidateCombinationError, MacroCandidateCombinationJoin, MacroCandidateCombinationPlan,
+    plan_macro_candidate_combinations,
 };
 pub use evaluate::{
     MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,
     PreparedMacroAcCandidateEvaluatorError,
 };
+pub use execution::{
+    CandidateBuildExecution, ElectricalAnalysisExecution, MacroExecutionConfig,
+    MacroExecutionConfigError,
+};
 pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
-    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExplorationError,
-    MacroExecutionReport, MacroExplorationResult, MacroExplorationStatistics,
-    explore_macro_ac_candidates,
-    explore_macro_ac_candidates_with_execution, explore_macro_ac_candidates_with_physical_lut,
+    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExecutionReport,
+    MacroExplorationError, MacroExplorationResult, MacroExplorationStatistics,
+    explore_macro_ac_candidates, explore_macro_ac_candidates_with_execution,
+    explore_macro_ac_candidates_with_physical_lut,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

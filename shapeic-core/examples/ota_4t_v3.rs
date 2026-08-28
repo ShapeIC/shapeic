@@ -14,10 +14,10 @@ use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
 use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::{
-    ElectricalAnalysisExecution, Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog,
-    MacroCompactOutputBinding, MacroExecutionConfig, MacroExplorationInput,
-    MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
-    PrimitiveInstanceExplorationInput,
+    CandidateBuildExecution, ElectricalAnalysisExecution, Macro, MacroAcTestbench,
+    MacroAnalysisDomain, MacroCatalog, MacroCompactOutputBinding, MacroExecutionConfig,
+    MacroExplorationInput, MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource,
+    MacroPort, MacroPortRole, PrimitiveInstanceExplorationInput,
 };
 use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
@@ -162,13 +162,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let executions = options.execution_configs()?;
     let mut runs = Vec::with_capacity(executions.len());
     for (label, execution) in executions {
-        let input = ota_exploration_input(
-            &spec,
-            nmos,
-            pmos,
-            physical_table.as_ref(),
-            execution,
-        )?;
+        let input = ota_exploration_input(&spec, nmos, pmos, physical_table.as_ref(), execution)?;
         let result = ota.explore(&primitive_catalog, &macro_catalog, input)?;
         runs.push((label, result));
     }
@@ -721,9 +715,7 @@ fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
     Ok(())
 }
 
-fn validate_comparison_results(
-    runs: &[(String, MacroExplorationResult)],
-) -> Result<(), io::Error> {
+fn validate_comparison_results(runs: &[(String, MacroExplorationResult)]) -> Result<(), io::Error> {
     let Some((baseline_label, baseline)) = runs.first() else {
         return Err(io::Error::other("no exploration result was produced"));
     };
@@ -749,6 +741,21 @@ fn print_execution_comparison(runs: &[(String, MacroExplorationResult)]) {
     println!("\nMacro execution");
     for (label, result) in runs {
         let report = result.execution_report();
+        match report.candidate_build_execution() {
+            CandidateBuildExecution::Sequential => println!("  candidate build: sequential"),
+            CandidateBuildExecution::Parallel { workers } => {
+                println!("  candidate build: parallel, workers={workers}")
+            }
+        }
+        for instance in report.candidate_build_instances() {
+            println!(
+                "    {}: input={}, retained={}, time={:?}",
+                instance.instance_path(),
+                instance.input_candidates(),
+                instance.retained_candidates(),
+                instance.duration(),
+            );
+        }
         match report.electrical_execution() {
             ElectricalAnalysisExecution::Sequential => {
                 println!("{label}: sequential electrical execution");
@@ -785,7 +792,9 @@ fn print_execution_comparison(runs: &[(String, MacroExplorationResult)]) {
         }
     }
     if runs.len() > 1 {
-        println!("All comparison runs produced identical candidates, metrics, statistics, and provenance.");
+        println!(
+            "All comparison runs produced identical candidates, metrics, statistics, and provenance."
+        );
     }
 }
 
@@ -855,6 +864,7 @@ struct CliOptions {
     nmos_path: PathBuf,
     pmos_path: PathBuf,
     physical_path: Option<PathBuf>,
+    candidate_workers: Option<usize>,
     electrical_workers: Option<usize>,
     electrical_batch_size: Option<usize>,
     compare_electrical_workers: Vec<usize>,
@@ -885,13 +895,20 @@ impl CliOptions {
                 .map(|workers| {
                     let execution = execution_config(
                         Some(workers),
-                        (workers > 1).then_some(self.electrical_batch_size).flatten(),
+                        (workers > 1)
+                            .then_some(self.electrical_batch_size)
+                            .flatten(),
+                        self.candidate_workers,
                     )?;
                     Ok((format!("{workers} worker(s)"), execution))
                 })
                 .collect();
         }
-        let execution = execution_config(self.electrical_workers, self.electrical_batch_size)?;
+        let execution = execution_config(
+            self.electrical_workers,
+            self.electrical_batch_size,
+            self.candidate_workers,
+        )?;
         Ok(vec![("selected".to_owned(), execution)])
     }
 }
@@ -899,8 +916,14 @@ impl CliOptions {
 fn execution_config(
     workers: Option<usize>,
     batch_size: Option<usize>,
+    candidate_workers: Option<usize>,
 ) -> Result<MacroExecutionConfig, io::Error> {
     let mut execution = MacroExecutionConfig::sequential();
+    if let Some(workers) = candidate_workers {
+        execution = execution
+            .with_parallel_candidate_build(workers)
+            .map_err(|error| invalid_input(error.to_string()))?;
+    }
     if let Some(workers) = workers {
         execution = execution
             .with_parallel_electrical_analysis(workers)
@@ -922,17 +945,23 @@ fn cli_options() -> Result<CliOptions, io::Error> {
     let usage = || {
         invalid_input(format!(
             "usage: {} <nmos-5d.npz> <pmos-5d.npz> [physical.npz] \
-             [--electrical-workers N] [--electrical-batch-size N] \
+             [--candidate-workers N] [--electrical-workers N] [--electrical-batch-size N] \
              [--compare-electrical-workers 1,2,4,8]",
             Path::new(&executable).display()
         ))
     };
     let mut paths = Vec::new();
+    let mut candidate_workers = None;
     let mut electrical_workers = None;
     let mut electrical_batch_size = None;
     let mut compare_electrical_workers = Vec::new();
     while let Some(argument) = arguments.next() {
-        if argument == "--electrical-workers" {
+        if argument == "--candidate-workers" {
+            candidate_workers = Some(parse_usize_argument(
+                arguments.next().ok_or_else(&usage)?,
+                "--candidate-workers",
+            )?);
+        } else if argument == "--electrical-workers" {
             electrical_workers = Some(parse_usize_argument(
                 arguments.next().ok_or_else(&usage)?,
                 "--electrical-workers",
@@ -944,9 +973,9 @@ fn cli_options() -> Result<CliOptions, io::Error> {
             )?);
         } else if argument == "--compare-electrical-workers" {
             let value = arguments.next().ok_or_else(&usage)?;
-            let value = value.to_str().ok_or_else(|| {
-                invalid_input("--compare-electrical-workers must be valid UTF-8")
-            })?;
+            let value = value
+                .to_str()
+                .ok_or_else(|| invalid_input("--compare-electrical-workers must be valid UTF-8"))?;
             compare_electrical_workers = value
                 .split(',')
                 .map(|worker| parse_usize(worker, "--compare-electrical-workers"))
@@ -972,6 +1001,7 @@ fn cli_options() -> Result<CliOptions, io::Error> {
         nmos_path,
         pmos_path,
         physical_path,
+        candidate_workers,
         electrical_workers,
         electrical_batch_size,
         compare_electrical_workers,
@@ -988,9 +1018,11 @@ fn parse_usize_argument(value: OsString, flag: &str) -> Result<usize, io::Error>
 }
 
 fn parse_usize(value: &str, flag: &str) -> Result<usize, io::Error> {
-    value
-        .parse::<usize>()
-        .map_err(|_| invalid_input(format!("{flag} requires a positive integer, found '{value}'")))
+    value.parse::<usize>().map_err(|_| {
+        invalid_input(format!(
+            "{flag} requires a positive integer, found '{value}'"
+        ))
+    })
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -1005,13 +1037,13 @@ mod tests {
     #[test]
     fn configures_sequential_and_parallel_execution_modes() {
         assert_eq!(
-            execution_config(None, None)
+            execution_config(None, None, None)
                 .unwrap()
                 .electrical_analysis(),
             ElectricalAnalysisExecution::Sequential
         );
         assert_eq!(
-            execution_config(Some(8), Some(13))
+            execution_config(Some(8), Some(13), Some(2))
                 .unwrap()
                 .electrical_analysis(),
             ElectricalAnalysisExecution::Parallel {
@@ -1019,9 +1051,16 @@ mod tests {
                 batch_size: 13,
             }
         );
-        assert!(execution_config(Some(0), None).is_err());
-        assert!(execution_config(None, Some(4)).is_err());
-        assert!(execution_config(Some(1), Some(4)).is_err());
+        assert_eq!(
+            execution_config(None, None, Some(2))
+                .unwrap()
+                .candidate_build(),
+            CandidateBuildExecution::Parallel { workers: 2 }
+        );
+        assert!(execution_config(Some(0), None, None).is_err());
+        assert!(execution_config(None, Some(4), None).is_err());
+        assert!(execution_config(Some(1), Some(4), None).is_err());
+        assert!(execution_config(None, None, Some(0)).is_err());
     }
 
     #[test]
@@ -1030,6 +1069,7 @@ mod tests {
             nmos_path: "nmos.npz".into(),
             pmos_path: "pmos.npz".into(),
             physical_path: None,
+            candidate_workers: Some(2),
             electrical_workers: None,
             electrical_batch_size: Some(5),
             compare_electrical_workers: vec![1, 4, 8],
