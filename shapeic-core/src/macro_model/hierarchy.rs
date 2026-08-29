@@ -8,6 +8,7 @@ use shapeic_lut::DeviceLut;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
+use crate::exploration::candidate::candidate_column_name;
 use crate::primitive::build::PrimitiveBuildValue;
 
 use super::specification::{accepted_candidate_symbols, evaluate_expression};
@@ -173,6 +174,11 @@ impl MacroHierarchyPathInput {
         self.specification_overrides.insert(specification, bounds);
         Ok(())
     }
+
+    /// Returns one path-local public design-variable override.
+    pub fn design_variable_override(&self, variable: &str) -> Option<&PrimitiveBuildValue> {
+        self.design_variable_overrides.get(variable)
+    }
 }
 
 /// Shared data plus independent runtime overrides for concrete hierarchy paths.
@@ -319,7 +325,7 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
                         }]
                     })
             } else {
-                CompactMacroInstanceExplorationInput::from_seed(
+                let mut compact = CompactMacroInstanceExplorationInput::from_seeds(
                     child_macro,
                     instance.name(),
                     Vec::new(),
@@ -333,7 +339,30 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
                             error,
                         })
                         .collect::<Vec<_>>()
-                })
+                })?;
+                let mut aliases_by_variable = BTreeMap::<&str, Vec<&str>>::new();
+                for alias in macro_
+                    .exploration()
+                    .public_input_aliases()
+                    .iter()
+                    .filter(|alias| alias.child_instance() == instance.name())
+                {
+                    aliases_by_variable
+                        .entry(alias.variable())
+                        .or_default()
+                        .push(alias.interface_port());
+                }
+                for (variable, ports) in aliases_by_variable {
+                    let values = public_alias_values(&input, variable).map_err(|error| {
+                        vec![MacroHierarchyLocalInputError::PublicInputAlias {
+                            child_instance: instance.name().to_owned(),
+                            variable: variable.to_owned(),
+                            error,
+                        }]
+                    })?;
+                    compact.add_preview_aliases(&ports, &values);
+                }
+                Ok(compact)
             };
             match compact_input {
                 Ok(seed) => register_local(
@@ -348,6 +377,37 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
         } else {
             Err(errors)
         }
+    }
+}
+
+fn public_alias_values(
+    input: &MacroExplorationInput<'_>,
+    variable: &str,
+) -> Result<Vec<f64>, MacroPublicInputAliasValueError> {
+    let value = input.design_variable_override(variable).ok_or_else(|| {
+        MacroPublicInputAliasValueError::MissingOverride {
+            variable: variable.to_owned(),
+        }
+    })?;
+    let conditions = input.design_variable_conditions(variable);
+    let values = match value {
+        PrimitiveBuildValue::Scalar(value) => conditions
+            .iter()
+            .all(|condition| condition.accepts(*value))
+            .then_some(vec![*value])
+            .unwrap_or_default(),
+        PrimitiveBuildValue::Vector(values) => values
+            .iter()
+            .copied()
+            .filter(|value| conditions.iter().all(|condition| condition.accepts(*value)))
+            .collect(),
+    };
+    if values.is_empty() {
+        Err(MacroPublicInputAliasValueError::EmptyValues {
+            variable: variable.to_owned(),
+        })
+    } else {
+        Ok(values)
     }
 }
 
@@ -422,11 +482,17 @@ impl Error for MacroHierarchyInputRegistrationError {}
 pub enum MacroHierarchyLocalInputError {
     /// A direct exploration-input registration failed.
     Registration(MacroExplorationInputRegistrationError),
-    /// A direct child cannot be represented by its nominal compact seed.
+    /// A direct child cannot be represented by its aligned compact seeds.
     CompactSeed {
         child_instance: String,
         child_macro: String,
         error: MacroCompactSeedError,
+    },
+    /// A parent-owned input alias cannot produce preliminary values.
+    PublicInputAlias {
+        child_instance: String,
+        variable: String,
+        error: MacroPublicInputAliasValueError,
     },
     /// A final parent refresh is missing one resolved child candidate set.
     MissingResolvedChild {
@@ -447,6 +513,14 @@ impl fmt::Display for MacroHierarchyLocalInputError {
                 formatter,
                 "child instance '{child_instance}' of macro '{child_macro}' has an invalid compact seed: {error}"
             ),
+            Self::PublicInputAlias {
+                child_instance,
+                variable,
+                error,
+            } => write!(
+                formatter,
+                "public input alias '{variable}' for child '{child_instance}' is invalid: {error}"
+            ),
             Self::MissingResolvedChild {
                 child_instance,
                 child_macro,
@@ -460,12 +534,41 @@ impl fmt::Display for MacroHierarchyLocalInputError {
 
 impl Error for MacroHierarchyLocalInputError {}
 
+/// Invalid runtime values for a parent-owned public input alias.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MacroPublicInputAliasValueError {
+    /// The parent path did not provide values for the public variable.
+    MissingOverride { variable: String },
+    /// Runtime and inherited restrictions removed every value.
+    EmptyValues { variable: String },
+}
+
+impl fmt::Display for MacroPublicInputAliasValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingOverride { variable } => {
+                write!(
+                    formatter,
+                    "parent variable '{variable}' has no runtime override"
+                )
+            }
+            Self::EmptyValues { variable } => write!(
+                formatter,
+                "parent variable '{variable}' has no values after applying inherited conditions"
+            ),
+        }
+    }
+}
+
+impl Error for MacroPublicInputAliasValueError {}
+
 /// Effective conditions inherited by one child occurrence.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedChildConditions {
     specification_bounds: BTreeMap<String, MacroSpecificationBounds>,
     design_variable_conditions: BTreeMap<String, MacroDesignVariableCondition>,
     audit: Vec<MacroDerivationAuditEntry>,
+    public_input_audit: Vec<MacroPublicInputPropagationAuditEntry>,
     pruned: Option<MacroDerivationPruneReason>,
 }
 
@@ -485,6 +588,11 @@ impl ResolvedChildConditions {
         &self.audit
     }
 
+    /// Returns automatic propagation records for parent-owned public inputs.
+    pub fn public_input_audit(&self) -> &[MacroPublicInputPropagationAuditEntry] {
+        &self.public_input_audit
+    }
+
     /// Returns why this child occurrence was pruned, when conditions conflict.
     pub const fn prune_reason(&self) -> Option<&MacroDerivationPruneReason> {
         self.pruned.as_ref()
@@ -493,6 +601,42 @@ impl ResolvedChildConditions {
     /// Returns whether the derived condition intersection is empty.
     pub const fn is_pruned(&self) -> bool {
         self.pruned.is_some()
+    }
+}
+
+/// Trace of one parent input alias propagated into a child-public variable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroPublicInputPropagationAuditEntry {
+    parent_variable: String,
+    child_instance: String,
+    child_variable: String,
+    interface_port: String,
+    source_rows: usize,
+    values: Vec<f64>,
+    effective_condition: MacroResolvedCondition,
+}
+
+impl MacroPublicInputPropagationAuditEntry {
+    pub fn parent_variable(&self) -> &str {
+        &self.parent_variable
+    }
+    pub fn child_instance(&self) -> &str {
+        &self.child_instance
+    }
+    pub fn child_variable(&self) -> &str {
+        &self.child_variable
+    }
+    pub fn interface_port(&self) -> &str {
+        &self.interface_port
+    }
+    pub const fn source_rows(&self) -> usize {
+        self.source_rows
+    }
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+    pub const fn effective_condition(&self) -> &MacroResolvedCondition {
+        &self.effective_condition
     }
 }
 
@@ -600,8 +744,14 @@ pub fn resolve_child_derivations(
         .enumerate()
         .filter(|(_, rule)| rule.child_instance() == child_instance)
         .collect::<Vec<_>>();
+    let aliases = parent
+        .exploration()
+        .public_input_aliases()
+        .iter()
+        .filter(|alias| alias.child_instance() == child_instance)
+        .collect::<Vec<_>>();
     let mut resolved = ResolvedChildConditions::default();
-    if rules.is_empty() {
+    if rules.is_empty() && aliases.is_empty() {
         return Ok(resolved);
     }
     if parent_result.accepted().is_empty() {
@@ -609,6 +759,45 @@ pub fn resolve_child_derivations(
         return Ok(resolved);
     }
 
+    for alias in aliases {
+        let column =
+            candidate_column_name(child_instance, &alias.interface_port().to_ascii_lowercase());
+        let mut values = Vec::new();
+        for candidate in parent_result.accepted() {
+            let symbols =
+                accepted_candidate_symbols(parent, parent_result.candidate_sets(), candidate)
+                    .map_err(|error| MacroDerivationResolutionError::PublicInputContext {
+                        parent: parent.name().to_owned(),
+                        child_instance: child_instance.to_owned(),
+                        variable: alias.variable().to_owned(),
+                        error,
+                    })?;
+            let value = *symbols.get(&column).ok_or_else(|| {
+                MacroDerivationResolutionError::MissingPublicInputColumn {
+                    parent: parent.name().to_owned(),
+                    child_instance: child_instance.to_owned(),
+                    variable: alias.variable().to_owned(),
+                    column: column.clone(),
+                }
+            })?;
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        let condition = MacroDesignVariableCondition::allowed_values(values.clone());
+        let effective = apply_design_variable(&mut resolved, alias.child_variable(), condition);
+        resolved
+            .public_input_audit
+            .push(MacroPublicInputPropagationAuditEntry {
+                parent_variable: alias.variable().to_owned(),
+                child_instance: child_instance.to_owned(),
+                child_variable: alias.child_variable().to_owned(),
+                interface_port: alias.interface_port().to_owned(),
+                source_rows: parent_result.accepted().len(),
+                values,
+                effective_condition: effective,
+            });
+    }
     for (rule_index, rule) in rules {
         let values = parent_result
             .accepted()
@@ -863,6 +1052,18 @@ pub enum MacroDerivationResolutionError {
         rule_index: usize,
         error: MacroDerivationReductionError,
     },
+    PublicInputContext {
+        parent: String,
+        child_instance: String,
+        variable: String,
+        error: MacroSpecificationEvaluationError,
+    },
+    MissingPublicInputColumn {
+        parent: String,
+        child_instance: String,
+        variable: String,
+        column: String,
+    },
 }
 
 impl fmt::Display for MacroDerivationResolutionError {
@@ -913,6 +1114,24 @@ impl fmt::Display for MacroDerivationResolutionError {
             } => write!(
                 formatter,
                 "macro '{parent}' derivation rule {rule_index} for child '{child_instance}' cannot reduce its values: {error}"
+            ),
+            Self::PublicInputContext {
+                parent,
+                child_instance,
+                variable,
+                error,
+            } => write!(
+                formatter,
+                "macro '{parent}' cannot propagate public input '{variable}' to child '{child_instance}': {error}"
+            ),
+            Self::MissingPublicInputColumn {
+                parent,
+                child_instance,
+                variable,
+                column,
+            } => write!(
+                formatter,
+                "macro '{parent}' public input '{variable}' for child '{child_instance}' has no candidate column '{column}'"
             ),
         }
     }
@@ -1109,8 +1328,9 @@ mod tests {
     use crate::exploration::filter::CandidateFilterReport;
 
     use super::super::{
-        MacroCandidateSets, MacroDerivationRule, MacroExplorationInstanceKind,
-        MacroInstanceCandidateSet,
+        MacroCandidateSets, MacroCompactSeedSet, MacroDerivationRule, MacroDesignVariable,
+        MacroExplorationInstanceKind, MacroInstanceCandidateSet, MacroInterfaceBinding,
+        MacroOutputSource, MacroPublicInputAlias,
     };
     use super::*;
 
@@ -1204,7 +1424,7 @@ mod tests {
             Circuit::builder().resistor("r", "a", "b", 1.0).build(),
             Circuit::builder().resistor("r", "a", "b", 1.0).build(),
         )
-        .with_compact_seed(super::super::MacroCompactSeed::default());
+        .with_compact_seeds(super::super::MacroCompactSeedSet::default());
         let parent = Macro::new(
             "parent",
             Vec::new(),
@@ -1318,6 +1538,131 @@ mod tests {
                 .all(|entry| entry.source_rows() == 2)
         );
         assert!(!resolved.is_pruned());
+    }
+
+    #[test]
+    fn expands_parent_owned_alias_values_across_aligned_compact_seeds() {
+        let child = Macro::new(
+            "child",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "OUT", "0", "r_eq").build(),
+        )
+        .with_design_variable(MacroDesignVariable::new(
+            "bias",
+            crate::primitive::build::PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_interface_binding(MacroInterfaceBinding::new(
+            "OUT",
+            MacroOutputSource::candidate_column("x", "out"),
+        ))
+        .with_compact_seeds(MacroCompactSeedSet::aligned([("r_eq", vec![10.0, 20.0])]));
+        let parent = Macro::new(
+            "parent",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xchild", "child", Vec::<(&str, &str)>::new())
+                .build(),
+            Circuit::default(),
+        )
+        .with_design_variable(MacroDesignVariable::new(
+            "node_voltage",
+            crate::primitive::build::PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "node_voltage",
+            "xchild",
+            "bias",
+            "OUT",
+        ));
+        let catalog = MacroCatalog::from_macros([child, parent.clone()]).unwrap();
+        let root = MacroHierarchyPath::root("parent").unwrap();
+        let mut root_input = MacroHierarchyPathInput::new();
+        root_input
+            .register_design_variable_override(
+                "node_voltage",
+                PrimitiveBuildValue::Vector(vec![0.2, 0.4]),
+            )
+            .unwrap();
+        let mut hierarchy_input = MacroHierarchyExplorationInput::new();
+        hierarchy_input
+            .register_path(root.clone(), root_input)
+            .unwrap();
+
+        let local = hierarchy_input
+            .local_input(&parent, &catalog, &root, None, None)
+            .unwrap();
+        let compact = local.compact_macro_instance("xchild").unwrap();
+
+        assert_eq!(compact.candidates().points.len(), 4);
+        assert_eq!(
+            compact.candidates().points[0].get("r_eq__xchild"),
+            Some(10.0)
+        );
+        assert_eq!(compact.candidates().points[0].get("xchild.out"), Some(0.2));
+        assert_eq!(compact.candidates().points[1].get("xchild.out"), Some(0.4));
+        assert_eq!(
+            compact.candidates().points[2].get("r_eq__xchild"),
+            Some(20.0)
+        );
+        assert_eq!(compact.interface_ports(), ["OUT"]);
+    }
+
+    #[test]
+    fn propagates_only_surviving_parent_alias_values_to_the_child() {
+        let parent = Macro::new(
+            "parent",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xchild", "child", Vec::<(&str, &str)>::new())
+                .build(),
+            Circuit::default(),
+        )
+        .with_design_variable(MacroDesignVariable::new(
+            "node_voltage",
+            crate::primitive::build::PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "node_voltage",
+            "xchild",
+            "bias",
+            "OUT",
+        ));
+        let candidate_sets = MacroCandidateSets {
+            instances: vec![MacroInstanceCandidateSet {
+                instance_path: "xchild".to_owned(),
+                kind: MacroExplorationInstanceKind::CompactMacro,
+                candidates: CandidateSet::new(
+                    "xchild",
+                    vec![
+                        CandidatePoint::new(vec![("xchild.out".to_owned(), 0.2)]),
+                        CandidatePoint::new(vec![("xchild.out".to_owned(), 0.4)]),
+                        CandidatePoint::new(vec![("xchild.out".to_owned(), 0.6)]),
+                    ],
+                ),
+                filter_report: CandidateFilterReport::default(),
+                interface_ports: vec!["OUT".to_owned()],
+                compact_provenance: None,
+            }],
+        };
+        let result = MacroExplorationResult::test_fixture(
+            "parent",
+            candidate_sets,
+            vec![(vec![0], Vec::new()), (vec![2], Vec::new())],
+        );
+
+        let resolved = resolve_child_derivations(&parent, &result, "xchild").unwrap();
+
+        assert_eq!(
+            resolved.design_variable_conditions().get("bias"),
+            Some(&MacroDesignVariableCondition::allowed_values([0.2, 0.6]))
+        );
+        assert_eq!(resolved.public_input_audit().len(), 1);
+        assert_eq!(resolved.public_input_audit()[0].values(), [0.2, 0.6]);
+        assert!(resolved.audit().is_empty());
     }
 
     #[test]

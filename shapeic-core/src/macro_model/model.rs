@@ -58,9 +58,15 @@ impl Macro {
         self
     }
 
-    /// Sets the nominal compact point used before this macro is explored as a child.
-    pub fn with_compact_seed(mut self, seed: MacroCompactSeed) -> Self {
-        self.exploration.compact_seed = Some(seed);
+    /// Exposes a parent-owned variable as one direct child's public input.
+    pub fn with_public_input_alias(mut self, alias: MacroPublicInputAlias) -> Self {
+        self.exploration.public_input_aliases.push(alias);
+        self
+    }
+
+    /// Sets the aligned compact points used before this macro is explored as a child.
+    pub fn with_compact_seeds(mut self, seeds: MacroCompactSeedSet) -> Self {
+        self.exploration.compact_seeds = Some(seeds);
         self
     }
 
@@ -161,7 +167,8 @@ pub struct MacroExploration {
     specifications: Vec<MacroSpecification>,
     primitive_defaults: Vec<MacroPrimitiveDefault>,
     design_variables: Vec<MacroDesignVariable>,
-    compact_seed: Option<MacroCompactSeed>,
+    public_input_aliases: Vec<MacroPublicInputAlias>,
+    compact_seeds: Option<MacroCompactSeedSet>,
     derivation_rules: Vec<MacroDerivationRule>,
     compact_outputs: Vec<MacroCompactOutputBinding>,
     interface_bindings: Vec<MacroInterfaceBinding>,
@@ -197,9 +204,15 @@ impl MacroExploration {
         self
     }
 
-    /// Sets the nominal compact point used by a parent preview.
-    pub fn with_compact_seed(mut self, seed: MacroCompactSeed) -> Self {
-        self.compact_seed = Some(seed);
+    /// Adds one parent-owned input alias for a direct compact child.
+    pub fn with_public_input_alias(mut self, alias: MacroPublicInputAlias) -> Self {
+        self.public_input_aliases.push(alias);
+        self
+    }
+
+    /// Sets the aligned compact points used by a parent preview.
+    pub fn with_compact_seeds(mut self, seeds: MacroCompactSeedSet) -> Self {
+        self.compact_seeds = Some(seeds);
         self
     }
 
@@ -269,9 +282,14 @@ impl MacroExploration {
             .find(|variable| variable.name == name)
     }
 
-    /// Returns the nominal compact point, when this macro can seed a parent preview.
-    pub const fn compact_seed(&self) -> Option<&MacroCompactSeed> {
-        self.compact_seed.as_ref()
+    /// Returns parent-owned aliases exposed to compact children during previews.
+    pub fn public_input_aliases(&self) -> &[MacroPublicInputAlias] {
+        &self.public_input_aliases
+    }
+
+    /// Returns the aligned compact points, when this macro can seed a parent preview.
+    pub const fn compact_seeds(&self) -> Option<&MacroCompactSeedSet> {
+        self.compact_seeds.as_ref()
     }
 
     /// Returns child derivation rules in declaration order.
@@ -363,6 +381,52 @@ pub struct MacroDesignVariable {
     bindings: Vec<MacroDesignVariableBinding>,
 }
 
+/// Parent-owned design variable exposed as one direct child's public input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroPublicInputAlias {
+    variable: String,
+    child_instance: String,
+    child_variable: String,
+    interface_port: String,
+}
+
+impl MacroPublicInputAlias {
+    /// Creates an alias from a parent variable to a child variable and port.
+    pub fn new(
+        variable: impl Into<String>,
+        child_instance: impl Into<String>,
+        child_variable: impl Into<String>,
+        interface_port: impl Into<String>,
+    ) -> Self {
+        Self {
+            variable: variable.into(),
+            child_instance: child_instance.into(),
+            child_variable: child_variable.into(),
+            interface_port: interface_port.into(),
+        }
+    }
+
+    /// Returns the parent-public variable that owns the explored values.
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+
+    /// Returns the direct child instance receiving the surviving values.
+    pub fn child_instance(&self) -> &str {
+        &self.child_instance
+    }
+
+    /// Returns the child-public design variable restricted after the preview.
+    pub fn child_variable(&self) -> &str {
+        &self.child_variable
+    }
+
+    /// Returns the child interface port carrying the value in parent candidates.
+    pub fn interface_port(&self) -> &str {
+        &self.interface_port
+    }
+}
+
 impl MacroDesignVariable {
     /// Creates a public variable with its required input type and bindings.
     pub fn new(
@@ -438,42 +502,64 @@ impl MacroDesignVariableCondition {
     }
 }
 
-/// One nominal parent-visible compact candidate for a macro used as a child.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MacroCompactSeed {
-    compact_parameters: Vec<(String, f64)>,
-    interface_values: Vec<(String, f64)>,
+/// Correlated compact-model parameter vectors used for a parent preview.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroCompactSeedSet {
+    compact_parameters: Vec<(String, Vec<f64>)>,
+    row_count: usize,
 }
 
-impl MacroCompactSeed {
-    /// Creates a seed from unscoped compact parameter and public interface names.
-    pub fn new<P, I, PN, IN>(compact_parameters: P, interface_values: I) -> Self
+impl MacroCompactSeedSet {
+    /// Creates aligned seed rows from unscoped compact-parameter vectors.
+    ///
+    /// Every vector is interpreted by index: values at index `i` form one
+    /// correlated compact-model candidate. Validation rejects empty vectors or
+    /// vectors with different lengths.
+    pub fn aligned<P, N>(compact_parameters: P) -> Self
     where
-        P: IntoIterator<Item = (PN, f64)>,
-        I: IntoIterator<Item = (IN, f64)>,
-        PN: Into<String>,
-        IN: Into<String>,
+        P: IntoIterator<Item = (N, Vec<f64>)>,
+        N: Into<String>,
     {
+        let compact_parameters = compact_parameters
+            .into_iter()
+            .map(|(name, values)| (name.into(), values))
+            .collect::<Vec<_>>();
+        let row_count = compact_parameters
+            .first()
+            .map_or(0, |(_, values)| values.len());
         Self {
-            compact_parameters: compact_parameters
-                .into_iter()
-                .map(|(name, value)| (name.into(), value))
-                .collect(),
-            interface_values: interface_values
-                .into_iter()
-                .map(|(name, value)| (name.into(), value))
-                .collect(),
+            compact_parameters,
+            row_count,
         }
     }
 
-    /// Returns unscoped compact-model parameter values.
-    pub fn compact_parameters(&self) -> &[(String, f64)] {
+    /// Creates the single preview row needed by a parameter-free compact model.
+    pub const fn constant() -> Self {
+        Self {
+            compact_parameters: Vec::new(),
+            row_count: 1,
+        }
+    }
+
+    /// Returns unscoped compact-model parameter vectors.
+    pub fn compact_parameters(&self) -> &[(String, Vec<f64>)] {
         &self.compact_parameters
     }
 
-    /// Returns unscoped public interface values.
-    pub fn interface_values(&self) -> &[(String, f64)] {
-        &self.interface_values
+    /// Returns the number of correlated preview rows.
+    pub const fn len(&self) -> usize {
+        self.row_count
+    }
+
+    /// Returns whether the set contains no preview rows.
+    pub const fn is_empty(&self) -> bool {
+        self.row_count == 0
+    }
+}
+
+impl Default for MacroCompactSeedSet {
+    fn default() -> Self {
+        Self::constant()
     }
 }
 

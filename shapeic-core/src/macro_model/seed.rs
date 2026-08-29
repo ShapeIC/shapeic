@@ -1,42 +1,55 @@
-//! Validation and instance scoping of nominal compact seeds.
+//! Validation, transposition, and instance scoping of aligned compact seeds.
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
 use crate::circuit::{CircuitValue, LinearElement};
-use crate::exploration::candidate::{CandidatePoint, CandidateSet, candidate_column_name};
+use crate::exploration::candidate::{CandidatePoint, CandidateSet};
 use crate::exploration::filter::CandidateFilter;
 use crate::netlist::names::compact_model_param_name;
 
-use super::{CompactMacroInstanceExplorationInput, Macro, MacroCompactSeed};
+use super::{CompactMacroInstanceExplorationInput, Macro, MacroCompactSeedSet};
 
 /// One invalid compact seed declaration or projection request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroCompactSeedError {
-    MissingSeed { macro_name: String },
+    MissingSeeds {
+        macro_name: String,
+    },
+    EmptySeedSet,
     EmptyInstancePath,
     EmptyParameterName,
-    DuplicateParameter { parameter: String },
-    MissingParameter { parameter: String },
-    UnknownParameter { parameter: String },
-    NonFiniteParameter { parameter: String },
-    EmptyInterfacePort,
-    DuplicateInterfacePort { port: String },
-    MissingInterfacePort { port: String },
-    UnknownInterfacePort { port: String },
-    NonFiniteInterfaceValue { port: String },
+    DuplicateParameter {
+        parameter: String,
+    },
+    MissingParameter {
+        parameter: String,
+    },
+    UnknownParameter {
+        parameter: String,
+    },
+    EmptyParameterValues {
+        parameter: String,
+    },
+    ParameterLengthMismatch {
+        parameter: String,
+        expected: usize,
+        actual: usize,
+    },
+    NonFiniteParameter {
+        parameter: String,
+        index: usize,
+    },
 }
 
 impl fmt::Display for MacroCompactSeedError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingSeed { macro_name } => {
-                write!(
-                    formatter,
-                    "macro '{macro_name}' has no nominal compact seed"
-                )
+            Self::MissingSeeds { macro_name } => {
+                write!(formatter, "macro '{macro_name}' has no compact seed set")
             }
+            Self::EmptySeedSet => formatter.write_str("compact seed set contains no rows"),
             Self::EmptyInstancePath => formatter.write_str("compact seed instance path is empty"),
             Self::EmptyParameterName => formatter.write_str("compact seed parameter name is empty"),
             Self::DuplicateParameter { parameter } => {
@@ -57,32 +70,26 @@ impl fmt::Display for MacroCompactSeedError {
                     "compact seed contains unknown parameter '{parameter}'"
                 )
             }
-            Self::NonFiniteParameter { parameter } => {
+            Self::EmptyParameterValues { parameter } => {
                 write!(
                     formatter,
-                    "compact seed parameter '{parameter}' is not finite"
+                    "compact seed parameter '{parameter}' has no values"
                 )
             }
-            Self::EmptyInterfacePort => formatter.write_str("compact seed interface port is empty"),
-            Self::DuplicateInterfacePort { port } => {
+            Self::ParameterLengthMismatch {
+                parameter,
+                expected,
+                actual,
+            } => {
                 write!(
                     formatter,
-                    "compact seed interface port '{port}' is duplicated"
+                    "compact seed parameter '{parameter}' has {actual} values; expected {expected}"
                 )
             }
-            Self::MissingInterfacePort { port } => {
-                write!(formatter, "compact seed is missing interface port '{port}'")
-            }
-            Self::UnknownInterfacePort { port } => {
+            Self::NonFiniteParameter { parameter, index } => {
                 write!(
                     formatter,
-                    "compact seed contains unknown interface port '{port}'"
-                )
-            }
-            Self::NonFiniteInterfaceValue { port } => {
-                write!(
-                    formatter,
-                    "compact seed interface value '{port}' is not finite"
+                    "compact seed parameter '{parameter}' is not finite at row {index}"
                 )
             }
         }
@@ -91,20 +98,17 @@ impl fmt::Display for MacroCompactSeedError {
 
 impl Error for MacroCompactSeedError {}
 
-pub(super) fn validate_compact_seed(
+pub(super) fn validate_compact_seeds(
     macro_: &Macro,
-    seed: &MacroCompactSeed,
+    seeds: &MacroCompactSeedSet,
 ) -> Vec<MacroCompactSeedError> {
     let required_parameters = compact_parameters(macro_);
-    let required_interfaces = macro_
-        .exploration()
-        .interface_bindings()
-        .iter()
-        .map(|binding| binding.port())
-        .collect::<BTreeSet<_>>();
     let mut errors = Vec::new();
+    if seeds.is_empty() {
+        errors.push(MacroCompactSeedError::EmptySeedSet);
+    }
     let mut parameters = BTreeSet::new();
-    for (parameter, value) in seed.compact_parameters() {
+    for (parameter, values) in seeds.compact_parameters() {
         if parameter.trim().is_empty() {
             errors.push(MacroCompactSeedError::EmptyParameterName);
             continue;
@@ -119,10 +123,24 @@ pub(super) fn validate_compact_seed(
                 parameter: parameter.clone(),
             });
         }
-        if !value.is_finite() {
-            errors.push(MacroCompactSeedError::NonFiniteParameter {
+        if values.is_empty() {
+            errors.push(MacroCompactSeedError::EmptyParameterValues {
                 parameter: parameter.clone(),
             });
+        } else if values.len() != seeds.len() {
+            errors.push(MacroCompactSeedError::ParameterLengthMismatch {
+                parameter: parameter.clone(),
+                expected: seeds.len(),
+                actual: values.len(),
+            });
+        }
+        for (index, value) in values.iter().enumerate() {
+            if !value.is_finite() {
+                errors.push(MacroCompactSeedError::NonFiniteParameter {
+                    parameter: parameter.clone(),
+                    index,
+                });
+            }
         }
     }
     for parameter in required_parameters.difference(&parameters) {
@@ -130,42 +148,20 @@ pub(super) fn validate_compact_seed(
             parameter: (*parameter).to_owned(),
         });
     }
-
-    let mut interfaces = BTreeSet::new();
-    for (port, value) in seed.interface_values() {
-        if port.trim().is_empty() {
-            errors.push(MacroCompactSeedError::EmptyInterfacePort);
-            continue;
-        }
-        if !interfaces.insert(port.as_str()) {
-            errors.push(MacroCompactSeedError::DuplicateInterfacePort { port: port.clone() });
-        }
-        if !required_interfaces.contains(port.as_str()) {
-            errors.push(MacroCompactSeedError::UnknownInterfacePort { port: port.clone() });
-        }
-        if !value.is_finite() {
-            errors.push(MacroCompactSeedError::NonFiniteInterfaceValue { port: port.clone() });
-        }
-    }
-    for port in required_interfaces.difference(&interfaces) {
-        errors.push(MacroCompactSeedError::MissingInterfacePort {
-            port: (*port).to_owned(),
-        });
-    }
     errors
 }
 
-/// Validates that a macro has one complete nominal compact seed.
-pub fn validate_macro_compact_seed(macro_: &Macro) -> Vec<MacroCompactSeedError> {
-    match macro_.exploration().compact_seed() {
-        Some(seed) => validate_compact_seed(macro_, seed),
-        None => vec![MacroCompactSeedError::MissingSeed {
+/// Validates that a macro has a complete aligned compact seed set.
+pub fn validate_macro_compact_seeds(macro_: &Macro) -> Vec<MacroCompactSeedError> {
+    match macro_.exploration().compact_seeds() {
+        Some(seeds) => validate_compact_seeds(macro_, seeds),
+        None => vec![MacroCompactSeedError::MissingSeeds {
             macro_name: macro_.name().to_owned(),
         }],
     }
 }
 
-pub(super) fn build_compact_seed_input(
+pub(super) fn build_compact_seed_set_input(
     macro_: &Macro,
     instance_path: String,
     filters: Vec<CandidateFilter>,
@@ -173,36 +169,34 @@ pub(super) fn build_compact_seed_input(
     if instance_path.trim().is_empty() {
         return Err(vec![MacroCompactSeedError::EmptyInstancePath]);
     }
-    let errors = validate_macro_compact_seed(macro_);
+    let errors = validate_macro_compact_seeds(macro_);
     if !errors.is_empty() {
         return Err(errors);
     }
-    let seed = macro_
+    let seeds = macro_
         .exploration()
-        .compact_seed()
-        .expect("successful seed validation resolved the compact seed");
-
-    let mut values =
-        Vec::with_capacity(seed.compact_parameters().len() + seed.interface_values().len());
-    values.extend(
-        seed.compact_parameters().iter().map(|(parameter, value)| {
-            (compact_model_param_name(parameter, &instance_path), *value)
-        }),
-    );
-    values.extend(seed.interface_values().iter().map(|(port, value)| {
-        (
-            candidate_column_name(&instance_path, &port.to_ascii_lowercase()),
-            *value,
-        )
-    }));
+        .compact_seeds()
+        .expect("successful seed validation resolved the compact seed set");
+    let points = (0..seeds.len())
+        .map(|index| {
+            CandidatePoint::new(
+                seeds
+                    .compact_parameters()
+                    .iter()
+                    .map(|(parameter, values)| {
+                        (
+                            compact_model_param_name(parameter, &instance_path),
+                            values[index],
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
     Ok(CompactMacroInstanceExplorationInput {
-        candidates: CandidateSet::new(instance_path.clone(), vec![CandidatePoint::new(values)]),
+        candidates: CandidateSet::new(instance_path, points),
         filters,
-        interface_ports: seed
-            .interface_values()
-            .iter()
-            .map(|(port, _)| port.clone())
-            .collect(),
+        interface_ports: Vec::new(),
         provenance: None,
     })
 }
@@ -235,12 +229,10 @@ fn element_value(element: &LinearElement) -> &CircuitValue {
 
 #[cfg(test)]
 mod tests {
-    use crate::circuit::Circuit;
-    use crate::macro_model::{MacroInterfaceBinding, MacroOutputSource};
-
     use super::*;
+    use crate::circuit::Circuit;
 
-    fn child(seed: MacroCompactSeed) -> Macro {
+    fn child(seeds: MacroCompactSeedSet) -> Macro {
         Macro::new(
             "child",
             Vec::new(),
@@ -250,37 +242,36 @@ mod tests {
                 .vccs("g", "OUT", "0", "IN", "0", "gm_eq")
                 .build(),
         )
-        .with_interface_binding(MacroInterfaceBinding::new(
-            "OUT",
-            MacroOutputSource::candidate_column("x", "x.out"),
-        ))
-        .with_compact_seed(seed)
+        .with_compact_seeds(seeds)
     }
 
     #[test]
-    fn scopes_one_valid_seed_for_each_parent_instance() {
-        let macro_ = child(MacroCompactSeed::new(
-            [("r_eq", 10.0), ("gm_eq", 2.0)],
-            [("OUT", 0.7)],
-        ));
+    fn transposes_and_scopes_aligned_seeds_for_each_parent_instance() {
+        let macro_ = child(MacroCompactSeedSet::aligned([
+            ("r_eq", vec![10.0, 20.0]),
+            ("gm_eq", vec![2.0, 3.0]),
+        ]));
 
-        let first = build_compact_seed_input(&macro_, "x1".to_owned(), Vec::new()).unwrap();
-        let second = build_compact_seed_input(&macro_, "x2".to_owned(), Vec::new()).unwrap();
+        let first = build_compact_seed_set_input(&macro_, "x1".to_owned(), Vec::new()).unwrap();
+        let second = build_compact_seed_set_input(&macro_, "x2".to_owned(), Vec::new()).unwrap();
 
         assert_eq!(first.candidates.points[0].get("r_eq__x1"), Some(10.0));
-        assert_eq!(first.candidates.points[0].get("x1.out"), Some(0.7));
-        assert_eq!(first.interface_ports, ["OUT"]);
+        assert_eq!(first.candidates.points[0].get("gm_eq__x1"), Some(2.0));
+        assert_eq!(first.candidates.points[1].get("r_eq__x1"), Some(20.0));
+        assert_eq!(first.candidates.points[1].get("gm_eq__x1"), Some(3.0));
+        assert!(first.interface_ports.is_empty());
         assert_eq!(second.candidates.points[0].get("r_eq__x2"), Some(10.0));
         assert!(first.provenance.is_none());
     }
 
     #[test]
-    fn rejects_missing_unknown_duplicate_and_non_finite_seed_fields() {
-        let macro_ = child(MacroCompactSeed::new(
-            [("r_eq", 1.0), ("r_eq", 2.0), ("extra", f64::NAN)],
-            [("OTHER", 0.0)],
-        ));
-        let errors = validate_compact_seed(&macro_, macro_.exploration().compact_seed().unwrap());
+    fn rejects_invalid_parameter_names_values_and_lengths() {
+        let macro_ = child(MacroCompactSeedSet::aligned([
+            ("r_eq", vec![1.0, 2.0]),
+            ("r_eq", vec![3.0, 4.0]),
+            ("extra", vec![f64::NAN]),
+        ]));
+        let errors = validate_compact_seeds(&macro_, macro_.exploration().compact_seeds().unwrap());
 
         assert!(errors.iter().any(|error| matches!(
             error,
@@ -292,12 +283,33 @@ mod tests {
         )));
         assert!(errors.iter().any(|error| matches!(
             error,
-            MacroCompactSeedError::UnknownInterfacePort { port } if port == "OTHER"
+            MacroCompactSeedError::UnknownParameter { parameter } if parameter == "extra"
         )));
         assert!(errors.iter().any(|error| matches!(
             error,
-            MacroCompactSeedError::MissingInterfacePort { port } if port == "OUT"
+            MacroCompactSeedError::ParameterLengthMismatch { parameter, expected: 2, actual: 1 }
+                if parameter == "extra"
         )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroCompactSeedError::NonFiniteParameter { parameter, index: 0 }
+                if parameter == "extra"
+        )));
+    }
+
+    #[test]
+    fn supports_one_seed_row_for_a_parameter_free_compact_model() {
+        let macro_ = Macro::new(
+            "constant",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "OUT", "0", 10.0).build(),
+        )
+        .with_compact_seeds(MacroCompactSeedSet::constant());
+
+        let input = build_compact_seed_set_input(&macro_, "x1".to_owned(), Vec::new()).unwrap();
+        assert_eq!(input.candidates.points.len(), 1);
+        assert!(input.candidates.points[0].values.is_empty());
     }
 
     #[test]
@@ -310,8 +322,8 @@ mod tests {
         );
 
         assert_eq!(
-            validate_macro_compact_seed(&macro_),
-            [MacroCompactSeedError::MissingSeed {
+            validate_macro_compact_seeds(&macro_),
+            [MacroCompactSeedError::MissingSeeds {
                 macro_name: "child".to_owned(),
             }]
         );

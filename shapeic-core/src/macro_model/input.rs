@@ -8,7 +8,7 @@ use shapeic_lut::DeviceLut;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
-use crate::exploration::candidate::CandidateSet;
+use crate::exploration::candidate::{CandidatePoint, CandidateSet, candidate_column_name};
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::{PrimitiveBuildInput, PrimitiveBuildInputKind, PrimitiveBuildValue};
 
@@ -91,13 +91,34 @@ impl CompactMacroInstanceExplorationInput {
         }
     }
 
-    /// Creates one nominal compact candidate for an unexplored child instance.
-    pub fn from_seed(
+    /// Creates aligned compact candidates for an unexplored child instance.
+    pub fn from_seeds(
         macro_: &Macro,
         instance_path: impl Into<String>,
         filters: Vec<CandidateFilter>,
     ) -> Result<Self, Vec<super::MacroCompactSeedError>> {
-        super::seed::build_compact_seed_input(macro_, instance_path.into(), filters)
+        super::seed::build_compact_seed_set_input(macro_, instance_path.into(), filters)
+    }
+
+    pub(super) fn add_preview_aliases(&mut self, interface_ports: &[&str], values: &[f64]) {
+        let columns = interface_ports
+            .iter()
+            .map(|port| candidate_column_name(&self.candidates.name, &port.to_ascii_lowercase()))
+            .collect::<Vec<_>>();
+        let mut points = Vec::with_capacity(self.candidates.points.len() * values.len());
+        for point in &self.candidates.points {
+            for value in values {
+                let mut point_values = point.values.clone();
+                point_values.extend(columns.iter().map(|column| (column.clone(), *value)));
+                points.push(CandidatePoint::new(point_values));
+            }
+        }
+        self.candidates.points = points;
+        for port in interface_ports {
+            if !self.interface_ports.iter().any(|existing| existing == port) {
+                self.interface_ports.push((*port).to_owned());
+            }
+        }
     }
 
     pub(super) fn empty_for_pruned_child(macro_: &Macro, instance_path: String) -> Self {

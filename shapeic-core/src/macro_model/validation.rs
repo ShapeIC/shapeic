@@ -8,8 +8,8 @@ use crate::circuit::{BlockRef, Circuit, CircuitValue, LinearElement};
 use super::specification::PreparedMacroSpecifications;
 use super::{
     Macro, MacroCatalog, MacroExplorationDefinitionError, MacroOutputSource,
-    MacroSpecificationEvaluationError, MacroTestbenchSource,
-    validate_macro_derivation_targets, validate_macro_exploration_definition,
+    MacroSpecificationEvaluationError, MacroTestbenchSource, validate_macro_derivation_targets,
+    validate_macro_exploration_definition, validate_macro_public_input_aliases,
 };
 
 /// Identifies which circuit of a macro contains a validation error.
@@ -709,6 +709,14 @@ pub fn validate_macro(
                 error,
             }),
     );
+    errors.extend(
+        validate_macro_public_input_aliases(macro_, macro_catalog)
+            .into_iter()
+            .map(|error| MacroValidationError::InvalidExplorationDefinition {
+                macro_name: macro_name.clone(),
+                error,
+            }),
+    );
     validate_output_bindings(macro_, &mut errors);
     errors
 }
@@ -930,14 +938,17 @@ fn validate_primitive_physical_model(
             instance,
             primitive,
         });
-    } else if !primitive.small_signal.as_ref().is_some_and(|model| {
-        model.branch(physical.operating_point_branch()).is_some()
-    }) || !primitive.build.as_ref().is_some_and(|build| {
-        build
-            .lut
-            .iter()
-            .any(|lut| lut.name == physical.operating_point_branch())
-    }) {
+    } else if !primitive
+        .small_signal
+        .as_ref()
+        .is_some_and(|model| model.branch(physical.operating_point_branch()).is_some())
+        || !primitive.build.as_ref().is_some_and(|build| {
+            build
+                .lut
+                .iter()
+                .any(|lut| lut.name == physical.operating_point_branch())
+        })
+    {
         let (macro_name, instance, primitive) = context();
         errors.push(MacroValidationError::UnknownPhysicalOperatingPointBranch {
             macro_name,
@@ -1726,11 +1737,7 @@ mod tests {
         primitive.physical_model = Some(PrimitivePhysicalModel::new(
             "",
             "missing",
-            [
-                ("", ""),
-                ("D", "UNKNOWN"),
-                ("D", "VIN"),
-            ],
+            [("", ""), ("D", "UNKNOWN"), ("D", "VIN")],
         ));
         primitives.register(primitive);
         let macros = MacroCatalog::from_macros([leaf_macro()]).unwrap();
@@ -1746,18 +1753,20 @@ mod tests {
             MacroValidationError::UnknownPhysicalOperatingPointBranch { branch, .. }
                 if branch == "missing"
         )));
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            MacroValidationError::EmptyPhysicalPort { .. }
-        )));
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, MacroValidationError::EmptyPhysicalPort { .. }))
+        );
         assert!(errors.iter().any(|error| matches!(
             error,
             MacroValidationError::DuplicatePhysicalPort { port, .. } if port == "D"
         )));
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            MacroValidationError::EmptyPhysicalPin { .. }
-        )));
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, MacroValidationError::EmptyPhysicalPin { .. }))
+        );
         assert!(errors.iter().any(|error| matches!(
             error,
             MacroValidationError::UnknownPhysicalPin { pin, .. } if pin == "UNKNOWN"

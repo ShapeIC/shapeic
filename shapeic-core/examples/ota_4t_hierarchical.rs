@@ -12,12 +12,13 @@ use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
 use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::{
-    Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroCompactSeed,
+    Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroCompactSeedSet,
     MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDesignVariable,
     MacroDesignVariableBinding, MacroExecutionConfig, MacroHierarchyExplorationInput,
-    MacroHierarchyExplorationResult, MacroInterfaceBinding, MacroOutputSource, MacroPort,
-    MacroPortRole, MacroPrimitiveDefault, MacroSpecification, MacroSpecificationBounds,
-    MacroSpecificationSource, explore_macro_hierarchy,
+    MacroHierarchyExplorationResult, MacroHierarchyPath, MacroHierarchyPathInput,
+    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroPrimitiveDefault,
+    MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
+    explore_macro_hierarchy,
 };
 use shapeic_core::primitive::build::{
     PrimitiveBuildInput, PrimitiveBuildInputKind, PrimitiveBuildValue,
@@ -142,6 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut input = MacroHierarchyExplorationInput::new();
     input.register_device_model("nmos", nmos)?;
     input.register_device_model("pmos", pmos)?;
+    input.register_path(MacroHierarchyPath::root(TOP_MACRO)?, top_path_input(spec))?;
     input.set_execution_config(options.execution_config()?);
 
     let result = explore_macro_hierarchy(TOP_MACRO, &macro_catalog, &primitive_catalog, &input)?;
@@ -215,7 +217,7 @@ fn ota_macro(spec: PdkSpec, testbench: PathBuf) -> Macro {
             PrimitiveBuildInputKind::Vector,
             vec![MacroDesignVariableBinding::new(DIFF_PAIR_INSTANCE, "VTAIL")],
         ))
-        .with_compact_seed(ota_seed(spec))
+        .with_compact_seeds(ota_seeds())
         .with_compact_output(MacroCompactOutputBinding::new(
             "gm_dp",
             MacroOutputSource::candidate_column(DIFF_PAIR_INSTANCE, DIFF_PAIR_GM_COLUMN),
@@ -280,23 +282,33 @@ fn system_macro(testbench: PathBuf) -> Macro {
             MacroSpecificationSource::ac_metric(SYSTEM_TESTBENCH, AcMetric::DcGainDb),
             MacroSpecificationBounds::at_least(MIN_DC_GAIN_DB),
         ))
+        .with_design_variable(MacroDesignVariable::new(
+            "vout",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_design_variable(MacroDesignVariable::new(
+            "vbias",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "vout",
+            OTA_INSTANCE,
+            "vout",
+            "VOUT",
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "vbias",
+            OTA_INSTANCE,
+            "vbias",
+            "IBIAS",
+        ))
         .with_derivation_rule(MacroDerivationRule::new(
             OTA_INSTANCE,
             MIN_DC_GAIN_DB.to_string(),
             MacroDerivationReduction::Minimum,
             MacroDerivationTarget::specification_minimum(GAIN_SPECIFICATION),
-        ))
-        .with_derivation_rule(MacroDerivationRule::new(
-            OTA_INSTANCE,
-            "xota.vout",
-            MacroDerivationReduction::UniqueValues,
-            MacroDerivationTarget::design_variable_allowed_values("vout"),
-        ))
-        .with_derivation_rule(MacroDerivationRule::new(
-            OTA_INSTANCE,
-            "xota.ibias",
-            MacroDerivationReduction::UniqueValues,
-            MacroDerivationTarget::design_variable_allowed_values("vbias"),
         ))
         .with_compact_output(MacroCompactOutputBinding::new(
             "gm_dp",
@@ -336,6 +348,23 @@ fn system_macro(testbench: PathBuf) -> Macro {
         ))
 }
 
+fn top_path_input(spec: PdkSpec) -> MacroHierarchyPathInput {
+    let mut input = MacroHierarchyPathInput::new();
+    input
+        .register_design_variable_override(
+            "vout",
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+        )
+        .expect("top-level VOUT is registered once");
+    input
+        .register_design_variable_override(
+            "vbias",
+            PrimitiveBuildValue::Vector(linspace(spec.vbias_start, spec.vbias_stop, VBIAS_POINTS)),
+        )
+        .expect("top-level VBIAS is registered once");
+    input
+}
+
 fn ota_ports() -> Vec<MacroPort> {
     vec![
         MacroPort::new("VINP", MacroPortRole::Input),
@@ -360,22 +389,13 @@ fn ota_compact_model() -> Circuit {
         .build()
 }
 
-fn ota_seed(spec: PdkSpec) -> MacroCompactSeed {
-    MacroCompactSeed::new(
-        [
-            ("gm_dp", 1.0e-3),
-            ("ro_dp", 100.0e3),
-            ("gm_cm", 1.0e-3),
-            ("ro_cm", 100.0e3),
-        ],
-        [
-            ("VINP", spec.vin),
-            ("VINN", spec.vin),
-            ("VOUT", spec.vout_start),
-            ("IBIAS", spec.vbias_start),
-            ("VDD", spec.vdd),
-        ],
-    )
+fn ota_seeds() -> MacroCompactSeedSet {
+    MacroCompactSeedSet::aligned([
+        ("gm_dp", vec![0.7e-3, 1.0e-3, 1.3e-3]),
+        ("ro_dp", vec![140.0e3, 100.0e3, 75.0e3]),
+        ("gm_cm", vec![0.7e-3, 1.0e-3, 1.3e-3]),
+        ("ro_cm", vec![140.0e3, 100.0e3, 75.0e3]),
+    ])
 }
 
 fn ac_analysis() -> AcAnalysis {
@@ -451,7 +471,8 @@ fn validate_result(result: &MacroHierarchyExplorationResult) -> Result<(), io::E
     let derivation = result
         .derivation(&expected_child)
         .ok_or_else(|| io::Error::other("the OTA child has no derivation record"))?;
-    if derivation.conditions().audit().len() != 3
+    if derivation.conditions().audit().len() != 1
+        || derivation.conditions().public_input_audit().len() != 2
         || !derivation
             .conditions()
             .specification_bounds()
@@ -516,6 +537,18 @@ fn print_derivations(result: &MacroHierarchyExplorationResult) {
                 entry.reduction(),
                 entry.source_rows(),
                 entry.reduced_value(),
+                entry.effective_condition(),
+            );
+        }
+        for entry in derivation.conditions().public_input_audit() {
+            println!(
+                "    input {} via {}.{} -> {}: {:?} over {} row(s); {:?}",
+                entry.parent_variable(),
+                entry.child_instance(),
+                entry.interface_port(),
+                entry.child_variable(),
+                entry.values(),
+                entry.source_rows(),
                 entry.effective_condition(),
             );
         }
@@ -758,7 +791,7 @@ fn parse_usize(value: OsString, flag: &str) -> Result<usize, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shapeic_core::macro_model::{validate_macro_catalog, validate_macro_compact_seed};
+    use shapeic_core::macro_model::{validate_macro_catalog, validate_macro_compact_seeds};
 
     #[test]
     fn defines_a_valid_parent_child_catalog_and_seed() {
@@ -767,7 +800,7 @@ mod tests {
             load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives")).unwrap();
         let testbench = manifest.join("examples/ota_4t_hierarchical/gain.spice");
         let ota = ota_macro(IHP_SPEC, testbench.clone());
-        assert!(validate_macro_compact_seed(&ota).is_empty());
+        assert!(validate_macro_compact_seeds(&ota).is_empty());
         let catalog = MacroCatalog::from_macros([ota, system_macro(testbench)]).unwrap();
         let errors = validate_macro_catalog(&catalog, &primitives);
         assert!(errors.is_empty(), "invalid hierarchy: {errors:?}");
@@ -792,21 +825,57 @@ mod tests {
     }
 
     #[test]
-    fn compact_seed_uses_values_present_in_the_child_design_grid() {
-        let seed = ota_seed(GF180_SPEC);
-        let interface = seed.interface_values();
-        let vout = interface
-            .iter()
-            .find_map(|(name, value)| (name == "VOUT").then_some(*value))
-            .unwrap();
-        let vbias = interface
-            .iter()
-            .find_map(|(name, value)| (name == "IBIAS").then_some(*value))
-            .unwrap();
-
-        assert!(linspace(GF180_SPEC.vout_start, GF180_SPEC.vout_stop, VOUT_POINTS).contains(&vout));
+    fn compact_seed_vectors_are_aligned_and_exclude_interface_voltages() {
+        let seeds = ota_seeds();
+        assert_eq!(seeds.len(), 3);
+        assert_eq!(seeds.compact_parameters().len(), 4);
         assert!(
-            linspace(GF180_SPEC.vbias_start, GF180_SPEC.vbias_stop, VBIAS_POINTS).contains(&vbias)
+            seeds
+                .compact_parameters()
+                .iter()
+                .all(|(_, values)| values.len() == seeds.len())
+        );
+        assert!(
+            seeds.compact_parameters().iter().all(|(name, _)| !matches!(
+                name.as_str(),
+                "VINP" | "VINN" | "VOUT" | "IBIAS" | "VDD"
+            ))
+        );
+    }
+
+    #[test]
+    fn parent_owns_voltage_grids_and_uses_automatic_child_aliases() {
+        let system = system_macro("gain.spice".into());
+        let aliases = system.exploration().public_input_aliases();
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(system.exploration().derivation_rules().len(), 1);
+        assert!(aliases.iter().any(|alias| {
+            alias.variable() == "vout"
+                && alias.child_variable() == "vout"
+                && alias.interface_port() == "VOUT"
+        }));
+        assert!(aliases.iter().any(|alias| {
+            alias.variable() == "vbias"
+                && alias.child_variable() == "vbias"
+                && alias.interface_port() == "IBIAS"
+        }));
+
+        let input = top_path_input(GF180_SPEC);
+        assert_eq!(
+            input.design_variable_override("vout"),
+            Some(&PrimitiveBuildValue::Vector(linspace(
+                GF180_SPEC.vout_start,
+                GF180_SPEC.vout_stop,
+                VOUT_POINTS,
+            )))
+        );
+        assert_eq!(
+            input.design_variable_override("vbias"),
+            Some(&PrimitiveBuildValue::Vector(linspace(
+                GF180_SPEC.vbias_start,
+                GF180_SPEC.vbias_stop,
+                VBIAS_POINTS,
+            )))
         );
     }
 }
