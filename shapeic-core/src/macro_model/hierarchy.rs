@@ -16,9 +16,9 @@ use super::{
     MacroCompactSeedError, MacroDerivationReduction, MacroDerivationReductionError,
     MacroDerivationTarget, MacroDerivedValue, MacroDesignVariableCondition, MacroExecutionConfig,
     MacroExplorationInput, MacroExplorationInputRegistrationError,
-    MacroExplorationInputValidationError, MacroExplorationResult, MacroSpecificationBounds,
-    MacroSpecificationEvaluationError, MacroValidationError, PrimitiveInstanceExplorationInput,
-    validate_macro_catalog, validate_macro_exploration_input,
+    MacroExplorationInputValidationError, MacroExplorationResult, MacroHierarchyRetentionPolicy,
+    MacroSpecificationBounds, MacroSpecificationEvaluationError, MacroValidationError,
+    PrimitiveInstanceExplorationInput, validate_macro_catalog, validate_macro_exploration_input,
 };
 
 /// Stable path identifying one macro occurrence in a hierarchy.
@@ -181,6 +181,7 @@ pub struct MacroHierarchyExplorationInput<'lut> {
     device_models: HashMap<String, &'lut DeviceLut>,
     paths: BTreeMap<MacroHierarchyPath, MacroHierarchyPathInput>,
     execution: MacroExecutionConfig,
+    retention: MacroHierarchyRetentionPolicy,
 }
 
 impl<'lut> MacroHierarchyExplorationInput<'lut> {
@@ -237,6 +238,16 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
     /// Returns the execution policy shared by the hierarchy.
     pub const fn execution_config(&self) -> &MacroExecutionConfig {
         &self.execution
+    }
+
+    /// Replaces the policy controlling retention of complete preview results.
+    pub fn set_retention_policy(&mut self, retention: MacroHierarchyRetentionPolicy) {
+        self.retention = retention;
+    }
+
+    /// Returns the policy controlling retention of complete preview results.
+    pub const fn retention_policy(&self) -> MacroHierarchyRetentionPolicy {
+        self.retention
     }
 
     pub(super) fn local_input(

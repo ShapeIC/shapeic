@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::circuit::BlockRef;
@@ -10,8 +12,10 @@ use crate::circuit::BlockRef;
 use super::{
     CompactMacroInstanceExplorationInput, Macro, MacroCandidateProjectionError, MacroCatalog,
     MacroDerivationResolutionError, MacroExplorationError, MacroExplorationResult,
-    MacroHierarchyExplorationInput, MacroHierarchyLocalInputError, MacroHierarchyPath,
-    MacroHierarchyPathError, MacroHierarchyValidationError, ResolvedChildConditions,
+    MacroHierarchyDerivationRecord, MacroHierarchyExplorationInput,
+    MacroHierarchyExplorationResult, MacroHierarchyLocalInputError, MacroHierarchyNodeResult,
+    MacroHierarchyNodeStatus, MacroHierarchyPath, MacroHierarchyPathError,
+    MacroHierarchyPreviewRecord, MacroHierarchyValidationError, ResolvedChildConditions,
     resolve_child_derivations, validate_macro_hierarchy_input,
 };
 
@@ -46,7 +50,8 @@ pub fn explore_macro_hierarchy(
     macro_catalog: &MacroCatalog,
     primitive_catalog: &PrimitiveCatalog,
     input: &MacroHierarchyExplorationInput<'_>,
-) -> Result<MacroExplorationResult, MacroHierarchyExplorationError> {
+) -> Result<MacroHierarchyExplorationResult, MacroHierarchyExplorationError> {
+    let start = Instant::now();
     let validation_errors =
         validate_macro_hierarchy_input(top_macro, macro_catalog, primitive_catalog, input);
     if !validation_errors.is_empty() {
@@ -69,7 +74,26 @@ pub fn explore_macro_hierarchy(
             error,
         }
     })?;
-    explore_node(macro_, path, None, macro_catalog, primitive_catalog, input)
+    let mut nodes = BTreeMap::new();
+    collect_planned_nodes(macro_, macro_catalog, path.clone(), &mut nodes);
+    let mut derivations = BTreeMap::new();
+    let root_result = explore_node(
+        macro_,
+        path.clone(),
+        None,
+        macro_catalog,
+        primitive_catalog,
+        input,
+        &mut nodes,
+        &mut derivations,
+    )?;
+    Ok(MacroHierarchyExplorationResult::new(
+        path,
+        root_result,
+        nodes,
+        derivations,
+        start.elapsed(),
+    ))
 }
 
 fn explore_node(
@@ -79,7 +103,9 @@ fn explore_node(
     macro_catalog: &MacroCatalog,
     primitive_catalog: &PrimitiveCatalog,
     hierarchy_input: &MacroHierarchyExplorationInput<'_>,
-) -> Result<MacroExplorationResult, MacroHierarchyExplorationError> {
+    nodes: &mut BTreeMap<MacroHierarchyPath, MacroHierarchyNodeResult>,
+    derivations: &mut BTreeMap<MacroHierarchyPath, MacroHierarchyDerivationRecord>,
+) -> Result<Arc<MacroExplorationResult>, MacroHierarchyExplorationError> {
     let children = macro_
         .circuit()
         .instances()
@@ -98,25 +124,39 @@ fn explore_node(
         })?;
 
     if children.is_empty() {
-        return macro_
+        let result = macro_
             .explore(primitive_catalog, macro_catalog, initial_input)
             .map_err(|error| MacroHierarchyExplorationError::Explore {
-                path,
+                path: path.clone(),
                 macro_name: macro_.name().to_owned(),
                 stage: MacroHierarchyExplorationStage::Leaf,
                 error,
-            });
+            })?;
+        let result = Arc::new(result);
+        node_mut(nodes, &path).finish(MacroHierarchyNodeStatus::ExploredLeaf, Arc::clone(&result));
+        return Ok(result);
     }
 
-    let preview = macro_
-        .explore(primitive_catalog, macro_catalog, initial_input)
-        .map_err(|error| MacroHierarchyExplorationError::Explore {
-            path: path.clone(),
-            macro_name: macro_.name().to_owned(),
-            stage: MacroHierarchyExplorationStage::Preview,
-            error,
-        })?;
+    let preview = Arc::new(
+        macro_
+            .explore(primitive_catalog, macro_catalog, initial_input)
+            .map_err(|error| MacroHierarchyExplorationError::Explore {
+                path: path.clone(),
+                macro_name: macro_.name().to_owned(),
+                stage: MacroHierarchyExplorationStage::Preview,
+                error,
+            })?,
+    );
+    node_mut(nodes, &path).set_preview(MacroHierarchyPreviewRecord::new(
+        &preview,
+        hierarchy_input.retention_policy(),
+    ));
     if preview.accepted().is_empty() {
+        node_mut(nodes, &path).finish(
+            MacroHierarchyNodeStatus::PreviewRejected,
+            Arc::clone(&preview),
+        );
+        block_descendants(nodes, &path, &path);
         return Ok(preview);
     }
 
@@ -146,7 +186,21 @@ fn explore_node(
                     error,
                 }
             })?;
+        derivations.insert(
+            child_path.clone(),
+            MacroHierarchyDerivationRecord::new(
+                path.clone(),
+                child_path.clone(),
+                conditions.clone(),
+            ),
+        );
         let compact_input = if conditions.is_pruned() {
+            let reason = conditions
+                .prune_reason()
+                .expect("pruned conditions always retain their reason")
+                .clone();
+            node_mut(nodes, &child_path).prune(reason);
+            block_descendants(nodes, &child_path, &child_path);
             CompactMacroInstanceExplorationInput::empty_for_pruned_child(
                 child_macro,
                 child_instance.to_owned(),
@@ -159,16 +213,19 @@ fn explore_node(
                 macro_catalog,
                 primitive_catalog,
                 hierarchy_input,
+                nodes,
+                derivations,
             )?;
-            let projection = child_result
-                .into_projection(child_macro, child_instance)
-                .map_err(|error| MacroHierarchyExplorationError::Projection {
-                    parent_path: path.clone(),
-                    child_path,
-                    child_instance: child_instance.to_owned(),
-                    child_macro: child_macro.name().to_owned(),
-                    error,
-                })?;
+            let projection =
+                child_result
+                    .project(child_macro, child_instance)
+                    .map_err(|error| MacroHierarchyExplorationError::Projection {
+                        parent_path: path.clone(),
+                        child_path,
+                        child_instance: child_instance.to_owned(),
+                        child_macro: child_macro.name().to_owned(),
+                        error,
+                    })?;
             CompactMacroInstanceExplorationInput::from_projection(projection, Vec::new())
         };
         resolved_children.insert(child_instance.to_owned(), compact_input);
@@ -187,14 +244,64 @@ fn explore_node(
             macro_name: macro_.name().to_owned(),
             errors,
         })?;
-    macro_
+    let result = macro_
         .explore(primitive_catalog, macro_catalog, final_input)
         .map_err(|error| MacroHierarchyExplorationError::Explore {
-            path,
+            path: path.clone(),
             macro_name: macro_.name().to_owned(),
             stage: MacroHierarchyExplorationStage::Refresh,
             error,
-        })
+        })?;
+    let result = Arc::new(result);
+    node_mut(nodes, &path).finish(MacroHierarchyNodeStatus::Refreshed, Arc::clone(&result));
+    Ok(result)
+}
+
+fn node_mut<'a>(
+    nodes: &'a mut BTreeMap<MacroHierarchyPath, MacroHierarchyNodeResult>,
+    path: &MacroHierarchyPath,
+) -> &'a mut MacroHierarchyNodeResult {
+    nodes
+        .get_mut(path)
+        .expect("validated reachable paths are initialized before exploration")
+}
+
+fn block_descendants(
+    nodes: &mut BTreeMap<MacroHierarchyPath, MacroHierarchyNodeResult>,
+    ancestor: &MacroHierarchyPath,
+    blocked_by: &MacroHierarchyPath,
+) {
+    for (path, node) in nodes.iter_mut() {
+        if path.components().len() > ancestor.components().len()
+            && path.components().starts_with(ancestor.components())
+        {
+            node.block(blocked_by.clone());
+        }
+    }
+}
+
+fn collect_planned_nodes(
+    macro_: &Macro,
+    macro_catalog: &MacroCatalog,
+    path: MacroHierarchyPath,
+    nodes: &mut BTreeMap<MacroHierarchyPath, MacroHierarchyNodeResult>,
+) {
+    nodes.insert(
+        path.clone(),
+        MacroHierarchyNodeResult::pending(path.clone(), macro_.name()),
+    );
+    for instance in macro_.circuit().instances() {
+        let BlockRef::Macro(child_macro_name) = instance.block() else {
+            continue;
+        };
+        let (Some(child_macro), Ok(child_path)) = (
+            macro_catalog.get(child_macro_name),
+            path.child(instance.name()),
+        ) else {
+            continue;
+        };
+        collect_planned_nodes(child_macro, macro_catalog, child_path, nodes);
+    }
 }
 
 /// Path-qualified failure produced by hierarchical exploration.
@@ -376,14 +483,53 @@ mod tests {
             &MacroHierarchyExplorationInput::new(),
         )
         .unwrap();
-        let accepted = &result.accepted()[0];
-        let (xa, _) = result.selected_submacro(accepted, "xa").unwrap();
-        let (xb, _) = result.selected_submacro(accepted, "xb").unwrap();
+        let root = result.root_result();
+        let accepted = &root.accepted()[0];
+        let (xa, _) = root.selected_submacro(accepted, "xa").unwrap();
+        let (xb, _) = root.selected_submacro(accepted, "xb").unwrap();
+        let root_path = MacroHierarchyPath::root("top").unwrap();
+        let xa_path = root_path.child("xa").unwrap();
+        let xb_path = root_path.child("xb").unwrap();
 
-        assert_eq!(result.accepted().len(), 1);
+        assert_eq!(root.accepted().len(), 1);
         assert_eq!(xa.accepted().len(), 1);
         assert_eq!(xb.accepted().len(), 1);
         assert!(!ptr::eq(xa, xb));
+        assert!(Arc::ptr_eq(
+            result.node(&root_path).unwrap().result().unwrap(),
+            result.root_result()
+        ));
+        assert!(ptr::eq(
+            result.node(&xa_path).unwrap().result().unwrap().as_ref(),
+            xa
+        ));
+        assert!(ptr::eq(
+            result.node(&xb_path).unwrap().result().unwrap().as_ref(),
+            xb
+        ));
+        assert_eq!(
+            result.node(&root_path).unwrap().status(),
+            &MacroHierarchyNodeStatus::Refreshed
+        );
+        assert!(matches!(
+            result.node(&xa_path).unwrap().status(),
+            MacroHierarchyNodeStatus::ExploredLeaf
+        ));
+        assert_eq!(result.derivations().count(), 2);
+        assert!(
+            result
+                .node(&root_path)
+                .unwrap()
+                .preview()
+                .unwrap()
+                .retained_result()
+                .is_none()
+        );
+        assert_eq!(result.statistics().total_paths(), 3);
+        assert_eq!(result.statistics().explored_leaves(), 2);
+        assert_eq!(result.statistics().refreshed_parents(), 1);
+        assert_eq!(result.statistics().previews_executed(), 1);
+        assert_eq!(result.statistics().definitive_evaluations(), 3);
     }
 
     #[test]
@@ -408,8 +554,9 @@ mod tests {
             &MacroHierarchyExplorationInput::new(),
         )
         .unwrap();
-        let (middle_result, middle_candidate) = result
-            .selected_submacro(&result.accepted()[0], "xmiddle")
+        let root = result.root_result();
+        let (middle_result, middle_candidate) = root
+            .selected_submacro(&root.accepted()[0], "xmiddle")
             .unwrap();
         let (leaf_result, _) = middle_result
             .selected_submacro(middle_candidate, "xleaf")
@@ -442,9 +589,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.accepted().is_empty());
+        assert!(result.root_result().accepted().is_empty());
         assert_eq!(
             result
+                .root_result()
                 .candidate_sets()
                 .instance("xstage")
                 .unwrap()
@@ -485,9 +633,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.accepted().is_empty());
+        assert!(result.root_result().accepted().is_empty());
         assert!(
             result
+                .root_result()
                 .candidate_sets()
                 .instance("xstage")
                 .unwrap()
@@ -495,6 +644,83 @@ mod tests {
                 .points
                 .is_empty()
         );
+        let child_path = MacroHierarchyPath::root("top")
+            .unwrap()
+            .child("xstage")
+            .unwrap();
+        assert!(matches!(
+            result.node(&child_path).unwrap().status(),
+            MacroHierarchyNodeStatus::DerivationPruned { .. }
+        ));
+        let derivation = result.derivation(&child_path).unwrap();
+        assert_eq!(derivation.conditions().audit().len(), 2);
+        assert!(derivation.conditions().is_pruned());
+        assert_eq!(result.statistics().derivation_pruned(), 1);
+    }
+
+    #[test]
+    fn full_preview_retention_keeps_the_provisional_arc_only_when_requested() {
+        let catalog =
+            MacroCatalog::from_macros([leaf("stage"), parent(&[("xstage", "stage")])]).unwrap();
+        let mut input = MacroHierarchyExplorationInput::new();
+        input.set_retention_policy(super::super::MacroHierarchyRetentionPolicy::FullPreviews);
+
+        let result =
+            explore_macro_hierarchy("top", &catalog, &PrimitiveCatalog::new(), &input).unwrap();
+        let root = result.node(result.root_path()).unwrap();
+        let preview = root.preview().unwrap().retained_result().unwrap();
+
+        assert!(!Arc::ptr_eq(preview, result.root_result()));
+        assert_eq!(preview.accepted().len(), 1);
+    }
+
+    #[test]
+    fn preview_rejection_marks_every_descendant_as_not_reached() {
+        let middle = Macro::new(
+            "middle",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xleaf", "leaf", Vec::<(&str, &str)>::new())
+                .build(),
+            Circuit::builder().resistor("rc", "a", "b", 1.0).build(),
+        )
+        .with_compact_seed(MacroCompactSeed::default());
+        let top = parent(&[("xmiddle", "middle")]).with_specification(MacroSpecification::new(
+            "reject",
+            MacroSpecificationSource::expression("1.0"),
+            MacroSpecificationBounds::at_least(2.0),
+        ));
+        let catalog = MacroCatalog::from_macros([leaf("leaf"), middle, top]).unwrap();
+
+        let result = explore_macro_hierarchy(
+            "top",
+            &catalog,
+            &PrimitiveCatalog::new(),
+            &MacroHierarchyExplorationInput::new(),
+        )
+        .unwrap();
+        let root = MacroHierarchyPath::root("top").unwrap();
+        let middle = root.child("xmiddle").unwrap();
+        let leaf = middle.child("xleaf").unwrap();
+
+        assert_eq!(
+            result.node(&root).unwrap().status(),
+            &MacroHierarchyNodeStatus::PreviewRejected
+        );
+        assert_eq!(
+            result.node(&middle).unwrap().status(),
+            &MacroHierarchyNodeStatus::NotReached {
+                blocked_by: Some(root.clone())
+            }
+        );
+        assert_eq!(
+            result.node(&leaf).unwrap().status(),
+            &MacroHierarchyNodeStatus::NotReached {
+                blocked_by: Some(root)
+            }
+        );
+        assert_eq!(result.statistics().preview_rejections(), 1);
+        assert_eq!(result.statistics().not_reached(), 2);
     }
 
     #[test]

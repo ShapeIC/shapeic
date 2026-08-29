@@ -10,6 +10,7 @@ mod execution;
 mod explore;
 mod hierarchy;
 mod hierarchical_explore;
+mod hierarchy_result;
 mod input;
 mod model;
 mod physical;
@@ -60,6 +61,11 @@ pub use hierarchy::{
 };
 pub use hierarchical_explore::{
     MacroHierarchyExplorationError, MacroHierarchyExplorationStage, explore_macro_hierarchy,
+};
+pub use hierarchy_result::{
+    MacroHierarchyDerivationRecord, MacroHierarchyExplorationResult,
+    MacroHierarchyNodeResult, MacroHierarchyNodeStatus, MacroHierarchyPreviewRecord,
+    MacroHierarchyRetentionPolicy, MacroHierarchyStatistics,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,
