@@ -9,6 +9,7 @@ mod evaluate;
 mod execution;
 mod explore;
 mod hierarchy;
+mod hierarchical_explore;
 mod input;
 mod model;
 mod physical;
@@ -56,6 +57,9 @@ pub use hierarchy::{
     MacroHierarchyLocalInputError, MacroHierarchyPath, MacroHierarchyPathError,
     MacroHierarchyPathInput, MacroHierarchyValidationError, MacroResolvedCondition,
     ResolvedChildConditions, resolve_child_derivations, validate_macro_hierarchy_input,
+};
+pub use hierarchical_explore::{
+    MacroHierarchyExplorationError, MacroHierarchyExplorationStage, explore_macro_hierarchy,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

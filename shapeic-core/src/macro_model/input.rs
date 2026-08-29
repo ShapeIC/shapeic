@@ -100,6 +100,20 @@ impl CompactMacroInstanceExplorationInput {
         super::seed::build_compact_seed_input(macro_, instance_path.into(), filters)
     }
 
+    pub(super) fn empty_for_pruned_child(macro_: &Macro, instance_path: String) -> Self {
+        Self {
+            candidates: CandidateSet::new(instance_path, Vec::new()),
+            filters: Vec::new(),
+            interface_ports: macro_
+                .exploration()
+                .interface_bindings()
+                .iter()
+                .map(|binding| binding.port().to_owned())
+                .collect(),
+            provenance: None,
+        }
+    }
+
     /// Returns the candidate set projected by the explored child macro.
     pub const fn candidates(&self) -> &CandidateSet {
         &self.candidates

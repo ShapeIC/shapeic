@@ -12,13 +12,13 @@ use crate::primitive::build::PrimitiveBuildValue;
 
 use super::specification::{accepted_candidate_symbols, evaluate_expression};
 use super::{
-    CompactMacroInstanceExplorationInput, Macro, MacroCatalog, MacroCompactSeedError,
-    MacroDerivationReduction, MacroDerivationReductionError, MacroDerivationTarget,
-    MacroDerivedValue, MacroDesignVariableCondition, MacroExecutionConfig, MacroExplorationInput,
-    MacroExplorationInputRegistrationError, MacroExplorationInputValidationError,
-    MacroExplorationResult, MacroSpecificationBounds, MacroSpecificationEvaluationError,
-    MacroValidationError, PrimitiveInstanceExplorationInput, validate_macro_catalog,
-    validate_macro_exploration_input,
+    CompactMacroInstanceExplorationInput, Macro, MacroAnalysisDomain, MacroCatalog,
+    MacroCompactSeedError, MacroDerivationReduction, MacroDerivationReductionError,
+    MacroDerivationTarget, MacroDerivedValue, MacroDesignVariableCondition, MacroExecutionConfig,
+    MacroExplorationInput, MacroExplorationInputRegistrationError,
+    MacroExplorationInputValidationError, MacroExplorationResult, MacroSpecificationBounds,
+    MacroSpecificationEvaluationError, MacroValidationError, PrimitiveInstanceExplorationInput,
+    validate_macro_catalog, validate_macro_exploration_input,
 };
 
 /// Stable path identifying one macro occurrence in a hierarchy.
@@ -245,6 +245,7 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
         macro_catalog: &MacroCatalog,
         path: &MacroHierarchyPath,
         derived: Option<&ResolvedChildConditions>,
+        compact_children: Option<&BTreeMap<String, CompactMacroInstanceExplorationInput>>,
     ) -> Result<MacroExplorationInput<'lut>, Vec<MacroHierarchyLocalInputError>> {
         let mut input = MacroExplorationInput::new();
         input.set_execution_config(self.execution);
@@ -296,22 +297,39 @@ impl<'lut> MacroHierarchyExplorationInput<'lut> {
             let Some(child_macro) = macro_catalog.get(child_macro_name) else {
                 continue;
             };
-            match CompactMacroInstanceExplorationInput::from_seed(
-                child_macro,
-                instance.name(),
-                Vec::new(),
-            ) {
+            let compact_input = if let Some(compact_children) = compact_children {
+                compact_children
+                    .get(instance.name())
+                    .cloned()
+                    .ok_or_else(|| {
+                        vec![MacroHierarchyLocalInputError::MissingResolvedChild {
+                            child_instance: instance.name().to_owned(),
+                            child_macro: child_macro_name.clone(),
+                        }]
+                    })
+            } else {
+                CompactMacroInstanceExplorationInput::from_seed(
+                    child_macro,
+                    instance.name(),
+                    Vec::new(),
+                )
+                .map_err(|seed_errors| {
+                    seed_errors
+                        .into_iter()
+                        .map(|error| MacroHierarchyLocalInputError::CompactSeed {
+                            child_instance: instance.name().to_owned(),
+                            child_macro: child_macro_name.clone(),
+                            error,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            match compact_input {
                 Ok(seed) => register_local(
                     input.register_compact_macro_instance(instance.name(), seed),
                     &mut errors,
                 ),
-                Err(seed_errors) => errors.extend(seed_errors.into_iter().map(|error| {
-                    MacroHierarchyLocalInputError::CompactSeed {
-                        child_instance: instance.name().to_owned(),
-                        child_macro: child_macro_name.clone(),
-                        error,
-                    }
-                })),
+                Err(compact_errors) => errors.extend(compact_errors),
             }
         }
         if errors.is_empty() {
@@ -399,6 +417,11 @@ pub enum MacroHierarchyLocalInputError {
         child_macro: String,
         error: MacroCompactSeedError,
     },
+    /// A final parent refresh is missing one resolved child candidate set.
+    MissingResolvedChild {
+        child_instance: String,
+        child_macro: String,
+    },
 }
 
 impl fmt::Display for MacroHierarchyLocalInputError {
@@ -412,6 +435,13 @@ impl fmt::Display for MacroHierarchyLocalInputError {
             } => write!(
                 formatter,
                 "child instance '{child_instance}' of macro '{child_macro}' has an invalid compact seed: {error}"
+            ),
+            Self::MissingResolvedChild {
+                child_instance,
+                child_macro,
+            } => write!(
+                formatter,
+                "child instance '{child_instance}' of macro '{child_macro}' has no resolved candidate input"
             ),
         }
     }
@@ -888,6 +918,12 @@ pub enum MacroHierarchyValidationError {
         macro_name: String,
         error: MacroHierarchyPathError,
     },
+    UnsupportedAnalysisDomain {
+        path: MacroHierarchyPath,
+        macro_name: String,
+        testbench: String,
+        domain: MacroAnalysisDomain,
+    },
     Catalog(MacroValidationError),
     UnknownConfiguredPath {
         path: MacroHierarchyPath,
@@ -913,6 +949,15 @@ impl fmt::Display for MacroHierarchyValidationError {
             Self::InvalidTopPath { macro_name, error } => write!(
                 formatter,
                 "top macro '{macro_name}' has an invalid hierarchy path: {error}"
+            ),
+            Self::UnsupportedAnalysisDomain {
+                path,
+                macro_name,
+                testbench,
+                domain,
+            } => write!(
+                formatter,
+                "hierarchy path '{path}' (macro '{macro_name}') testbench '{testbench}' uses unsupported {domain:?} analysis"
             ),
             Self::Catalog(error) => write!(formatter, "invalid macro catalog: {error}"),
             Self::UnknownConfiguredPath { path } => {
@@ -978,10 +1023,31 @@ pub fn validate_macro_hierarchy_input(
         }
     }
     for (path, macro_) in reachable {
-        match input.local_input(macro_, macro_catalog, &path, None) {
+        errors.extend(
+            macro_
+                .exploration()
+                .testbenches()
+                .iter()
+                .filter(|testbench| testbench.domain() != MacroAnalysisDomain::Electrical)
+                .map(
+                    |testbench| MacroHierarchyValidationError::UnsupportedAnalysisDomain {
+                        path: path.clone(),
+                        macro_name: macro_.name().to_owned(),
+                        testbench: testbench.name().to_owned(),
+                        domain: testbench.domain(),
+                    },
+                ),
+        );
+        match input.local_input(macro_, macro_catalog, &path, None, None) {
             Ok(local) => errors.extend(
                 validate_macro_exploration_input(macro_, primitive_catalog, &local)
                     .into_iter()
+                    .filter(|error| {
+                        !matches!(
+                            error,
+                            MacroExplorationInputValidationError::MissingPhysicalLut { .. }
+                        )
+                    })
                     .map(|error| MacroHierarchyValidationError::InvalidInput {
                         path: path.clone(),
                         macro_name: macro_.name().to_owned(),
