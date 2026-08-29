@@ -8,6 +8,7 @@ mod derivation;
 mod evaluate;
 mod execution;
 mod explore;
+mod hierarchy;
 mod input;
 mod model;
 mod physical;
@@ -48,6 +49,13 @@ pub use explore::{
     MacroExplorationError, MacroExplorationResult, MacroExplorationStatistics,
     MacroSpecificationStatistics, explore_macro_ac_candidates,
     explore_macro_ac_candidates_with_execution, explore_macro_ac_candidates_with_physical_lut,
+};
+pub use hierarchy::{
+    MacroDerivationAuditEntry, MacroDerivationPruneReason, MacroDerivationResolutionError,
+    MacroHierarchyExplorationInput, MacroHierarchyInputRegistrationError,
+    MacroHierarchyLocalInputError, MacroHierarchyPath, MacroHierarchyPathError,
+    MacroHierarchyPathInput, MacroHierarchyValidationError, MacroResolvedCondition,
+    ResolvedChildConditions, resolve_child_derivations, validate_macro_hierarchy_input,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

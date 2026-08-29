@@ -259,6 +259,35 @@ pub struct MacroExplorationResult {
 }
 
 impl MacroExplorationResult {
+    #[cfg(test)]
+    pub(super) fn test_fixture(
+        macro_name: impl Into<String>,
+        candidate_sets: MacroCandidateSets,
+        accepted: Vec<(Vec<usize>, Vec<(String, f64)>)>,
+    ) -> Self {
+        let accepted = accepted
+            .into_iter()
+            .map(
+                |(candidate_indices, specification_values)| MacroAcceptedCandidate {
+                    candidate_indices,
+                    ac_outcomes: Vec::new(),
+                    specification_values,
+                },
+            )
+            .collect::<Vec<_>>();
+        Self {
+            macro_name: macro_name.into(),
+            candidate_sets,
+            statistics: MacroExplorationStatistics {
+                compatible_candidates: accepted.len(),
+                accepted_candidates: accepted.len(),
+                ..MacroExplorationStatistics::default()
+            },
+            accepted,
+            execution: MacroExecutionReport::default(),
+        }
+    }
+
     /// Returns the explored macro name.
     pub fn macro_name(&self) -> &str {
         &self.macro_name

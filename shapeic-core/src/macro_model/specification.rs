@@ -312,6 +312,29 @@ fn validate_direct_source(
     Ok(())
 }
 
+pub(super) fn accepted_candidate_symbols(
+    macro_: &Macro,
+    candidate_sets: &MacroCandidateSets,
+    candidate: &MacroAcceptedCandidate,
+) -> Result<HashMap<String, f64>, MacroSpecificationEvaluationError> {
+    let mut symbols = candidate_symbols(macro_, candidate_sets, candidate)?;
+    for (name, value) in candidate.specification_values() {
+        if symbols.insert(name.clone(), *value).is_some() {
+            return Err(MacroSpecificationEvaluationError::DuplicateSymbol {
+                symbol: name.clone(),
+            });
+        }
+    }
+    Ok(symbols)
+}
+
+pub(super) fn evaluate_expression(
+    expression: &str,
+    symbols: &HashMap<String, f64>,
+) -> Result<f64, String> {
+    ExpressionParser::new(expression, symbols).parse()
+}
+
 fn candidate_symbols(
     macro_: &Macro,
     candidate_sets: &MacroCandidateSets,
