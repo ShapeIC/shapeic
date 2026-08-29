@@ -79,6 +79,39 @@ pub enum MacroExplorationDefinitionError {
         expected: PrimitiveBuildInputKind,
         actual: PrimitiveBuildInputKind,
     },
+    EmptyPublicInputAlias {
+        alias_index: usize,
+        field: &'static str,
+    },
+    DuplicatePublicInputAlias {
+        child_instance: String,
+        child_variable: String,
+    },
+    UnknownPublicInputAliasVariable {
+        variable: String,
+    },
+    UnknownPublicInputAliasInstance {
+        child_instance: String,
+    },
+    PublicInputAliasTargetsNonMacro {
+        child_instance: String,
+    },
+    UnknownPublicInputAliasChildMacro {
+        child_macro: String,
+    },
+    UnknownPublicInputAliasChildVariable {
+        child_macro: String,
+        variable: String,
+    },
+    PublicInputAliasKindMismatch {
+        variable: String,
+        child_macro: String,
+        child_variable: String,
+    },
+    UnknownPublicInputAliasPort {
+        child_macro: String,
+        port: String,
+    },
     InvalidCompactSeed {
         error: MacroCompactSeedError,
     },
@@ -228,6 +261,52 @@ impl fmt::Display for MacroExplorationDefinitionError {
                 formatter,
                 "design variable '{variable}' declares {actual}, but '{instance_path}.{input}' expects {expected}"
             ),
+            Self::EmptyPublicInputAlias { alias_index, field } => write!(
+                formatter,
+                "public input alias {alias_index} has an empty {field}"
+            ),
+            Self::DuplicatePublicInputAlias {
+                child_instance,
+                child_variable,
+            } => write!(
+                formatter,
+                "child input alias '{child_instance}.{child_variable}' is declared more than once"
+            ),
+            Self::UnknownPublicInputAliasVariable { variable } => write!(
+                formatter,
+                "public input alias references unknown parent variable '{variable}'"
+            ),
+            Self::UnknownPublicInputAliasInstance { child_instance } => write!(
+                formatter,
+                "public input alias references unknown child instance '{child_instance}'"
+            ),
+            Self::PublicInputAliasTargetsNonMacro { child_instance } => write!(
+                formatter,
+                "public input alias target '{child_instance}' is not a macro instance"
+            ),
+            Self::UnknownPublicInputAliasChildMacro { child_macro } => write!(
+                formatter,
+                "public input alias references unregistered child macro '{child_macro}'"
+            ),
+            Self::UnknownPublicInputAliasChildVariable {
+                child_macro,
+                variable,
+            } => write!(
+                formatter,
+                "public input alias references unknown variable '{variable}' in child macro '{child_macro}'"
+            ),
+            Self::PublicInputAliasKindMismatch {
+                variable,
+                child_macro,
+                child_variable,
+            } => write!(
+                formatter,
+                "parent variable '{variable}' is incompatible with '{child_macro}.{child_variable}'"
+            ),
+            Self::UnknownPublicInputAliasPort { child_macro, port } => write!(
+                formatter,
+                "public input alias references unprojected interface port '{port}' in child macro '{child_macro}'"
+            ),
             Self::InvalidCompactSeed { error } => {
                 write!(formatter, "invalid compact seed: {error}")
             }
@@ -355,6 +434,66 @@ pub fn validate_macro_derivation_targets(
     errors
 }
 
+/// Resolves parent-owned public input aliases against direct child definitions.
+pub fn validate_macro_public_input_aliases(
+    macro_: &Macro,
+    macro_catalog: &MacroCatalog,
+) -> Vec<MacroExplorationDefinitionError> {
+    let mut errors = Vec::new();
+    for alias in macro_.exploration().public_input_aliases() {
+        let Some(instance) = macro_.circuit().instance(alias.child_instance()) else {
+            continue;
+        };
+        let BlockRef::Macro(child_name) = instance.block() else {
+            continue;
+        };
+        let Some(child) = macro_catalog.get(child_name) else {
+            errors.push(
+                MacroExplorationDefinitionError::UnknownPublicInputAliasChildMacro {
+                    child_macro: child_name.clone(),
+                },
+            );
+            continue;
+        };
+        let Some(parent_variable) = macro_.exploration().design_variable(alias.variable()) else {
+            continue;
+        };
+        let Some(child_variable) = child.exploration().design_variable(alias.child_variable())
+        else {
+            errors.push(
+                MacroExplorationDefinitionError::UnknownPublicInputAliasChildVariable {
+                    child_macro: child_name.clone(),
+                    variable: alias.child_variable().to_owned(),
+                },
+            );
+            continue;
+        };
+        if !child_variable.kind().accepts(parent_variable.kind()) {
+            errors.push(
+                MacroExplorationDefinitionError::PublicInputAliasKindMismatch {
+                    variable: alias.variable().to_owned(),
+                    child_macro: child_name.clone(),
+                    child_variable: alias.child_variable().to_owned(),
+                },
+            );
+        }
+        if !child
+            .exploration()
+            .interface_bindings()
+            .iter()
+            .any(|binding| binding.port() == alias.interface_port())
+        {
+            errors.push(
+                MacroExplorationDefinitionError::UnknownPublicInputAliasPort {
+                    child_macro: child_name.clone(),
+                    port: alias.interface_port().to_owned(),
+                },
+            );
+        }
+    }
+    errors
+}
+
 impl Error for MacroExplorationDefinitionError {}
 
 /// Validates primitive defaults and design variables against the implementation.
@@ -389,7 +528,13 @@ pub fn validate_macro_exploration_definition(
                 variable: variable.name().to_owned(),
             });
         }
-        if variable.bindings().is_empty() {
+        if variable.bindings().is_empty()
+            && !macro_
+                .exploration()
+                .public_input_aliases()
+                .iter()
+                .any(|alias| alias.variable() == variable.name())
+        {
             errors.push(
                 MacroExplorationDefinitionError::EmptyDesignVariableBindings {
                     variable: variable.name().to_owned(),
@@ -429,9 +574,60 @@ pub fn validate_macro_exploration_definition(
             validate_variable_binding(macro_, primitive_catalog, variable, binding, &mut errors);
         }
     }
-    if let Some(seed) = macro_.exploration().compact_seed() {
+    let mut aliases = HashSet::new();
+    for (alias_index, alias) in macro_
+        .exploration()
+        .public_input_aliases()
+        .iter()
+        .enumerate()
+    {
+        for (field, value) in [
+            ("parent variable", alias.variable()),
+            ("child instance", alias.child_instance()),
+            ("child variable", alias.child_variable()),
+            ("interface port", alias.interface_port()),
+        ] {
+            if value.trim().is_empty() {
+                errors.push(MacroExplorationDefinitionError::EmptyPublicInputAlias {
+                    alias_index,
+                    field,
+                });
+            }
+        }
+        if !aliases.insert((alias.child_instance(), alias.child_variable())) {
+            errors.push(MacroExplorationDefinitionError::DuplicatePublicInputAlias {
+                child_instance: alias.child_instance().to_owned(),
+                child_variable: alias.child_variable().to_owned(),
+            });
+        }
+        if macro_
+            .exploration()
+            .design_variable(alias.variable())
+            .is_none()
+        {
+            errors.push(
+                MacroExplorationDefinitionError::UnknownPublicInputAliasVariable {
+                    variable: alias.variable().to_owned(),
+                },
+            );
+        }
+        match macro_.circuit().instance(alias.child_instance()) {
+            None => errors.push(
+                MacroExplorationDefinitionError::UnknownPublicInputAliasInstance {
+                    child_instance: alias.child_instance().to_owned(),
+                },
+            ),
+            Some(instance) if !matches!(instance.block(), BlockRef::Macro(_)) => errors.push(
+                MacroExplorationDefinitionError::PublicInputAliasTargetsNonMacro {
+                    child_instance: alias.child_instance().to_owned(),
+                },
+            ),
+            Some(_) => {}
+        }
+    }
+    if let Some(seeds) = macro_.exploration().compact_seeds() {
         errors.extend(
-            super::seed::validate_compact_seed(macro_, seed)
+            super::seed::validate_compact_seeds(macro_, seeds)
                 .into_iter()
                 .map(|error| MacroExplorationDefinitionError::InvalidCompactSeed { error }),
         );
@@ -637,8 +833,9 @@ mod tests {
     use super::*;
     use crate::macro_model::{
         MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDesignVariable,
-        MacroDesignVariableBinding, MacroPrimitiveDefault, MacroSpecification,
-        MacroSpecificationBounds, MacroSpecificationSource,
+        MacroDesignVariableBinding, MacroInterfaceBinding, MacroOutputSource,
+        MacroPrimitiveDefault, MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds,
+        MacroSpecificationSource,
     };
 
     fn primitive_catalog() -> PrimitiveCatalog {
@@ -833,5 +1030,55 @@ mod tests {
             MacroDerivationReduction::UniqueValues,
             &MacroDerivationTarget::design_variable_range("x"),
         ));
+    }
+
+    #[test]
+    fn validates_public_input_aliases_against_the_child_api() {
+        let child = Macro::new("child", Vec::new(), Circuit::default(), Circuit::default())
+            .with_design_variable(MacroDesignVariable::new(
+                "bias",
+                PrimitiveBuildInputKind::Vector,
+                vec![MacroDesignVariableBinding::new("x1", "current")],
+            ))
+            .with_interface_binding(MacroInterfaceBinding::new(
+                "OUT",
+                MacroOutputSource::candidate_column("x1", "out"),
+            ));
+        let catalog = MacroCatalog::from_macros([child]).unwrap();
+        let parent = Macro::new(
+            "parent",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xchild", "child", std::iter::empty::<(&str, &str)>())
+                .build(),
+            Circuit::default(),
+        )
+        .with_design_variable(MacroDesignVariable::new(
+            "node_voltage",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "node_voltage",
+            "xchild",
+            "bias",
+            "OUT",
+        ));
+
+        assert!(validate_macro_exploration_definition(&parent, &primitive_catalog()).is_empty());
+        assert!(validate_macro_public_input_aliases(&parent, &catalog).is_empty());
+
+        let invalid = parent.with_public_input_alias(MacroPublicInputAlias::new(
+            "node_voltage",
+            "xchild",
+            "missing",
+            "OTHER",
+        ));
+        let errors = validate_macro_public_input_aliases(&invalid, &catalog);
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroExplorationDefinitionError::UnknownPublicInputAliasChildVariable { variable, .. }
+                if variable == "missing"
+        )));
     }
 }

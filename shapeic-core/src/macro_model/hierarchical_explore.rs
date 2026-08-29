@@ -42,9 +42,10 @@ impl fmt::Display for MacroHierarchyExplorationStage {
 
 /// Runs a deterministic, one-pass electrical depth-first macro exploration.
 ///
-/// Parent previews use nominal compact seeds. Accepted preview rows derive the
-/// conditions of each direct child. Explored children are then projected into
-/// the parent, which is evaluated once more to produce the returned result.
+/// Parent previews combine aligned compact seeds with parent-owned public input
+/// grids. Accepted preview rows derive specifications and restrict each direct
+/// child's public inputs. Explored children are then projected into the parent,
+/// which is evaluated once more to produce the returned result.
 pub fn explore_macro_hierarchy(
     top_macro: &str,
     macro_catalog: &MacroCatalog,
@@ -442,7 +443,7 @@ mod tests {
     use crate::circuit::Circuit;
 
     use super::super::{
-        MacroCompactSeed, MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget,
+        MacroCompactSeedSet, MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget,
         MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
     };
     use super::*;
@@ -454,7 +455,7 @@ mod tests {
             Circuit::builder().resistor("ri", "a", "b", 1.0).build(),
             Circuit::builder().resistor("rc", "a", "b", 1.0).build(),
         )
-        .with_compact_seed(MacroCompactSeed::default())
+        .with_compact_seeds(MacroCompactSeedSet::default())
     }
 
     fn parent(children: &[(&str, &str)]) -> Macro {
@@ -559,7 +560,7 @@ mod tests {
                 .build(),
             Circuit::builder().resistor("rc", "a", "b", 1.0).build(),
         )
-        .with_compact_seed(MacroCompactSeed::default());
+        .with_compact_seeds(MacroCompactSeedSet::default());
         let catalog =
             MacroCatalog::from_macros([leaf("leaf"), middle, parent(&[("xmiddle", "middle")])])
                 .unwrap();
@@ -719,7 +720,7 @@ mod tests {
                 .build(),
             Circuit::builder().resistor("rc", "a", "b", 1.0).build(),
         )
-        .with_compact_seed(MacroCompactSeed::default());
+        .with_compact_seeds(MacroCompactSeedSet::default());
         let top = parent(&[("xmiddle", "middle")]).with_specification(MacroSpecification::new(
             "reject",
             MacroSpecificationSource::expression("1.0"),

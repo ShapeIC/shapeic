@@ -35,7 +35,7 @@ pub use combination::{
 };
 pub use configuration::{
     MacroExplorationDefinitionError, validate_macro_derivation_targets,
-    validate_macro_exploration_definition,
+    validate_macro_exploration_definition, validate_macro_public_input_aliases,
 };
 pub use derivation::MacroDerivationReductionError;
 pub use evaluate::{
@@ -57,8 +57,9 @@ pub use hierarchy::{
     MacroDerivationAuditEntry, MacroDerivationPruneReason, MacroDerivationResolutionError,
     MacroHierarchyExplorationInput, MacroHierarchyInputRegistrationError,
     MacroHierarchyLocalInputError, MacroHierarchyPath, MacroHierarchyPathError,
-    MacroHierarchyPathInput, MacroHierarchyValidationError, MacroResolvedCondition,
-    ResolvedChildConditions, resolve_child_derivations, validate_macro_hierarchy_input,
+    MacroHierarchyPathInput, MacroHierarchyValidationError, MacroPublicInputAliasValueError,
+    MacroPublicInputPropagationAuditEntry, MacroResolvedCondition, ResolvedChildConditions,
+    resolve_child_derivations, validate_macro_hierarchy_input,
 };
 pub use hierarchical_explore::{
     MacroHierarchyExplorationError, MacroHierarchyExplorationStage, explore_macro_hierarchy,
@@ -79,12 +80,13 @@ pub use input::{
     validate_macro_exploration_input,
 };
 pub use model::{
-    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroCompactSeed,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroCompactSeedSet,
     MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDerivedValue,
     MacroDesignVariable,
     MacroDesignVariableBinding, MacroDesignVariableCondition, MacroExploration,
     MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroPrimitiveDefault,
-    MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource, MacroTestbenchSource,
+    MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
+    MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};
@@ -94,7 +96,7 @@ pub use prepare::{
 pub use projection::{
     MacroCandidateProjection, MacroCandidateProjectionError, MacroOutputResolutionError,
 };
-pub use seed::{MacroCompactSeedError, validate_macro_compact_seed};
+pub use seed::{MacroCompactSeedError, validate_macro_compact_seeds};
 pub use render::{
     ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
     ResolvedPhysicalCandidateColumns, ResolvedPhysicalPort, ResolvedPhysicalPrimitive,
