@@ -1,28 +1,41 @@
-use serde::de::Error;
+use std::error::Error;
+use shapeic_core::macro_model::explore_macro_hierarchy;
+use std::collections::HashMap;
 use shapeic_core::macro_model::MacroAcTestbench;
+use shapeic_core::macro_model::MacroDesignVariable;
+use shapeic_core::macro_model::MacroHierarchyExplorationInput;
+use shapeic_core::macro_model::MacroPrimitiveDefault;
+use shapeic_core::macro_model::MacroPublicInputAlias;
+use shapeic_core::macro_model::MacroSpecification;
 use std::ffi::OsString;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeed};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult};
+use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
-use shapeic_core::analysis::{AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets, AcMetricSet};
+use shapeic_core::analysis::{AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets, AcMetricSet, AcMetric};
+use shapeic_core::utils::linspace;
 
 const COMMON_SOURCE_INSTANCE: &str = "xcs";
 const OTA_1STAGE_INSTANCE: &str = "xota_1stage";
+const OTA_1STAGE_TB: &str = "ota_1stage_gain";
 const OTA_1STAGE: &str = "ota_1stage"; 
 const OTA_2STAGE: &str = "ota_2stage";
 const OTA_2STAGE_TB: &str = "ota_2stage_gain";
+const GAIN_SPECIFICATION: &str = "dc_gain_db";
+
+const VOUT_POINTS: usize = 5;
+const VOUT_1STAGE_POINTS: usize = 3;
 
 const MIN_DC_GAIN_DB: f64 = 25.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PdkSpec {
@@ -36,12 +49,27 @@ struct PdkSpec {
     vout_stop: f64,
     vdd: f64,
     vin: f64,
-    vbias_start: f64,
-    vbias_stop: f64,
+    vout_1stage_start: f64,
+    vout_1stage_stop: f64,
 }
 
+const IHP_SPEC: PdkSpec = PdkSpec {
+    label: "IHP SG13G2",
+    pdk: "ihp-sg13g2",
+    nmos_model: "sg13_lv_nmos",
+    pmos_model: "sg13_lv_pmos",
+    tail_current: 20.0e-6,
+    mirror_reference: 0.9,
+    vout_start: 0.95,
+    vout_stop: 1.1,
+    vdd: 1.5,
+    vin: 0.9,
+    vout_1stage_start: 0.95,
+    vout_1stage_stop: 1.1,
+};
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let options = cli_options();
+    let options = cli_options()?;
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let testbench = manifest.join("examples/ota_2stage/gain.spice");
     let primitive_catalog = load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives"))
@@ -55,8 +83,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let ota_1stage = ota_1stage(spec, testbench.clone());
     let ota_2stage = ota_2stage(spec, testbench.clone());
+    let macro_catalog = MacroCatalog::from_macros([ota_1stage, ota_2stage])?;
 
+    let mut input = MacroHierarchyExplorationInput::new();
+    input.register_device_model("nmos", nmos)?;
+    input.register_device_model("pmos", pmos)?;
+    input.set_execution_config(options.execution_config()?);
 
+    let result = explore_macro_hierarchy(OTA_2STAGE, &macro_catalog, &primitive_catalog, &input)?;
+
+    println!("{} hierarchical four-transistor OTA", spec.label);
+    print_hierarchy(&result);
+    print_derivations(&result);
+
+    Ok(())
 }
 
 fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
@@ -66,7 +106,7 @@ fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         Circuit::default(),
         ota_1stage_compact_model()
     )
-    .with_compact_seed(ota_seed(spec))
+    .with_compact_seeds(ota_1stage_seed(spec))
 }
 
 fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
@@ -98,6 +138,27 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
             testbench,
             ac_analysis()
         ))
+        .with_specification(MacroSpecification::new(
+            GAIN_SPECIFICATION,
+            MacroSpecificationSource::ac_metric(OTA_2STAGE_TB, AcMetric::DcGainDb),
+            MacroSpecificationBounds::at_least(MIN_DC_GAIN_DB),
+        ))
+        .with_primitive_default(MacroPrimitiveDefault::new(
+            COMMON_SOURCE_INSTANCE, 
+            common_source_input(spec),
+            Vec::new()
+        ))
+        .with_design_variable(MacroDesignVariable::new(
+            "vout_1stage",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "vout_1stage", 
+            OTA_1STAGE_INSTANCE, 
+            "vout", 
+            "VOUT"
+        ))
 }
 
 fn ota_1stage_ports() -> Vec<MacroPort> {
@@ -112,15 +173,9 @@ fn ota_1stage_ports() -> Vec<MacroPort> {
 
 fn ota_1stage_compact_model() -> Circuit {
     Circuit::builder()
-        .vccs("gm_dp_m1", "VOUT", "IBIAS", "VINP", "IBIAS", "gm_dp")
-        .resistor("ro_dp_m1", "VOUT", "IBIAS", "ro_dp")
-        .vccs("gm_dp_m2", "N1", "IBIAS", "VINN", "IBIAS", "gm_dp")
-        .resistor("ro_dp_m2", "N1", "IBIAS", "ro_dp")
-        .vccs("gm_cm_m1", "VOUT", "VDD", "N1", "VDD", "gm_cm")
-        .resistor("ro_cm_m1", "VOUT", "VDD", "ro_cm")
-        .vccs("gm_cm_m2", "N1", "VDD", "N1", "VDD", "gm_cm")
-        .resistor("ro_cm_m2", "N1", "VDD", "ro_cm")
-        .capacitor("c_out", "VOUT", "IBIAS", 1.0e-12)
+        .vccs("gm_ota", "VOUT", "VSS", "VINP", "VSS", "gm_ota")
+        .resistor("ro_ota", "VOUT", "VSS", "ro_ota")
+        .capacitor("c_ota", "VOUT", "VSS", "c_ota")
         .build()
 }
 
@@ -138,22 +193,12 @@ fn ota_2stage_compact_model() -> Circuit {
         .build()
 }
 
-fn ota_seed(spec: PdkSpec) -> MacroCompactSeed {
-    MacroCompactSeed::new(
-        [
-            ("gm_dp", 1.0e-3),
-            ("ro_dp", 100.0e3),
-            ("gm_cm", 1.0e-3),
-            ("ro_cm", 100.0e3),
-        ],
-        [
-            ("VINP", spec.vin),
-            ("VINN", spec.vin),
-            ("VOUT", spec.vout_start),
-            ("IBIAS", spec.vbias_start),
-            ("VDD", spec.vdd),
-        ],
-    )
+fn ota_1stage_seed(spec: PdkSpec) -> MacroCompactSeedSet {
+    MacroCompactSeedSet::aligned([
+        ("gm_ota", vec![0.7e-3, 1.0e-3, 1.3e-3]),
+        ("ro_ota", vec![140.0e3, 100.0e3, 75.0e3]),
+        ("c_ota", vec![1.0e-12, 2.0e-12, 3.0e-12]),
+    ])
 }
 
 fn ac_analysis() -> AcAnalysis {
@@ -180,6 +225,73 @@ fn ac_analysis() -> AcAnalysis {
     )
 }
 
+fn common_source_input(spec: PdkSpec) -> PrimitiveBuildInput {
+    PrimitiveBuildInput::new(HashMap::from([
+        (
+            "current".to_owned(),
+            PrimitiveBuildValue::Scalar(spec.tail_current),
+        ),
+        (
+            "VIN".to_owned(), 
+            PrimitiveBuildValue::Vector(linspace(spec.vout_1stage_start, spec.vout_1stage_stop, VOUT_1STAGE_POINTS)),
+        ),
+        (
+            "VOUT".to_owned(),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+        ),
+        (
+            "VDD".to_owned(), 
+            PrimitiveBuildValue::Scalar(spec.vdd)),
+    ]))
+}
+
+fn resolve_pdk_spec(nmos: &LookupTable, pmos: &LookupTable) -> Result<PdkSpec, io::Error> {
+    let nmos_spec = identify_pdk(nmos, true)?;
+    let pmos_spec = identify_pdk(pmos, false)?;
+    if nmos_spec != pmos_spec {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "NMOS LUT uses PDK '{}', but PMOS LUT uses '{}'",
+                nmos_spec.pdk, pmos_spec.pdk
+            ),
+        ));
+    }
+    Ok(nmos_spec)
+}
+
+fn identify_pdk(table: &LookupTable, nmos: bool) -> Result<PdkSpec, io::Error> {
+    let candidates = [IHP_SPEC];
+    if let Some(pdk) = table.pdk() {
+        return candidates
+            .into_iter()
+            .find(|spec| spec.pdk == pdk)
+            .ok_or_else(|| unsupported_pdk(pdk));
+    }
+    let names = table.model_names().collect::<Vec<_>>();
+    candidates
+        .into_iter()
+        .find(|spec| {
+            names.contains(&if nmos {
+                spec.nmos_model
+            } else {
+                spec.pmos_model
+            })
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "LUT metadata and model names do not identify a supported PDK",
+            )
+        })
+}
+fn unsupported_pdk(pdk: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("unsupported LUT PDK '{pdk}'"),
+    )
+}
+
 fn cli_options() -> Result<CliOptions, io::Error> {
 let mut arguments = env::args_os();
     let executable = arguments
@@ -189,7 +301,7 @@ let mut arguments = env::args_os();
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "usage: {} <nmos-5d.npz> <pmos-5d.npz> [--workers N] [--batch-size N]",
+            "usage: {} <nmos-5d.npz> <pmos-5d.npz> [--workers N] [--batch-size N]",
                 Path::new(&executable).display()
             ),
         )
@@ -266,3 +378,59 @@ impl CliOptions {
         Ok(execution)
     }
 }
+
+fn print_hierarchy(result: &MacroHierarchyExplorationResult) {
+    println!("\nHierarchy execution");
+    for (path, node) in result.nodes() {
+        let accepted = node.result().map_or(0, |result| result.accepted().len());
+        println!(
+            "  {path}: macro={}, status={:?}, accepted={accepted}",
+            node.macro_name(),
+            node.status()
+        );
+    }
+    let statistics = result.statistics();
+    println!(
+        "  paths={}, previews={}, definitive={}, frequency_evaluations={}, total={:?}",
+        statistics.total_paths(),
+        statistics.previews_executed(),
+        statistics.definitive_evaluations(),
+        statistics.frequency_evaluations(),
+        statistics.total_duration(),
+    );
+}
+
+fn print_derivations(result: &MacroHierarchyExplorationResult) {
+    println!("\nParent-to-child derivations");
+    for (_, derivation) in result.derivations() {
+        println!(
+            "  {} -> {}",
+            derivation.parent_path(),
+            derivation.child_path()
+        );
+        for entry in derivation.conditions().audit() {
+            println!(
+                "    {}: {:?} over {} row(s) => {:?}; {:?}",
+                entry.expression(),
+                entry.reduction(),
+                entry.source_rows(),
+                entry.reduced_value(),
+                entry.effective_condition(),
+            );
+        }
+        for entry in derivation.conditions().public_input_audit() {
+            println!(
+                "    input {} via {}.{} -> {}: {:?} over {} row(s); {:?}",
+                entry.parent_variable(),
+                entry.child_instance(),
+                entry.interface_port(),
+                entry.child_variable(),
+                entry.values(),
+                entry.source_rows(),
+                entry.effective_condition(),
+            );
+        }
+    }
+}
+
+
