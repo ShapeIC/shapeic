@@ -11,6 +11,7 @@ mod explore;
 mod hierarchy;
 mod hierarchical_explore;
 mod hierarchy_result;
+mod hierarchy_selection;
 mod input;
 mod model;
 mod physical;
@@ -66,6 +67,10 @@ pub use hierarchy_result::{
     MacroHierarchyDerivationRecord, MacroHierarchyExplorationResult,
     MacroHierarchyNodeResult, MacroHierarchyNodeStatus, MacroHierarchyPreviewRecord,
     MacroHierarchyRetentionPolicy, MacroHierarchyStatistics,
+};
+pub use hierarchy_selection::{
+    MacroHierarchyInstancePath, MacroHierarchyInstancePathError, MacroHierarchySelectedInstance,
+    MacroHierarchySelectedNode, MacroHierarchySelection, MacroHierarchySelectionError,
 };
 pub use input::{
     CompactMacroInstanceExplorationInput, MacroExplorationInput,

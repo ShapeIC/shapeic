@@ -530,6 +530,23 @@ mod tests {
         assert_eq!(result.statistics().refreshed_parents(), 1);
         assert_eq!(result.statistics().previews_executed(), 1);
         assert_eq!(result.statistics().definitive_evaluations(), 3);
+
+        let selection = result.selection(0).unwrap();
+        assert_eq!(selection.root_accepted_index(), 0);
+        assert_eq!(
+            selection
+                .nodes()
+                .map(|node| node.path().to_string())
+                .collect::<Vec<_>>(),
+            ["top", "top.xa", "top.xb"]
+        );
+        assert_eq!(
+            selection
+                .instances()
+                .map(|instance| instance.path().to_string())
+                .collect::<Vec<_>>(),
+            ["top::xa", "top::xb"]
+        );
     }
 
     #[test]
@@ -564,6 +581,15 @@ mod tests {
 
         assert_eq!(middle_result.macro_name(), "middle");
         assert_eq!(leaf_result.macro_name(), "leaf");
+        assert_eq!(
+            result
+                .selection(0)
+                .unwrap()
+                .nodes()
+                .map(|node| node.path().to_string())
+                .collect::<Vec<_>>(),
+            ["top", "top.xmiddle", "top.xmiddle.xleaf"]
+        );
     }
 
     #[test]
@@ -656,6 +682,15 @@ mod tests {
         assert_eq!(derivation.conditions().audit().len(), 2);
         assert!(derivation.conditions().is_pruned());
         assert_eq!(result.statistics().derivation_pruned(), 1);
+        assert!(matches!(
+            result.selection(0),
+            Err(
+                super::super::MacroHierarchySelectionError::RootAcceptedIndexOutOfRange {
+                    accepted_count: 0,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
@@ -721,6 +756,15 @@ mod tests {
         );
         assert_eq!(result.statistics().preview_rejections(), 1);
         assert_eq!(result.statistics().not_reached(), 2);
+        assert!(matches!(
+            result.selection(0),
+            Err(
+                super::super::MacroHierarchySelectionError::RootAcceptedIndexOutOfRange {
+                    accepted_count: 0,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]

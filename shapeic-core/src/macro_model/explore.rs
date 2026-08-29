@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::ThreadPoolBuilder;
@@ -348,6 +349,21 @@ impl MacroExplorationResult {
         accepted: &MacroAcceptedCandidate,
         instance_path: &str,
     ) -> Option<(&'a MacroExplorationResult, &'a MacroAcceptedCandidate)> {
+        let (child_result, _, child_accepted) =
+            self.selected_submacro_with_index(accepted, instance_path)?;
+        Some((child_result.as_ref(), child_accepted))
+    }
+
+    /// Resolves a compact child's shared result, accepted index, and candidate.
+    pub fn selected_submacro_with_index<'a>(
+        &'a self,
+        accepted: &MacroAcceptedCandidate,
+        instance_path: &str,
+    ) -> Option<(
+        &'a Arc<MacroExplorationResult>,
+        usize,
+        &'a MacroAcceptedCandidate,
+    )> {
         let candidate_index = self.selected_candidate_index(accepted, instance_path)?;
         let provenance = self
             .candidate_sets
@@ -355,9 +371,9 @@ impl MacroExplorationResult {
             .compact_provenance
             .as_ref()?;
         let child_accepted_index = *provenance.accepted_indices.get(candidate_index)?;
-        let child_result = provenance.source_result.as_ref();
+        let child_result = &provenance.source_result;
         let child_accepted = child_result.accepted.get(child_accepted_index)?;
-        Some((child_result, child_accepted))
+        Some((child_result, child_accepted_index, child_accepted))
     }
 
     /// Finds one accepted AC outcome by its macro-local testbench name.
