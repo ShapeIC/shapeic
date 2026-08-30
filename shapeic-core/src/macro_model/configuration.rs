@@ -10,6 +10,7 @@ use crate::primitive::build::PrimitiveBuildInputKind;
 
 use super::{
     Macro, MacroCatalog, MacroCompactSeedError, MacroDerivationReduction, MacroDerivationTarget,
+    MacroHierarchyMode,
 };
 
 /// One invalid primitive default or public design-variable declaration.
@@ -107,6 +108,12 @@ pub enum MacroExplorationDefinitionError {
         variable: String,
         child_macro: String,
         child_variable: String,
+    },
+    PublicInputAliasMissingParentNetBinding {
+        variable: String,
+        child_instance: String,
+        interface_port: String,
+        net: String,
     },
     UnknownPublicInputAliasPort {
         child_macro: String,
@@ -303,6 +310,15 @@ impl fmt::Display for MacroExplorationDefinitionError {
                 formatter,
                 "parent variable '{variable}' is incompatible with '{child_macro}.{child_variable}'"
             ),
+            Self::PublicInputAliasMissingParentNetBinding {
+                variable,
+                child_instance,
+                interface_port,
+                net,
+            } => write!(
+                formatter,
+                "parent variable '{variable}' has no binding on net '{net}' connected to '{child_instance}.{interface_port}'"
+            ),
             Self::UnknownPublicInputAliasPort { child_macro, port } => write!(
                 formatter,
                 "public input alias references unprojected interface port '{port}' in child macro '{child_macro}'"
@@ -477,12 +493,38 @@ pub fn validate_macro_public_input_aliases(
                 },
             );
         }
-        if !child
-            .exploration()
-            .interface_bindings()
-            .iter()
-            .any(|binding| binding.port() == alias.interface_port())
+        if !parent_variable.bindings().is_empty()
+            && let Some(net) = instance.net_for_port(alias.interface_port())
+            && !parent_variable.bindings().iter().any(|binding| {
+                macro_
+                    .circuit()
+                    .instance(binding.instance_path())
+                    .and_then(|source| source.net_for_port(binding.input()))
+                    == Some(net)
+            })
         {
+            errors.push(
+                MacroExplorationDefinitionError::PublicInputAliasMissingParentNetBinding {
+                    variable: alias.variable().to_owned(),
+                    child_instance: alias.child_instance().to_owned(),
+                    interface_port: alias.interface_port().to_owned(),
+                    net: net.to_owned(),
+                },
+            );
+        }
+        let exposes_port = if child.hierarchy_mode() == MacroHierarchyMode::BlackBox {
+            child
+                .ports()
+                .iter()
+                .any(|port| port.name() == alias.interface_port())
+        } else {
+            child
+                .exploration()
+                .interface_bindings()
+                .iter()
+                .any(|binding| binding.port() == alias.interface_port())
+        };
+        if !exposes_port {
             errors.push(
                 MacroExplorationDefinitionError::UnknownPublicInputAliasPort {
                     child_macro: child_name.clone(),

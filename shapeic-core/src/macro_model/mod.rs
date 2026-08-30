@@ -84,9 +84,9 @@ pub use model::{
     MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDerivedValue,
     MacroDesignVariable,
     MacroDesignVariableBinding, MacroDesignVariableCondition, MacroExploration,
-    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroPrimitiveDefault,
-    MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
-    MacroTestbenchSource,
+    MacroHierarchyMode, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
+    MacroPrimitiveDefault, MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds,
+    MacroSpecificationSource, MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};

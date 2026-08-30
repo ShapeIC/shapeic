@@ -13,10 +13,10 @@ use super::{
     CompactMacroInstanceExplorationInput, Macro, MacroCandidateProjectionError, MacroCatalog,
     MacroDerivationResolutionError, MacroExplorationError, MacroExplorationResult,
     MacroHierarchyDerivationRecord, MacroHierarchyExplorationInput,
-    MacroHierarchyExplorationResult, MacroHierarchyLocalInputError, MacroHierarchyNodeResult,
-    MacroHierarchyNodeStatus, MacroHierarchyPath, MacroHierarchyPathError,
-    MacroHierarchyPreviewRecord, MacroHierarchyValidationError, ResolvedChildConditions,
-    resolve_child_derivations, validate_macro_hierarchy_input,
+    MacroHierarchyExplorationResult, MacroHierarchyLocalInputError, MacroHierarchyMode,
+    MacroHierarchyNodeResult, MacroHierarchyNodeStatus, MacroHierarchyPath,
+    MacroHierarchyPathError, MacroHierarchyPreviewRecord, MacroHierarchyValidationError,
+    ResolvedChildConditions, resolve_child_derivations, validate_macro_hierarchy_input,
 };
 
 /// Stage of one path-local exploration that failed.
@@ -42,10 +42,11 @@ impl fmt::Display for MacroHierarchyExplorationStage {
 
 /// Runs a deterministic, one-pass electrical depth-first macro exploration.
 ///
-/// Parent previews combine aligned compact seeds with parent-owned public input
-/// grids. Accepted preview rows derive specifications and restrict each direct
-/// child's public inputs. Explored children are then projected into the parent,
-/// which is evaluated once more to produce the returned result.
+/// Parent previews keep aligned compact seeds independent from parent-owned
+/// public-input domains. Accepted preview rows derive specifications and
+/// restrict each direct child's public inputs from the parent side of the
+/// interface net. Explored children are projected with their real interface
+/// values; blackbox children remain terminal compact seed sets.
 pub fn explore_macro_hierarchy(
     top_macro: &str,
     macro_catalog: &MacroCatalog,
@@ -123,6 +124,7 @@ fn explore_node(
             macro_name: macro_.name().to_owned(),
             errors,
         })?;
+    let derivation_input = initial_input.clone();
 
     if children.is_empty() {
         let result = macro_
@@ -162,6 +164,7 @@ fn explore_node(
     }
 
     let mut resolved_children = BTreeMap::new();
+    let mut requires_refresh = false;
     for (child_instance, child_macro_name) in children {
         let child_macro = macro_catalog.get(child_macro_name).ok_or_else(|| {
             MacroHierarchyExplorationError::MissingChildMacro {
@@ -179,14 +182,13 @@ fn explore_node(
                     error,
                 })?;
         let conditions =
-            resolve_child_derivations(macro_, &preview, child_instance).map_err(|error| {
-                MacroHierarchyExplorationError::Derivation {
+            resolve_child_derivations(macro_, &preview, child_instance, &derivation_input)
+                .map_err(|error| MacroHierarchyExplorationError::Derivation {
                     path: path.clone(),
                     macro_name: macro_.name().to_owned(),
                     child_instance: child_instance.to_owned(),
                     error,
-                }
-            })?;
+                })?;
         derivations.insert(
             child_path.clone(),
             MacroHierarchyDerivationRecord::new(
@@ -196,6 +198,7 @@ fn explore_node(
             ),
         );
         let compact_input = if conditions.is_pruned() {
+            requires_refresh = true;
             let reason = conditions
                 .prune_reason()
                 .expect("pruned conditions always retain their reason")
@@ -206,7 +209,15 @@ fn explore_node(
                 child_macro,
                 child_instance.to_owned(),
             )
+        } else if child_macro.hierarchy_mode() == MacroHierarchyMode::BlackBox {
+            let compact = derivation_input
+                .compact_macro_instance(child_instance)
+                .expect("validated preview input contains every compact child seed")
+                .clone();
+            node_mut(nodes, &child_path).finish_blackbox(compact.candidates().points.len());
+            compact
         } else {
+            requires_refresh = true;
             let child_result = explore_node(
                 child_macro,
                 child_path.clone(),
@@ -230,6 +241,14 @@ fn explore_node(
             CompactMacroInstanceExplorationInput::from_projection(projection, Vec::new())
         };
         resolved_children.insert(child_instance.to_owned(), compact_input);
+    }
+
+    if !requires_refresh {
+        node_mut(nodes, &path).finish(
+            MacroHierarchyNodeStatus::PreviewFinalized,
+            Arc::clone(&preview),
+        );
+        return Ok(preview);
     }
 
     let final_input = hierarchy_input
@@ -291,6 +310,9 @@ fn collect_planned_nodes(
         path.clone(),
         MacroHierarchyNodeResult::pending(path.clone(), macro_.name()),
     );
+    if macro_.hierarchy_mode() == MacroHierarchyMode::BlackBox {
+        return;
+    }
     for instance in macro_.circuit().instances() {
         let BlockRef::Macro(child_macro_name) = instance.block() else {
             continue;
@@ -444,9 +466,12 @@ mod tests {
 
     use super::super::{
         MacroCompactSeedSet, MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget,
-        MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
+        MacroDesignVariable, MacroHierarchyMode, MacroHierarchyPathInput, MacroPort, MacroPortRole,
+        MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds,
+        MacroSpecificationSource,
     };
     use super::*;
+    use crate::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildValue};
 
     fn leaf(name: &str) -> Macro {
         Macro::new(
@@ -470,6 +495,160 @@ mod tests {
             implementation.build(),
             Circuit::builder().resistor("rc", "a", "b", 1.0).build(),
         )
+    }
+
+    #[test]
+    fn blackbox_child_keeps_seeds_factorized_and_stops_traversal() {
+        let child = Macro::new(
+            "opaque",
+            vec![MacroPort::new("OUT", MacroPortRole::Output)],
+            Circuit::default(),
+            Circuit::builder().resistor("r", "OUT", "0", "r_eq").build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+        .with_design_variable(MacroDesignVariable::new(
+            "bias",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_compact_seeds(MacroCompactSeedSet::aligned([("r_eq", vec![10.0, 20.0])]));
+        let top = Macro::new(
+            "top",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xchild", "opaque", [("OUT", "N")])
+                .build(),
+            Circuit::builder().resistor("r", "N", "0", 1.0).build(),
+        )
+        .with_design_variable(MacroDesignVariable::new(
+            "node_voltage",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_public_input_alias(MacroPublicInputAlias::new(
+            "node_voltage",
+            "xchild",
+            "bias",
+            "OUT",
+        ));
+        let catalog = MacroCatalog::from_macros([child, top]).unwrap();
+        let root = MacroHierarchyPath::root("top").unwrap();
+        let mut root_input = MacroHierarchyPathInput::new();
+        root_input
+            .register_design_variable_override(
+                "node_voltage",
+                PrimitiveBuildValue::Vector(vec![0.2, 0.4]),
+            )
+            .unwrap();
+        let mut input = MacroHierarchyExplorationInput::new();
+        input.register_path(root.clone(), root_input).unwrap();
+
+        let result =
+            explore_macro_hierarchy("top", &catalog, &PrimitiveCatalog::new(), &input).unwrap();
+        let child_path = root.child("xchild").unwrap();
+
+        assert_eq!(
+            result.node(&root).unwrap().status(),
+            &MacroHierarchyNodeStatus::PreviewFinalized
+        );
+        assert_eq!(
+            result.node(&child_path).unwrap().status(),
+            &MacroHierarchyNodeStatus::BlackBox { candidates: 2 }
+        );
+        assert_eq!(
+            result
+                .root_result()
+                .candidate_sets()
+                .instance("xchild")
+                .unwrap()
+                .candidates()
+                .points
+                .len(),
+            2
+        );
+        assert_eq!(result.root_result().accepted().len(), 2);
+        assert_eq!(result.statistics().blackboxes(), 1);
+        assert_eq!(result.statistics().finalized_previews(), 1);
+        assert_eq!(result.selection(0).unwrap().nodes().count(), 1);
+        assert_eq!(
+            result
+                .derivation(&child_path)
+                .unwrap()
+                .conditions()
+                .design_variable_conditions()
+                .get("bias"),
+            Some(&super::super::MacroDesignVariableCondition::allowed_values(
+                [0.2, 0.4]
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_a_blackbox_root() {
+        let top = Macro::new(
+            "top",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "N", "0", 1.0).build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+        .with_compact_seeds(MacroCompactSeedSet::constant());
+        let catalog = MacroCatalog::from_macros([top]).unwrap();
+        let error = explore_macro_hierarchy(
+            "top",
+            &catalog,
+            &PrimitiveCatalog::new(),
+            &MacroHierarchyExplorationInput::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MacroHierarchyExplorationError::Validation { errors }
+                if errors.iter().any(|error| matches!(
+                    error,
+                    MacroHierarchyValidationError::BlackBoxTopMacro { .. }
+                ))
+        ));
+    }
+
+    #[test]
+    fn mixed_hierarchy_refreshes_explored_children_and_keeps_blackbox_terminal() {
+        let opaque = Macro::new(
+            "opaque",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "a", "b", "r_eq").build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+        .with_compact_seeds(MacroCompactSeedSet::aligned([("r_eq", vec![10.0, 20.0])]));
+        let top = parent(&[("xopaque", "opaque"), ("xleaf", "leaf")]);
+        let catalog = MacroCatalog::from_macros([opaque, leaf("leaf"), top]).unwrap();
+
+        let result = explore_macro_hierarchy(
+            "top",
+            &catalog,
+            &PrimitiveCatalog::new(),
+            &MacroHierarchyExplorationInput::new(),
+        )
+        .unwrap();
+        let root = MacroHierarchyPath::root("top").unwrap();
+        let opaque_path = root.child("xopaque").unwrap();
+        let leaf_path = root.child("xleaf").unwrap();
+
+        assert_eq!(
+            result.node(&root).unwrap().status(),
+            &MacroHierarchyNodeStatus::Refreshed
+        );
+        assert_eq!(
+            result.node(&opaque_path).unwrap().status(),
+            &MacroHierarchyNodeStatus::BlackBox { candidates: 2 }
+        );
+        assert_eq!(
+            result.node(&leaf_path).unwrap().status(),
+            &MacroHierarchyNodeStatus::ExploredLeaf
+        );
+        assert_eq!(result.selection(0).unwrap().nodes().count(), 2);
     }
 
     #[test]

@@ -7,9 +7,10 @@ use crate::circuit::{BlockRef, Circuit, CircuitValue, LinearElement};
 
 use super::specification::PreparedMacroSpecifications;
 use super::{
-    Macro, MacroCatalog, MacroExplorationDefinitionError, MacroOutputSource,
-    MacroSpecificationEvaluationError, MacroTestbenchSource, validate_macro_derivation_targets,
-    validate_macro_exploration_definition, validate_macro_public_input_aliases,
+    Macro, MacroCatalog, MacroExplorationDefinitionError, MacroHierarchyMode, MacroOutputSource,
+    MacroSpecificationEvaluationError, MacroTestbenchSource, validate_macro_compact_seeds,
+    validate_macro_derivation_targets, validate_macro_exploration_definition,
+    validate_macro_public_input_aliases,
 };
 
 /// Identifies which circuit of a macro contains a validation error.
@@ -672,16 +673,29 @@ pub fn validate_macro(
 
     validate_circuit(
         macro_,
-        macro_.circuit(),
-        MacroCircuitKind::Implementation,
+        macro_.compact_model(),
+        MacroCircuitKind::CompactModel,
         primitive_catalog,
         macro_catalog,
         &mut errors,
     );
+    if macro_.hierarchy_mode() == MacroHierarchyMode::BlackBox {
+        validate_blackbox_public_variables(macro_, &mut errors);
+        errors.extend(
+            validate_macro_compact_seeds(macro_)
+                .into_iter()
+                .map(|error| MacroValidationError::InvalidExplorationDefinition {
+                    macro_name: macro_name.clone(),
+                    error: MacroExplorationDefinitionError::InvalidCompactSeed { error },
+                }),
+        );
+        return errors;
+    }
+
     validate_circuit(
         macro_,
-        macro_.compact_model(),
-        MacroCircuitKind::CompactModel,
+        macro_.circuit(),
+        MacroCircuitKind::Implementation,
         primitive_catalog,
         macro_catalog,
         &mut errors,
@@ -719,6 +733,27 @@ pub fn validate_macro(
     );
     validate_output_bindings(macro_, &mut errors);
     errors
+}
+
+fn validate_blackbox_public_variables(macro_: &Macro, errors: &mut Vec<MacroValidationError>) {
+    let mut names = HashSet::new();
+    for (index, variable) in macro_.exploration().design_variables().iter().enumerate() {
+        let error = if variable.name().trim().is_empty() {
+            Some(MacroExplorationDefinitionError::EmptyDesignVariable { index })
+        } else if !names.insert(variable.name()) {
+            Some(MacroExplorationDefinitionError::DuplicateDesignVariable {
+                variable: variable.name().to_owned(),
+            })
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            errors.push(MacroValidationError::InvalidExplorationDefinition {
+                macro_name: macro_.name().to_owned(),
+                error,
+            });
+        }
+    }
 }
 
 /// Validates every registered macro and the dependency graph between them.
@@ -1406,6 +1441,10 @@ fn visit_macro(
     let Some(macro_) = catalog.get(name) else {
         return;
     };
+    if macro_.hierarchy_mode() == MacroHierarchyMode::BlackBox {
+        completed.insert(name.to_owned());
+        return;
+    }
     active.push(name.to_owned());
     for dependency in
         macro_
@@ -1433,10 +1472,12 @@ mod tests {
     use crate::catalog::primitive_catalog::PrimitiveCatalog;
     use crate::circuit::Circuit;
     use crate::macro_model::{
-        Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroInterfaceBinding,
-        MacroOutputSource, MacroPort, MacroPortRole,
+        Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroCompactSeedSet,
+        MacroDesignVariable, MacroExplorationDefinitionError, MacroHierarchyMode,
+        MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
+    use crate::primitive::build::PrimitiveBuildInputKind;
     use crate::primitive::manifest::{
         Pin, PinRole, PrimitiveFiles, PrimitiveManifest, PrimitivePhysicalModel,
     };
@@ -1854,5 +1895,84 @@ mod tests {
             MacroValidationError::CyclicDependency { path }
                 if path == &["stage_a", "stage_b", "stage_a"]
         )));
+    }
+
+    #[test]
+    fn blackbox_requires_only_its_public_compact_surface() {
+        let macro_ = Macro::new(
+            "opaque",
+            vec![MacroPort::new("P", MacroPortRole::Inout)],
+            Circuit::default(),
+            Circuit::builder().resistor("r", "P", "0", "r_eq").build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+        .with_design_variable(MacroDesignVariable::new(
+            "bias",
+            PrimitiveBuildInputKind::Vector,
+            Vec::new(),
+        ))
+        .with_compact_seeds(MacroCompactSeedSet::aligned([("r_eq", vec![1.0, 2.0])]));
+        let catalog = MacroCatalog::from_macros([macro_]).unwrap();
+
+        assert!(validate_macro_catalog(&catalog, &PrimitiveCatalog::new()).is_empty());
+    }
+
+    #[test]
+    fn explored_macro_keeps_full_implementation_validation() {
+        let macro_ = Macro::new(
+            "detailed",
+            vec![MacroPort::new("P", MacroPortRole::Inout)],
+            Circuit::default(),
+            Circuit::builder().resistor("r", "P", "0", "r_eq").build(),
+        )
+        .with_compact_seeds(MacroCompactSeedSet::aligned([("r_eq", vec![1.0])]));
+        let catalog = MacroCatalog::from_macros([macro_]).unwrap();
+        let errors = validate_macro_catalog(&catalog, &PrimitiveCatalog::new());
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::EmptyCircuit {
+                circuit: MacroCircuitKind::Implementation,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn blackbox_still_requires_complete_compact_seeds() {
+        let macro_ = Macro::new(
+            "opaque",
+            Vec::new(),
+            Circuit::default(),
+            Circuit::builder().resistor("r", "P", "0", "r_eq").build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox);
+        let catalog = MacroCatalog::from_macros([macro_]).unwrap();
+        let errors = validate_macro_catalog(&catalog, &PrimitiveCatalog::new());
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::InvalidExplorationDefinition {
+                error: MacroExplorationDefinitionError::InvalidCompactSeed { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn blackbox_implementation_dependencies_are_not_traversed() {
+        let macro_ = Macro::new(
+            "opaque",
+            Vec::new(),
+            Circuit::builder()
+                .macro_instance("xself", "opaque", Vec::<(&str, &str)>::new())
+                .build(),
+            Circuit::builder().resistor("r", "P", "0", 1.0).build(),
+        )
+        .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+        .with_compact_seeds(MacroCompactSeedSet::constant());
+        let catalog = MacroCatalog::from_macros([macro_]).unwrap();
+
+        assert!(validate_macro_catalog(&catalog, &PrimitiveCatalog::new()).is_empty());
     }
 }

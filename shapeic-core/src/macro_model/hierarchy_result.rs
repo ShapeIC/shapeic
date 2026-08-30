@@ -29,6 +29,11 @@ pub enum MacroHierarchyNodeStatus {
     },
     /// A macro without submacros was evaluated once.
     ExploredLeaf,
+    /// Traversal stopped at a compact child without exploring its implementation.
+    BlackBox {
+        /// Number of aligned compact seed candidates exposed to the parent.
+        candidates: usize,
+    },
     /// A parent preview accepted no rows, so its children were not explored.
     PreviewRejected,
     /// Parent-derived conditions for this child have an empty intersection.
@@ -38,6 +43,8 @@ pub enum MacroHierarchyNodeStatus {
     },
     /// A parent was evaluated definitively after projecting explored children.
     Refreshed,
+    /// The first evaluation was definitive because every reached child was a blackbox.
+    PreviewFinalized,
 }
 
 /// Summary of one provisional parent evaluation.
@@ -130,6 +137,11 @@ impl MacroHierarchyNodeResult {
         self.result = None;
     }
 
+    pub(super) fn finish_blackbox(&mut self, candidates: usize) {
+        self.status = MacroHierarchyNodeStatus::BlackBox { candidates };
+        self.result = None;
+    }
+
     pub(super) fn block(&mut self, blocked_by: MacroHierarchyPath) {
         if matches!(self.status, MacroHierarchyNodeStatus::NotReached { .. }) {
             self.status = MacroHierarchyNodeStatus::NotReached {
@@ -207,6 +219,8 @@ pub struct MacroHierarchyStatistics {
     total_paths: usize,
     explored_leaves: usize,
     refreshed_parents: usize,
+    blackboxes: usize,
+    finalized_previews: usize,
     preview_rejections: usize,
     derivation_pruned: usize,
     not_reached: usize,
@@ -240,6 +254,7 @@ impl MacroHierarchyStatistics {
                         .result()
                         .map_or(0, |result| result.statistics().frequency_evaluations());
                 }
+                MacroHierarchyNodeStatus::BlackBox { .. } => statistics.blackboxes += 1,
                 MacroHierarchyNodeStatus::PreviewRejected => {
                     statistics.preview_rejections += 1;
                 }
@@ -252,6 +267,10 @@ impl MacroHierarchyStatistics {
                     statistics.frequency_evaluations += node
                         .result()
                         .map_or(0, |result| result.statistics().frequency_evaluations());
+                }
+                MacroHierarchyNodeStatus::PreviewFinalized => {
+                    statistics.finalized_previews += 1;
+                    statistics.definitive_evaluations += 1;
                 }
             }
         }
@@ -270,6 +289,14 @@ impl MacroHierarchyStatistics {
     pub const fn refreshed_parents(&self) -> usize {
         self.refreshed_parents
     }
+    /// Returns child occurrences intentionally treated as compact blackboxes.
+    pub const fn blackboxes(&self) -> usize {
+        self.blackboxes
+    }
+    /// Returns parent previews reused directly as definitive results.
+    pub const fn finalized_previews(&self) -> usize {
+        self.finalized_previews
+    }
     /// Returns parent previews that accepted no candidates.
     pub const fn preview_rejections(&self) -> usize {
         self.preview_rejections
@@ -286,7 +313,7 @@ impl MacroHierarchyStatistics {
     pub const fn previews_executed(&self) -> usize {
         self.previews_executed
     }
-    /// Returns leaf evaluations plus definitive parent refreshes.
+    /// Returns leaf evaluations, parent refreshes, and finalized previews.
     pub const fn definitive_evaluations(&self) -> usize {
         self.definitive_evaluations
     }

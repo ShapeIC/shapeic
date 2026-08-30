@@ -3,8 +3,8 @@
 This example wraps `ota_4t` in an `ota_system` macro and runs the complete
 one-pass hierarchical flow:
 
-1. evaluate the parent across aligned representative compact seeds and the
-   parent-owned `vout`/`vbias` grids;
+1. evaluate the parent with aligned representative compact seeds while keeping
+   the parent-owned `vout`/`vbias` domains separate from those seed rows;
 2. derive the OTA gain requirement and automatically propagate only the
    surviving node-voltage values into the child's public inputs;
 3. explore the OTA implementation;
@@ -30,3 +30,8 @@ as `gm` and `ro`. Interface voltages are not seed data: the parent owns their
 exploration grids through `MacroPublicInputAlias`, while the definitive parent
 evaluation receives the actual interface voltages projected by the explored
 child.
+
+Macros marked with `MacroHierarchyMode::BlackBox` stop traversal at their
+compact model. Their seeds are definitive for that run, their implementation is
+not validated or explored, and parent aliases still derive interface
+restrictions without duplicating voltage columns into the compact candidates.

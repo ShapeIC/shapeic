@@ -10,8 +10,8 @@ use crate::exploration::candidate::CandidatePoint;
 
 use super::{
     MacroAcceptedCandidate, MacroExplorationInstanceKind, MacroExplorationResult,
-    MacroHierarchyExplorationResult, MacroHierarchyPath, MacroHierarchyPathError,
-    MacroInstanceCandidateSet,
+    MacroHierarchyExplorationResult, MacroHierarchyNodeStatus, MacroHierarchyPath,
+    MacroHierarchyPathError, MacroInstanceCandidateSet,
 };
 
 /// Typed path of one local instance inside a concrete macro occurrence.
@@ -185,6 +185,12 @@ impl<'result> MacroHierarchySelection<'result> {
                     error,
                 }
             })?;
+            if matches!(
+                self.hierarchy.node(&child_path).map(|node| node.status()),
+                Some(MacroHierarchyNodeStatus::BlackBox { .. })
+            ) {
+                continue;
+            }
             let (child_result, child_accepted_index, _) = result
                 .selected_submacro_with_index(accepted, instance.instance_path())
                 .ok_or_else(|| MacroHierarchySelectionError::MissingSubmacroProvenance {

@@ -14,6 +14,7 @@ pub struct Macro {
     ports: Vec<MacroPort>,
     circuit: Circuit,
     compact_model: Circuit,
+    hierarchy_mode: MacroHierarchyMode,
     exploration: MacroExploration,
 }
 
@@ -30,8 +31,16 @@ impl Macro {
             ports,
             circuit,
             compact_model,
+            hierarchy_mode: MacroHierarchyMode::Explore,
             exploration: MacroExploration::default(),
         }
+    }
+
+    /// Selects whether hierarchy traversal explores this macro or treats it as
+    /// a terminal compact blackbox.
+    pub fn with_hierarchy_mode(mut self, mode: MacroHierarchyMode) -> Self {
+        self.hierarchy_mode = mode;
+        self
     }
 
     /// Attaches one unprepared AC testbench to the macro.
@@ -64,7 +73,7 @@ impl Macro {
         self
     }
 
-    /// Sets the aligned compact points used before this macro is explored as a child.
+    /// Sets aligned compact points used for previews and definitive blackboxes.
     pub fn with_compact_seeds(mut self, seeds: MacroCompactSeedSet) -> Self {
         self.exploration.compact_seeds = Some(seeds);
         self
@@ -115,11 +124,27 @@ impl Macro {
         &self.compact_model
     }
 
+    /// Returns how hierarchy traversal handles this macro when it is a child.
+    pub const fn hierarchy_mode(&self) -> MacroHierarchyMode {
+        self.hierarchy_mode
+    }
+
     /// Returns the testbenches and future exploration configuration owned by
     /// this macro.
     pub const fn exploration(&self) -> &MacroExploration {
         &self.exploration
     }
+}
+
+/// Controls whether a child macro is recursively explored or used only through
+/// its compact seeds and compact circuit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MacroHierarchyMode {
+    /// Recursively explores the implementation and projects definitive results.
+    #[default]
+    Explore,
+    /// Stops traversal and uses the compact seeds as definitive candidates.
+    BlackBox,
 }
 
 /// One ordered public port of a macro.
@@ -210,7 +235,7 @@ impl MacroExploration {
         self
     }
 
-    /// Sets the aligned compact points used by a parent preview.
+    /// Sets aligned compact points used for previews and definitive blackboxes.
     pub fn with_compact_seeds(mut self, seeds: MacroCompactSeedSet) -> Self {
         self.compact_seeds = Some(seeds);
         self
@@ -287,7 +312,7 @@ impl MacroExploration {
         &self.public_input_aliases
     }
 
-    /// Returns the aligned compact points, when this macro can seed a parent preview.
+    /// Returns aligned compact points for previews or blackbox evaluation.
     pub const fn compact_seeds(&self) -> Option<&MacroCompactSeedSet> {
         self.compact_seeds.as_ref()
     }
