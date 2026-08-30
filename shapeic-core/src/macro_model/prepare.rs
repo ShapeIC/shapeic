@@ -9,12 +9,15 @@ use std::path::PathBuf;
 use shapeic_mna::numeric::NumericMnaError;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
-use crate::testbench::{AcAnalysis, AcTestbench, AcTestbenchBuildError, PreparedAcTestbench};
+use crate::testbench::{
+    AcAnalysis, AcTestbench, AcTestbenchBuildError, DcNodeVoltageAnalysis, DcNodeVoltageTestbench,
+    DcNodeVoltageTestbenchBuildError, PreparedAcTestbench, PreparedDcNodeVoltageTestbench,
+};
 
 use super::{
-    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroRenderError, MacroRenderMode,
-    MacroTestbenchSource, ResolvedPhysicalPrimitive, ResolvedPrimitiveBranch,
-    render_small_signal_netlist,
+    Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCatalog, MacroDcNodeVoltageTestbench,
+    MacroRenderError, MacroRenderMode, MacroTestbenchSource, ResolvedPhysicalPrimitive,
+    ResolvedPrimitiveBranch, render_small_signal_netlist,
 };
 
 type ComposedMacroAcTestbench = (
@@ -31,6 +34,38 @@ pub struct PreparedMacroAcTestbench {
     domain: MacroAnalysisDomain,
     primitive_branches: Vec<ResolvedPrimitiveBranch>,
     physical_primitives: Vec<ResolvedPhysicalPrimitive>,
+}
+
+/// Compiled macro DC node-voltage testbench and its resolved primitive topology.
+#[derive(Clone, Debug)]
+pub struct PreparedMacroDcNodeVoltageTestbench {
+    testbench: PreparedDcNodeVoltageTestbench,
+    primitive_branches: Vec<ResolvedPrimitiveBranch>,
+}
+
+impl PreparedMacroDcNodeVoltageTestbench {
+    /// Returns numerical parameter names in candidate binding order.
+    pub fn parameter_names(&self) -> &[String] {
+        self.testbench.parameter_names()
+    }
+
+    /// Returns the attached DC node-voltage analysis.
+    pub const fn analysis(&self) -> &DcNodeVoltageAnalysis {
+        self.testbench.analysis()
+    }
+
+    /// Returns primitive branches materialized by the selected render mode.
+    pub fn primitive_branches(&self) -> &[ResolvedPrimitiveBranch] {
+        &self.primitive_branches
+    }
+
+    /// Instantiates the compiled MNA for one candidate parameter vector.
+    pub fn instantiate(
+        &mut self,
+        parameter_values: &[f64],
+    ) -> Result<DcNodeVoltageTestbench, NumericMnaError> {
+        self.testbench.instantiate(parameter_values)
+    }
 }
 
 impl PreparedMacroAcTestbench {
@@ -80,6 +115,8 @@ pub enum MacroTestbenchPrepareError {
     },
     /// The composed linear netlist could not be compiled for numerical MNA.
     Build(AcTestbenchBuildError),
+    /// A composed DC node-voltage netlist could not be compiled.
+    BuildDcNodeVoltage(DcNodeVoltageTestbenchBuildError),
 }
 
 impl fmt::Display for MacroTestbenchPrepareError {
@@ -92,6 +129,12 @@ impl fmt::Display for MacroTestbenchPrepareError {
                 path.display()
             ),
             Self::Build(error) => write!(formatter, "could not prepare macro testbench: {error}"),
+            Self::BuildDcNodeVoltage(error) => {
+                write!(
+                    formatter,
+                    "could not prepare macro DC node-voltage testbench: {error}"
+                )
+            }
         }
     }
 }
@@ -102,6 +145,7 @@ impl Error for MacroTestbenchPrepareError {
             Self::Render(error) => Some(error),
             Self::ReadTestbench { source, .. } => Some(source),
             Self::Build(error) => Some(error),
+            Self::BuildDcNodeVoltage(error) => Some(error),
         }
     }
 }
@@ -141,6 +185,36 @@ pub fn prepare_macro_ac_testbench(
         domain,
         primitive_branches,
         physical_primitives,
+    })
+}
+
+/// Renders, composes, and compiles one macro-owned DC node-voltage testbench.
+pub fn prepare_macro_dc_node_voltage_testbench(
+    macro_: &Macro,
+    testbench: &MacroDcNodeVoltageTestbench,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    render_mode: MacroRenderMode,
+) -> Result<PreparedMacroDcNodeVoltageTestbench, MacroTestbenchPrepareError> {
+    let rendered =
+        render_small_signal_netlist(macro_, primitive_catalog, macro_catalog, render_mode)
+            .map_err(MacroTestbenchPrepareError::Render)?;
+    let testbench_source = read_testbench_source(testbench.source())?;
+    let (macro_source, parameter_order, primitive_branches, _) = rendered.into_parts();
+    let source = compose_sources(macro_source, testbench.name(), &testbench_source);
+    let parameter_order = parameter_order
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let testbench = PreparedDcNodeVoltageTestbench::from_spice(
+        &source,
+        &parameter_order,
+        testbench.analysis().clone(),
+    )
+    .map_err(MacroTestbenchPrepareError::BuildDcNodeVoltage)?;
+    Ok(PreparedMacroDcNodeVoltageTestbench {
+        testbench,
+        primitive_branches,
     })
 }
 
@@ -352,9 +426,7 @@ mod tests {
                 ("vgs", 1.0),
                 ("vds", 2.0),
             ]
-            .map(|(parameter, value)| {
-                (small_signal_param_name(parameter, "xcore", "m1"), value)
-            }),
+            .map(|(parameter, value)| (small_signal_param_name(parameter, "xcore", "m1"), value)),
         );
         CandidateSet::new("xcore", vec![CandidatePoint::new(values)])
     }
@@ -432,12 +504,9 @@ mod tests {
     fn instantiates_and_analyzes_a_candidate_with_resolved_capacitances() {
         let macro_ = macro_();
         let catalog = MacroCatalog::from_macros([macro_.clone()]).unwrap();
-        let testbench = MacroAcTestbench::from_spice(
-            "gain",
-            "Vinput VIN VSS 1\n.end\n",
-            analysis(),
-        )
-        .with_domain(MacroAnalysisDomain::LayoutAware);
+        let testbench =
+            MacroAcTestbench::from_spice("gain", "Vinput VIN VSS 1\n.end\n", analysis())
+                .with_domain(MacroAnalysisDomain::LayoutAware);
         let prepared = prepare_macro_ac_testbench(
             &macro_,
             &testbench,
@@ -452,11 +521,8 @@ mod tests {
         let mut electrical_prepared = prepared;
         electrical_prepared.domain = MacroAnalysisDomain::Electrical;
         let candidates = candidate_set();
-        let mut evaluator = PreparedMacroAcCandidateEvaluator::new(
-            electrical_prepared,
-            &[&candidates],
-        )
-        .unwrap();
+        let mut evaluator =
+            PreparedMacroAcCandidateEvaluator::new(electrical_prepared, &[&candidates]).unwrap();
 
         let electrical_candidate = evaluator.instantiate(&[0]).unwrap();
 
@@ -468,11 +534,9 @@ mod tests {
                 .any(|value| *value != 0.0)
         );
 
-        let missing_lut_error = PreparedMacroAcCandidateEvaluator::new(
-            layout_prepared.clone(),
-            &[&candidates],
-        )
-        .unwrap_err();
+        let missing_lut_error =
+            PreparedMacroAcCandidateEvaluator::new(layout_prepared.clone(), &[&candidates])
+                .unwrap_err();
         assert!(matches!(
             missing_lut_error,
             crate::macro_model::PreparedMacroAcCandidateEvaluatorError::MissingPhysicalLut

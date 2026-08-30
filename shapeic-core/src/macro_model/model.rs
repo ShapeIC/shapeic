@@ -4,7 +4,7 @@ use crate::analysis::AcMetric;
 use crate::circuit::Circuit;
 use crate::exploration::filter::CandidateFilter;
 use crate::primitive::build::{PrimitiveBuildInput, PrimitiveBuildInputKind};
-use crate::testbench::AcAnalysis;
+use crate::testbench::{AcAnalysis, DcNodeVoltageAnalysis};
 
 /// A reusable analog macro with an implementation, compact model, and
 /// exploration definition.
@@ -46,6 +46,15 @@ impl Macro {
     /// Attaches one unprepared AC testbench to the macro.
     pub fn with_ac_testbench(mut self, testbench: MacroAcTestbench) -> Self {
         self.exploration.testbenches.push(testbench);
+        self
+    }
+
+    /// Attaches one unprepared DC node-voltage testbench to the macro.
+    pub fn with_dc_node_voltage_testbench(
+        mut self,
+        testbench: MacroDcNodeVoltageTestbench,
+    ) -> Self {
+        self.exploration.dc_node_voltage_testbenches.push(testbench);
         self
     }
 
@@ -189,6 +198,7 @@ pub enum MacroPortRole {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MacroExploration {
     testbenches: Vec<MacroAcTestbench>,
+    dc_node_voltage_testbenches: Vec<MacroDcNodeVoltageTestbench>,
     specifications: Vec<MacroSpecification>,
     primitive_defaults: Vec<MacroPrimitiveDefault>,
     design_variables: Vec<MacroDesignVariable>,
@@ -208,6 +218,15 @@ impl MacroExploration {
     /// Adds one unprepared AC testbench.
     pub fn with_ac_testbench(mut self, testbench: MacroAcTestbench) -> Self {
         self.testbenches.push(testbench);
+        self
+    }
+
+    /// Adds one unprepared DC node-voltage testbench.
+    pub fn with_dc_node_voltage_testbench(
+        mut self,
+        testbench: MacroDcNodeVoltageTestbench,
+    ) -> Self {
+        self.dc_node_voltage_testbenches.push(testbench);
         self
     }
 
@@ -267,6 +286,18 @@ impl MacroExploration {
     /// Finds an AC testbench by name.
     pub fn testbench(&self, name: &str) -> Option<&MacroAcTestbench> {
         self.testbenches
+            .iter()
+            .find(|testbench| testbench.name == name)
+    }
+
+    /// Returns DC node-voltage testbenches in evaluation order.
+    pub fn dc_node_voltage_testbenches(&self) -> &[MacroDcNodeVoltageTestbench] {
+        &self.dc_node_voltage_testbenches
+    }
+
+    /// Finds one DC node-voltage testbench by name.
+    pub fn dc_node_voltage_testbench(&self, name: &str) -> Option<&MacroDcNodeVoltageTestbench> {
+        self.dc_node_voltage_testbenches
             .iter()
             .find(|testbench| testbench.name == name)
     }
@@ -813,6 +844,11 @@ pub enum MacroSpecificationSource {
         /// Requested AC metric.
         metric: AcMetric,
     },
+    /// Reads the signed voltage produced by a DC node-voltage testbench.
+    DcNodeVoltage {
+        /// Macro-local testbench name.
+        testbench: String,
+    },
     /// Evaluates an arithmetic expression over candidate columns, AC metrics,
     /// and other named specifications.
     Expression(String),
@@ -832,6 +868,13 @@ impl MacroSpecificationSource {
         Self::AcMetric {
             testbench: testbench.into(),
             metric,
+        }
+    }
+
+    /// Selects the signed result from a macro-local DC node-voltage testbench.
+    pub fn dc_node_voltage(testbench: impl Into<String>) -> Self {
+        Self::DcNodeVoltage {
+            testbench: testbench.into(),
         }
     }
 
@@ -889,6 +932,8 @@ pub enum MacroOutputSource {
     },
     /// One metric produced by a named AC testbench.
     AcMetric { testbench: String, metric: AcMetric },
+    /// Signed voltage produced by a named DC node-voltage testbench.
+    DcNodeVoltage { testbench: String },
 }
 
 impl MacroOutputSource {
@@ -905,6 +950,13 @@ impl MacroOutputSource {
         Self::AcMetric {
             testbench: testbench.into(),
             metric,
+        }
+    }
+
+    /// Selects the signed result from a macro-local DC node-voltage testbench.
+    pub fn dc_node_voltage(testbench: impl Into<String>) -> Self {
+        Self::DcNodeVoltage {
+            testbench: testbench.into(),
         }
     }
 }
@@ -1037,6 +1089,57 @@ impl MacroAcTestbench {
     /// Returns the physical modeling domain used by this testbench.
     pub const fn domain(&self) -> MacroAnalysisDomain {
         self.domain
+    }
+}
+
+/// An unprepared DC node-voltage testbench associated with a macro.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroDcNodeVoltageTestbench {
+    name: String,
+    source: MacroTestbenchSource,
+    analysis: DcNodeVoltageAnalysis,
+}
+
+impl MacroDcNodeVoltageTestbench {
+    /// Creates a testbench from inline SPICE source text.
+    pub fn from_spice(
+        name: impl Into<String>,
+        source: impl Into<String>,
+        analysis: DcNodeVoltageAnalysis,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source: MacroTestbenchSource::Spice(source.into()),
+            analysis,
+        }
+    }
+
+    /// Creates a testbench whose SPICE source is read during preparation.
+    pub fn from_spice_file(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        analysis: DcNodeVoltageAnalysis,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source: MacroTestbenchSource::SpiceFile(path.into()),
+            analysis,
+        }
+    }
+
+    /// Returns the testbench name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the unprepared SPICE source location.
+    pub const fn source(&self) -> &MacroTestbenchSource {
+        &self.source
+    }
+
+    /// Returns the attached DC node-voltage analysis.
+    pub const fn analysis(&self) -> &DcNodeVoltageAnalysis {
+        &self.analysis
     }
 }
 

@@ -139,6 +139,12 @@ impl PreparedMacroSpecifications {
                 }
             }
         }
+        for testbench in macro_.exploration().dc_node_voltage_testbenches() {
+            let symbol = format!("{}.voltage_v", testbench.name());
+            if !external_symbols.insert(symbol.clone()) {
+                return Err(MacroSpecificationEvaluationError::DuplicateSymbol { symbol });
+            }
+        }
         if let Some(name) = specification_names
             .iter()
             .find(|name| external_symbols.contains::<str>(*name))
@@ -223,6 +229,14 @@ impl PreparedMacroSpecifications {
                         }
                     })?
                 }
+                MacroSpecificationSource::DcNodeVoltage { testbench } => {
+                    selected_dc_node_voltage(macro_, candidate, testbench).ok_or_else(|| {
+                        MacroSpecificationEvaluationError::UnavailableDcNodeVoltage {
+                            specification: specification.name().to_owned(),
+                            testbench: testbench.clone(),
+                        }
+                    })?
+                }
                 MacroSpecificationSource::Expression(expression) => {
                     ExpressionParser::new(expression, &symbols)
                         .parse()
@@ -289,25 +303,42 @@ fn validate_direct_source(
     specification: &str,
     source: &MacroSpecificationSource,
 ) -> Result<(), MacroSpecificationEvaluationError> {
-    if let MacroSpecificationSource::AcMetric { testbench, metric } = source {
-        let testbench_definition = macro_.exploration().testbench(testbench).ok_or_else(|| {
-            MacroSpecificationEvaluationError::UnknownTestbench {
-                specification: specification.to_owned(),
-                testbench: testbench.clone(),
+    match source {
+        MacroSpecificationSource::AcMetric { testbench, metric } => {
+            let testbench_definition =
+                macro_.exploration().testbench(testbench).ok_or_else(|| {
+                    MacroSpecificationEvaluationError::UnknownTestbench {
+                        specification: specification.to_owned(),
+                        testbench: testbench.clone(),
+                    }
+                })?;
+            if !testbench_definition
+                .analysis()
+                .policy
+                .metrics
+                .contains(*metric)
+            {
+                return Err(MacroSpecificationEvaluationError::MetricNotSelected {
+                    specification: specification.to_owned(),
+                    testbench: testbench.clone(),
+                    metric: *metric,
+                });
             }
-        })?;
-        if !testbench_definition
-            .analysis()
-            .policy
-            .metrics
-            .contains(*metric)
-        {
-            return Err(MacroSpecificationEvaluationError::MetricNotSelected {
-                specification: specification.to_owned(),
-                testbench: testbench.clone(),
-                metric: *metric,
-            });
         }
+        MacroSpecificationSource::DcNodeVoltage { testbench } => {
+            if macro_
+                .exploration()
+                .dc_node_voltage_testbench(testbench)
+                .is_none()
+            {
+                return Err(MacroSpecificationEvaluationError::UnknownTestbench {
+                    specification: specification.to_owned(),
+                    testbench: testbench.clone(),
+                });
+            }
+        }
+        MacroSpecificationSource::CandidateColumn { .. }
+        | MacroSpecificationSource::Expression(_) => {}
     }
     Ok(())
 }
@@ -355,6 +386,17 @@ fn candidate_symbols(
     for outcome in &candidate.ac_outcomes {
         let testbench = macro_.exploration().testbenches()[outcome.testbench_index].name();
         insert_metrics(&mut symbols, testbench, outcome.outcome.metrics)?;
+    }
+    for outcome in &candidate.dc_node_voltage_outcomes {
+        let testbench =
+            macro_.exploration().dc_node_voltage_testbenches()[outcome.testbench_index].name();
+        let symbol = format!("{testbench}.voltage_v");
+        if symbols
+            .insert(symbol.clone(), outcome.outcome.voltage_v())
+            .is_some()
+        {
+            return Err(MacroSpecificationEvaluationError::DuplicateSymbol { symbol });
+        }
     }
     Ok(symbols)
 }
@@ -423,6 +465,23 @@ fn selected_metric(
         AcMetric::UnityGainHz => metrics.unity_gain_hz,
         AcMetric::PhaseMarginDeg => metrics.phase_margin_deg,
     }
+}
+
+fn selected_dc_node_voltage(
+    macro_: &Macro,
+    candidate: &MacroAcceptedCandidate,
+    testbench: &str,
+) -> Option<f64> {
+    let testbench_index = macro_
+        .exploration()
+        .dc_node_voltage_testbenches()
+        .iter()
+        .position(|definition| definition.name() == testbench)?;
+    candidate
+        .dc_node_voltage_outcomes
+        .iter()
+        .find(|outcome| outcome.testbench_index == testbench_index)
+        .map(|outcome| outcome.outcome.voltage_v())
 }
 
 fn expression_symbols(expression: &str) -> Result<Vec<String>, MacroSpecificationEvaluationError> {
@@ -656,6 +715,10 @@ pub enum MacroSpecificationEvaluationError {
         testbench: String,
         metric: AcMetric,
     },
+    UnavailableDcNodeVoltage {
+        specification: String,
+        testbench: String,
+    },
     DuplicateSymbol {
         symbol: String,
     },
@@ -739,6 +802,13 @@ impl fmt::Display for MacroSpecificationEvaluationError {
             } => write!(
                 formatter,
                 "specification '{specification}' cannot read {metric:?} from testbench '{testbench}'"
+            ),
+            Self::UnavailableDcNodeVoltage {
+                specification,
+                testbench,
+            } => write!(
+                formatter,
+                "specification '{specification}' cannot read DC node voltage from testbench '{testbench}'"
             ),
             Self::DuplicateSymbol { symbol } => {
                 write!(

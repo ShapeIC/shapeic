@@ -3,8 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
-use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_layout::PhysicalLookupTable;
+use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 use shapeic_mna::numeric::NumericMnaError;
 
 use crate::analysis::{AdaptiveAcError, AdaptiveAcOutcome};
@@ -16,11 +16,14 @@ use crate::exploration::binding::{
     CandidateParameterBindingError,
 };
 use crate::exploration::candidate::CandidateSet;
-use crate::testbench::{AcTestbench, AcTestbenchEvaluationError};
+use crate::testbench::{
+    AcTestbench, AcTestbenchEvaluationError, DcNodeVoltageOutcome, DcNodeVoltageTestbench,
+    DcNodeVoltageTestbenchEvaluationError,
+};
 
 use super::{
     CandidatePhysicalBinder, CandidatePhysicalBindingError, MacroAnalysisDomain,
-    PhysicalCandidateStampOutcome, PreparedMacroAcTestbench,
+    PhysicalCandidateStampOutcome, PreparedMacroAcTestbench, PreparedMacroDcNodeVoltageTestbench,
 };
 
 const ZERO_CAPACITANCES: MosDeviceCapacitances = MosDeviceCapacitances {
@@ -34,6 +37,174 @@ const ZERO_CAPACITANCES: MosDeviceCapacitances = MosDeviceCapacitances {
         cjd: 0.0,
     },
 };
+
+/// Reusable candidate binder for one macro DC node-voltage testbench.
+#[derive(Debug)]
+pub struct PreparedMacroDcNodeVoltageCandidateEvaluator<'a> {
+    testbench: PreparedMacroDcNodeVoltageTestbench,
+    parameters: CandidateParameterBinder<'a>,
+    capacitances: CandidateCapacitanceBinder<'a>,
+    parameter_values: Vec<f64>,
+    capacitance_scratch: Vec<f64>,
+    capacitance_values: Vec<MosDeviceCapacitances>,
+}
+
+impl<'a> PreparedMacroDcNodeVoltageCandidateEvaluator<'a> {
+    /// Precomputes all candidate-column bindings for the prepared testbench.
+    pub fn new(
+        testbench: PreparedMacroDcNodeVoltageTestbench,
+        candidate_sets: &[&'a CandidateSet],
+    ) -> Result<Self, PreparedMacroDcNodeVoltageCandidateEvaluatorError> {
+        let parameters =
+            CandidateParameterBinder::new(testbench.parameter_names(), candidate_sets)?;
+        let capacitances =
+            CandidateCapacitanceBinder::new(testbench.primitive_branches(), candidate_sets)?;
+        let parameter_values = vec![0.0; parameters.parameter_names().len()];
+        let capacitance_scratch = vec![0.0; capacitances.scratch_len()];
+        let capacitance_values = vec![ZERO_CAPACITANCES; capacitances.branches().len()];
+        Ok(Self {
+            testbench,
+            parameters,
+            capacitances,
+            parameter_values,
+            capacitance_scratch,
+            capacitance_values,
+        })
+    }
+
+    /// Creates a worker-private evaluator with independent scratch buffers.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            testbench: self.testbench.clone(),
+            parameters: self.parameters.clone(),
+            capacitances: self.capacitances.clone(),
+            parameter_values: vec![0.0; self.parameter_values.len()],
+            capacitance_scratch: vec![0.0; self.capacitance_scratch.len()],
+            capacitance_values: vec![ZERO_CAPACITANCES; self.capacitance_values.len()],
+        }
+    }
+
+    /// Binds, instantiates, and stamps one candidate selection.
+    pub fn instantiate(
+        &mut self,
+        candidate_indices: &[usize],
+    ) -> Result<DcNodeVoltageTestbench, PreparedMacroDcNodeVoltageCandidateEvaluatorError> {
+        self.parameters
+            .bind_into(candidate_indices, &mut self.parameter_values)?;
+        self.capacitances.bind_into(
+            candidate_indices,
+            &mut self.capacitance_scratch,
+            &mut self.capacitance_values,
+        )?;
+        let mut candidate = self.testbench.instantiate(&self.parameter_values)?;
+        stamp_resolved_mos_capacitances(
+            candidate.system_mut(),
+            self.capacitances.branches(),
+            &self.capacitance_values,
+        )?;
+        Ok(candidate)
+    }
+
+    /// Instantiates and resolves the configured node voltage at `s = 0`.
+    pub fn analyze(
+        &mut self,
+        candidate_indices: &[usize],
+    ) -> Result<DcNodeVoltageOutcome, MacroDcNodeVoltageCandidateAnalysisError> {
+        self.instantiate(candidate_indices)
+            .map_err(MacroDcNodeVoltageCandidateAnalysisError::Candidate)?
+            .analyze()
+            .map_err(MacroDcNodeVoltageCandidateAnalysisError::Analysis)
+    }
+}
+
+/// Errors produced while binding or instantiating a macro DC candidate.
+#[derive(Debug)]
+pub enum PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    ParameterBinding(CandidateParameterBindingError),
+    CapacitanceBinding(CandidateCapacitanceBindingError),
+    Instantiate(NumericMnaError),
+    CapacitanceStamp(ResolvedCapacitanceStampError),
+}
+
+impl From<CandidateParameterBindingError> for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn from(error: CandidateParameterBindingError) -> Self {
+        Self::ParameterBinding(error)
+    }
+}
+
+impl From<CandidateCapacitanceBindingError> for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn from(error: CandidateCapacitanceBindingError) -> Self {
+        Self::CapacitanceBinding(error)
+    }
+}
+
+impl From<NumericMnaError> for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn from(error: NumericMnaError) -> Self {
+        Self::Instantiate(error)
+    }
+}
+
+impl From<ResolvedCapacitanceStampError> for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn from(error: ResolvedCapacitanceStampError) -> Self {
+        Self::CapacitanceStamp(error)
+    }
+}
+
+impl fmt::Display for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParameterBinding(error) => {
+                write!(
+                    formatter,
+                    "could not bind candidate MNA parameters: {error}"
+                )
+            }
+            Self::CapacitanceBinding(error) => {
+                write!(formatter, "could not bind candidate capacitances: {error}")
+            }
+            Self::Instantiate(error) => {
+                write!(formatter, "could not instantiate candidate MNA: {error}")
+            }
+            Self::CapacitanceStamp(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for PreparedMacroDcNodeVoltageCandidateEvaluatorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ParameterBinding(error) => Some(error),
+            Self::CapacitanceBinding(error) => Some(error),
+            Self::Instantiate(error) => Some(error),
+            Self::CapacitanceStamp(error) => Some(error),
+        }
+    }
+}
+
+/// Errors produced while resolving one macro DC node-voltage candidate.
+#[derive(Debug)]
+pub enum MacroDcNodeVoltageCandidateAnalysisError {
+    Candidate(PreparedMacroDcNodeVoltageCandidateEvaluatorError),
+    Analysis(DcNodeVoltageTestbenchEvaluationError),
+}
+
+impl fmt::Display for MacroDcNodeVoltageCandidateAnalysisError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Candidate(error) => error.fmt(formatter),
+            Self::Analysis(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for MacroDcNodeVoltageCandidateAnalysisError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Candidate(error) => Some(error),
+            Self::Analysis(error) => Some(error),
+        }
+    }
+}
 
 /// Reusable candidate-to-MNA instantiation path for one macro AC testbench.
 ///

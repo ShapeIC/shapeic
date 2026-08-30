@@ -188,6 +188,12 @@ fn resolve_source(
                 }
             })?
         }
+        MacroOutputSource::DcNodeVoltage { testbench } => result
+            .dc_node_voltage_outcome(accepted, testbench)
+            .ok_or_else(|| MacroOutputResolutionError::MissingDcNodeVoltageOutcome {
+                testbench: testbench.clone(),
+            })?
+            .voltage_v(),
     };
     if !value.is_finite() {
         return Err(MacroOutputResolutionError::NonFiniteValue);
@@ -284,6 +290,9 @@ pub enum MacroOutputResolutionError {
     MissingAcOutcome {
         testbench: String,
     },
+    MissingDcNodeVoltageOutcome {
+        testbench: String,
+    },
     UnavailableAcMetric {
         testbench: String,
         metric: AcMetric,
@@ -311,6 +320,10 @@ impl fmt::Display for MacroOutputResolutionError {
                     "accepted result has no AC outcome for '{testbench}'"
                 )
             }
+            Self::MissingDcNodeVoltageOutcome { testbench } => write!(
+                formatter,
+                "accepted result has no DC node-voltage outcome for '{testbench}'"
+            ),
             Self::UnavailableAcMetric { testbench, metric } => write!(
                 formatter,
                 "AC metric {} is unavailable for testbench '{testbench}'",

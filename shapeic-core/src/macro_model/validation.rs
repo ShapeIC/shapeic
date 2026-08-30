@@ -224,6 +224,10 @@ pub enum MacroValidationError {
         testbench: String,
         node: &'static str,
     },
+    EmptyDcNode {
+        macro_name: String,
+        testbench: String,
+    },
     InvalidAcConfig {
         macro_name: String,
         testbench: String,
@@ -566,6 +570,13 @@ impl fmt::Display for MacroValidationError {
             } => write!(
                 formatter,
                 "macro '{macro_name}' testbench '{testbench}' has an empty transfer {node} node"
+            ),
+            Self::EmptyDcNode {
+                macro_name,
+                testbench,
+            } => write!(
+                formatter,
+                "macro '{macro_name}' DC node-voltage testbench '{testbench}' has an empty node"
             ),
             Self::InvalidAcConfig {
                 macro_name,
@@ -1253,6 +1264,43 @@ fn validate_testbenches(macro_: &Macro, errors: &mut Vec<MacroValidationError>) 
             });
         }
     }
+    let dc_offset = macro_.exploration().testbenches().len();
+    for (dc_index, testbench) in macro_
+        .exploration()
+        .dc_node_voltage_testbenches()
+        .iter()
+        .enumerate()
+    {
+        let testbench_index = dc_offset + dc_index;
+        if testbench.name().trim().is_empty() {
+            errors.push(MacroValidationError::EmptyTestbenchName {
+                macro_name: macro_name.clone(),
+                testbench_index,
+            });
+        } else if !names.insert(testbench.name()) {
+            errors.push(MacroValidationError::DuplicateTestbench {
+                macro_name: macro_name.clone(),
+                testbench: testbench.name().to_owned(),
+            });
+        }
+
+        let empty_source = match testbench.source() {
+            MacroTestbenchSource::Spice(source) => source.trim().is_empty(),
+            MacroTestbenchSource::SpiceFile(path) => path.as_os_str().is_empty(),
+        };
+        if empty_source {
+            errors.push(MacroValidationError::EmptyTestbenchSource {
+                macro_name: macro_name.clone(),
+                testbench: testbench.name().to_owned(),
+            });
+        }
+        if testbench.analysis().node().trim().is_empty() {
+            errors.push(MacroValidationError::EmptyDcNode {
+                macro_name: macro_name.clone(),
+                testbench: testbench.name().to_owned(),
+            });
+        }
+    }
 }
 
 pub(super) fn validate_output_bindings(macro_: &Macro, errors: &mut Vec<MacroValidationError>) {
@@ -1387,6 +1435,21 @@ fn validate_output_source(
                 }
             }
         }
+        MacroOutputSource::DcNodeVoltage { testbench } => {
+            if testbench.trim().is_empty() {
+                Some("DC node-voltage testbench name is empty".to_owned())
+            } else if macro_
+                .exploration()
+                .dc_node_voltage_testbench(testbench)
+                .is_none()
+            {
+                Some(format!(
+                    "DC node-voltage testbench '{testbench}' is not declared"
+                ))
+            } else {
+                None
+            }
+        }
     };
     if let Some(reason) = reason {
         errors.push(MacroValidationError::InvalidOutputSource {
@@ -1473,8 +1536,8 @@ mod tests {
     use crate::circuit::Circuit;
     use crate::macro_model::{
         Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroCompactSeedSet,
-        MacroDesignVariable, MacroExplorationDefinitionError, MacroHierarchyMode,
-        MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
+        MacroDcNodeVoltageTestbench, MacroDesignVariable, MacroExplorationDefinitionError,
+        MacroHierarchyMode, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::PrimitiveBuildInputKind;
@@ -1482,7 +1545,7 @@ mod tests {
         Pin, PinRole, PrimitiveFiles, PrimitiveManifest, PrimitivePhysicalModel,
     };
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
-    use crate::testbench::{AcAnalysis, TransferFunction};
+    use crate::testbench::{AcAnalysis, DcNodeVoltageAnalysis, TransferFunction};
 
     use super::{MacroCircuitKind, MacroValidationError, validate_macro_catalog};
 
@@ -1820,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_testbench_identity_source_transfer_and_ac_settings() {
+    fn validates_testbench_identity_source_nodes_and_ac_settings() {
         let invalid_config = AdaptiveAcConfig {
             min_frequency_hz: 10.0,
             max_frequency_hz: 1.0,
@@ -1839,8 +1902,12 @@ mod tests {
             },
         );
         let invalid = leaf_macro()
-            .with_ac_testbench(MacroAcTestbench::from_spice("gain", " ", analysis.clone()))
-            .with_ac_testbench(MacroAcTestbench::from_spice("gain", " ", analysis));
+            .with_ac_testbench(MacroAcTestbench::from_spice("gain", " ", analysis))
+            .with_dc_node_voltage_testbench(MacroDcNodeVoltageTestbench::from_spice(
+                "gain",
+                "Vinput VIN VSS 1\n.end\n",
+                DcNodeVoltageAnalysis::new(" "),
+            ));
         let catalog = MacroCatalog::from_macros([invalid]).unwrap();
         let errors = validate_macro_catalog(&catalog, &primitive_catalog());
 
@@ -1866,6 +1933,11 @@ mod tests {
             errors
                 .iter()
                 .any(|error| matches!(error, MacroValidationError::InvalidAcPolicy { .. }))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, MacroValidationError::EmptyDcNode { .. }))
         );
     }
 

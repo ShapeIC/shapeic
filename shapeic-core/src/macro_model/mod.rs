@@ -8,8 +8,8 @@ mod derivation;
 mod evaluate;
 mod execution;
 mod explore;
-mod hierarchy;
 mod hierarchical_explore;
+mod hierarchy;
 mod hierarchy_result;
 mod hierarchy_selection;
 mod input;
@@ -39,8 +39,10 @@ pub use configuration::{
 };
 pub use derivation::MacroDerivationReductionError;
 pub use evaluate::{
-    MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation, PreparedMacroAcCandidateEvaluator,
-    PreparedMacroAcCandidateEvaluatorError,
+    MacroAcCandidateAnalysisError, MacroAcCandidateEvaluation,
+    MacroDcNodeVoltageCandidateAnalysisError, PreparedMacroAcCandidateEvaluator,
+    PreparedMacroAcCandidateEvaluatorError, PreparedMacroDcNodeVoltageCandidateEvaluator,
+    PreparedMacroDcNodeVoltageCandidateEvaluatorError,
 };
 pub use execution::{
     CandidateBuildExecution, ElectricalAnalysisExecution, MacroExecutionConfig,
@@ -48,10 +50,14 @@ pub use execution::{
 };
 pub use explore::{
     MacroAcExplorationError, MacroAcRejectionCounts, MacroAcTestbenchOutcome,
-    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroExecutionReport,
-    MacroExplorationError, MacroExplorationResult, MacroExplorationStatistics,
-    MacroSpecificationStatistics, explore_macro_ac_candidates,
-    explore_macro_ac_candidates_with_execution, explore_macro_ac_candidates_with_physical_lut,
+    MacroAcTestbenchStatistics, MacroAcceptedCandidate, MacroDcNodeVoltageTestbenchOutcome,
+    MacroDcNodeVoltageTestbenchStatistics, MacroExecutionReport, MacroExplorationError,
+    MacroExplorationResult, MacroExplorationStatistics, MacroSpecificationStatistics,
+    explore_macro_ac_candidates, explore_macro_ac_candidates_with_execution,
+    explore_macro_ac_candidates_with_physical_lut,
+};
+pub use hierarchical_explore::{
+    MacroHierarchyExplorationError, MacroHierarchyExplorationStage, explore_macro_hierarchy,
 };
 pub use hierarchy::{
     MacroDerivationAuditEntry, MacroDerivationPruneReason, MacroDerivationResolutionError,
@@ -61,13 +67,10 @@ pub use hierarchy::{
     MacroPublicInputPropagationAuditEntry, MacroResolvedCondition, ResolvedChildConditions,
     resolve_child_derivations, validate_macro_hierarchy_input,
 };
-pub use hierarchical_explore::{
-    MacroHierarchyExplorationError, MacroHierarchyExplorationStage, explore_macro_hierarchy,
-};
 pub use hierarchy_result::{
-    MacroHierarchyDerivationRecord, MacroHierarchyExplorationResult,
-    MacroHierarchyNodeResult, MacroHierarchyNodeStatus, MacroHierarchyPreviewRecord,
-    MacroHierarchyRetentionPolicy, MacroHierarchyStatistics,
+    MacroHierarchyDerivationRecord, MacroHierarchyExplorationResult, MacroHierarchyNodeResult,
+    MacroHierarchyNodeStatus, MacroHierarchyPreviewRecord, MacroHierarchyRetentionPolicy,
+    MacroHierarchyStatistics,
 };
 pub use hierarchy_selection::{
     MacroHierarchyInstancePath, MacroHierarchyInstancePathError, MacroHierarchySelectedInstance,
@@ -81,27 +84,27 @@ pub use input::{
 };
 pub use model::{
     Macro, MacroAcTestbench, MacroAnalysisDomain, MacroCompactOutputBinding, MacroCompactSeedSet,
-    MacroDerivationReduction, MacroDerivationRule, MacroDerivationTarget, MacroDerivedValue,
-    MacroDesignVariable,
-    MacroDesignVariableBinding, MacroDesignVariableCondition, MacroExploration,
-    MacroHierarchyMode, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
-    MacroPrimitiveDefault, MacroPublicInputAlias, MacroSpecification, MacroSpecificationBounds,
-    MacroSpecificationSource, MacroTestbenchSource,
+    MacroDcNodeVoltageTestbench, MacroDerivationReduction, MacroDerivationRule,
+    MacroDerivationTarget, MacroDerivedValue, MacroDesignVariable, MacroDesignVariableBinding,
+    MacroDesignVariableCondition, MacroExploration, MacroHierarchyMode, MacroInterfaceBinding,
+    MacroOutputSource, MacroPort, MacroPortRole, MacroPrimitiveDefault, MacroPublicInputAlias,
+    MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource, MacroTestbenchSource,
 };
 pub use physical::CandidatePhysicalBindingError;
 pub(crate) use physical::{CandidatePhysicalBinder, PhysicalCandidateStampOutcome};
 pub use prepare::{
-    MacroTestbenchPrepareError, PreparedMacroAcTestbench, prepare_macro_ac_testbench,
+    MacroTestbenchPrepareError, PreparedMacroAcTestbench, PreparedMacroDcNodeVoltageTestbench,
+    prepare_macro_ac_testbench, prepare_macro_dc_node_voltage_testbench,
 };
 pub use projection::{
     MacroCandidateProjection, MacroCandidateProjectionError, MacroOutputResolutionError,
 };
-pub use seed::{MacroCompactSeedError, validate_macro_compact_seeds};
 pub use render::{
     ExpandedSmallSignalNetlist, MacroRenderError, MacroRenderMode,
     ResolvedPhysicalCandidateColumns, ResolvedPhysicalPort, ResolvedPhysicalPrimitive,
     ResolvedPrimitiveBranch, render_expanded_small_signal_netlist, render_small_signal_netlist,
 };
+pub use seed::{MacroCompactSeedError, validate_macro_compact_seeds};
 pub use specification::MacroSpecificationEvaluationError;
 pub use validation::{
     MacroCircuitKind, MacroValidationError, validate_macro, validate_macro_catalog,

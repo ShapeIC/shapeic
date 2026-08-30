@@ -1,10 +1,9 @@
-//! Minimal netlist-first AC testbench execution.
+//! Minimal netlist-first small-signal testbench execution.
 //!
 //! A testbench is supplied as SPICE source text or as a `.spice` file. The
-//! symbolic MNA is compiled once into [`PreparedAcTestbench`] and reused to
-//! instantiate one numerical [`AcTestbench`] per candidate. Numerical compact
-//! or layout-aware models may be stamped through [`AcTestbench::system_mut`]
-//! before running the selected AC metrics.
+//! symbolic MNA is compiled once and reused to instantiate one numerical
+//! testbench per candidate. Numerical compact or layout-aware models may be
+//! stamped before running an AC sweep or a single DC node-voltage solution.
 
 use std::error::Error;
 use std::fmt;
@@ -76,6 +75,61 @@ pub struct AcAnalysis {
     pub policy: AdaptiveAcPolicy,
 }
 
+/// A DC analysis that resolves one node voltage relative to ground.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DcNodeVoltageAnalysis {
+    node: String,
+}
+
+impl DcNodeVoltageAnalysis {
+    /// Creates an analysis for `V(node)` at `s = 0`.
+    pub fn new(node: impl Into<String>) -> Self {
+        Self { node: node.into() }
+    }
+
+    /// Returns the node whose voltage is resolved relative to ground.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+}
+
+/// Result of resolving one signed DC node voltage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DcNodeVoltageOutcome {
+    voltage_v: f64,
+}
+
+impl DcNodeVoltageOutcome {
+    /// Returns the signed node voltage in volts.
+    pub const fn voltage_v(self) -> f64 {
+        self.voltage_v
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLinearTestbench {
+    mna: PreparedNumericMna,
+}
+
+impl PreparedLinearTestbench {
+    fn from_mna(system: &MnaResult, parameter_order: &[&str]) -> Result<Self, NumericMnaError> {
+        Ok(Self {
+            mna: PreparedNumericMna::new(system, parameter_order)?,
+        })
+    }
+
+    fn parameter_names(&self) -> &[String] {
+        self.mna.parameter_names()
+    }
+
+    fn instantiate(
+        &mut self,
+        parameter_values: &[f64],
+    ) -> Result<NumericMnaSystem, NumericMnaError> {
+        self.mna.instantiate(parameter_values)
+    }
+}
+
 impl AcAnalysis {
     /// Creates an AC analysis for one transfer function.
     pub const fn new(
@@ -94,7 +148,7 @@ impl AcAnalysis {
 /// A compiled AC testbench reusable across candidate parameter values.
 #[derive(Clone, Debug)]
 pub struct PreparedAcTestbench {
-    mna: PreparedNumericMna,
+    prepared: PreparedLinearTestbench,
     analysis: AcAnalysis,
 }
 
@@ -127,7 +181,7 @@ impl PreparedAcTestbench {
 
     /// Returns the numerical parameter names in their required order.
     pub fn parameter_names(&self) -> &[String] {
-        self.mna.parameter_names()
+        self.prepared.parameter_names()
     }
 
     /// Returns the AC analysis attached to this testbench.
@@ -145,7 +199,7 @@ impl PreparedAcTestbench {
         parameter_values: &[f64],
     ) -> Result<AcTestbench, NumericMnaError> {
         Ok(AcTestbench {
-            system: self.mna.instantiate(parameter_values)?,
+            system: self.prepared.instantiate(parameter_values)?,
             analysis: self.analysis.clone(),
         })
     }
@@ -155,9 +209,69 @@ impl PreparedAcTestbench {
         parameter_order: &[&str],
         analysis: AcAnalysis,
     ) -> Result<Self, AcTestbenchBuildError> {
-        let mna = PreparedNumericMna::new(system, parameter_order)
+        let prepared = PreparedLinearTestbench::from_mna(system, parameter_order)
             .map_err(AcTestbenchBuildError::NumericMna)?;
-        Ok(Self { mna, analysis })
+        Ok(Self { prepared, analysis })
+    }
+}
+
+/// A compiled DC node-voltage testbench reusable across candidate values.
+#[derive(Clone, Debug)]
+pub struct PreparedDcNodeVoltageTestbench {
+    prepared: PreparedLinearTestbench,
+    analysis: DcNodeVoltageAnalysis,
+}
+
+impl PreparedDcNodeVoltageTestbench {
+    /// Builds and compiles a testbench directly from SPICE source text.
+    pub fn from_spice(
+        source: &str,
+        parameter_order: &[&str],
+        analysis: DcNodeVoltageAnalysis,
+    ) -> Result<Self, DcNodeVoltageTestbenchBuildError> {
+        let system = mna_from_spice(source).map_err(DcNodeVoltageTestbenchBuildError::Mna)?;
+        Self::from_mna(&system, parameter_order, analysis)
+    }
+
+    /// Builds and compiles a testbench from one `.spice` file.
+    pub fn from_spice_file(
+        path: &Path,
+        parameter_order: &[&str],
+        analysis: DcNodeVoltageAnalysis,
+    ) -> Result<Self, DcNodeVoltageTestbenchBuildError> {
+        let system = mna_from_spice_file(path).map_err(DcNodeVoltageTestbenchBuildError::Mna)?;
+        Self::from_mna(&system, parameter_order, analysis)
+    }
+
+    /// Returns the numerical parameter names in their required order.
+    pub fn parameter_names(&self) -> &[String] {
+        self.prepared.parameter_names()
+    }
+
+    /// Returns the DC node-voltage analysis attached to this testbench.
+    pub const fn analysis(&self) -> &DcNodeVoltageAnalysis {
+        &self.analysis
+    }
+
+    /// Instantiates the compiled MNA for one candidate.
+    pub fn instantiate(
+        &mut self,
+        parameter_values: &[f64],
+    ) -> Result<DcNodeVoltageTestbench, NumericMnaError> {
+        Ok(DcNodeVoltageTestbench {
+            system: self.prepared.instantiate(parameter_values)?,
+            analysis: self.analysis.clone(),
+        })
+    }
+
+    fn from_mna(
+        system: &MnaResult,
+        parameter_order: &[&str],
+        analysis: DcNodeVoltageAnalysis,
+    ) -> Result<Self, DcNodeVoltageTestbenchBuildError> {
+        let prepared = PreparedLinearTestbench::from_mna(system, parameter_order)
+            .map_err(DcNodeVoltageTestbenchBuildError::NumericMna)?;
+        Ok(Self { prepared, analysis })
     }
 }
 
@@ -205,6 +319,50 @@ impl AcTestbench {
     }
 }
 
+/// A numerical DC node-voltage testbench instantiated for one candidate.
+#[derive(Clone, Debug)]
+pub struct DcNodeVoltageTestbench {
+    system: NumericMnaSystem,
+    analysis: DcNodeVoltageAnalysis,
+}
+
+impl DcNodeVoltageTestbench {
+    /// Returns the instantiated numerical MNA system.
+    pub const fn system(&self) -> &NumericMnaSystem {
+        &self.system
+    }
+
+    /// Returns the instantiated numerical MNA system for additional stamping.
+    pub const fn system_mut(&mut self) -> &mut NumericMnaSystem {
+        &mut self.system
+    }
+
+    /// Returns the DC node-voltage analysis attached to this testbench.
+    pub const fn analysis(&self) -> &DcNodeVoltageAnalysis {
+        &self.analysis
+    }
+
+    /// Solves the MNA once at `s = 0` and returns the signed node voltage.
+    pub fn analyze(&self) -> Result<DcNodeVoltageOutcome, DcNodeVoltageTestbenchEvaluationError> {
+        let node = self.analysis.node();
+        let voltage = self
+            .system
+            .solve_node(0.0, node)
+            .map_err(DcNodeVoltageTestbenchEvaluationError::NumericMna)?
+            .ok_or(DcNodeVoltageTestbenchEvaluationError::SingularSystem)?;
+        let imaginary_tolerance = 1.0e-12 * voltage.re.abs().max(1.0);
+        if voltage.im.abs() > imaginary_tolerance {
+            return Err(DcNodeVoltageTestbenchEvaluationError::NonRealVoltage {
+                node: node.to_owned(),
+                imaginary_v: voltage.im,
+            });
+        }
+        Ok(DcNodeVoltageOutcome {
+            voltage_v: voltage.re,
+        })
+    }
+}
+
 /// Errors produced while building and compiling an AC testbench.
 #[derive(Debug)]
 pub enum AcTestbenchBuildError {
@@ -229,6 +387,38 @@ impl fmt::Display for AcTestbenchBuildError {
 }
 
 impl Error for AcTestbenchBuildError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Mna(_) => None,
+            Self::NumericMna(error) => Some(error),
+        }
+    }
+}
+
+/// Errors produced while building and compiling a DC node-voltage testbench.
+#[derive(Debug)]
+pub enum DcNodeVoltageTestbenchBuildError {
+    /// SPICE preprocessing or symbolic MNA construction failed.
+    Mna(MnaError),
+    /// Numerical MNA preparation failed.
+    NumericMna(NumericMnaError),
+}
+
+impl fmt::Display for DcNodeVoltageTestbenchBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mna(error) => write!(formatter, "could not build testbench MNA: {error:?}"),
+            Self::NumericMna(error) => {
+                write!(
+                    formatter,
+                    "could not prepare numerical testbench MNA: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for DcNodeVoltageTestbenchBuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Mna(_) => None,
@@ -264,6 +454,46 @@ impl Error for AcTestbenchEvaluationError {
     }
 }
 
+/// Errors produced while resolving a DC node voltage.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DcNodeVoltageTestbenchEvaluationError {
+    /// Numerical MNA solution failed.
+    NumericMna(NumericMnaError),
+    /// The numerical MNA matrix is singular at `s = 0`.
+    SingularSystem,
+    /// A DC solution unexpectedly contained a significant imaginary component.
+    NonRealVoltage {
+        /// Node whose DC voltage was requested.
+        node: String,
+        /// Imaginary component returned by the numerical solver.
+        imaginary_v: f64,
+    },
+}
+
+impl fmt::Display for DcNodeVoltageTestbenchEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NumericMna(error) => error.fmt(formatter),
+            Self::SingularSystem => {
+                formatter.write_str("numerical testbench MNA is singular at s = 0")
+            }
+            Self::NonRealVoltage { node, imaginary_v } => write!(
+                formatter,
+                "DC voltage at node '{node}' has imaginary component {imaginary_v} V"
+            ),
+        }
+    }
+}
+
+impl Error for DcNodeVoltageTestbenchEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::NumericMna(error) => Some(error),
+            Self::SingularSystem | Self::NonRealVoltage { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -274,11 +504,15 @@ mod tests {
     use ndarray::array;
     use num_complex::Complex64;
 
-    use super::{AcAnalysis, PreparedAcTestbench, TransferFunction, TransferPolarity};
+    use super::{
+        AcAnalysis, DcNodeVoltageAnalysis, DcNodeVoltageTestbenchEvaluationError,
+        PreparedAcTestbench, PreparedDcNodeVoltageTestbench, TransferFunction, TransferPolarity,
+    };
     use crate::analysis::{
         AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets,
         analyze_adaptive_ac,
     };
+    use shapeic_mna::numeric::NumericMnaError;
 
     const CONFIG: AdaptiveAcConfig = AdaptiveAcConfig {
         min_frequency_hz: 1.0,
@@ -389,5 +623,81 @@ mod tests {
             (second_actual / second_expected - 1.0).abs() < 1.0e-3,
             "expected {second_expected}, got {second_actual}"
         );
+    }
+
+    #[test]
+    fn resolves_a_signed_parameterized_node_voltage_once_at_dc() {
+        let source = "\
+V1 VIN 0 -2
+R1 VIN VOUT r
+R2 VOUT 0 r
+C1 VOUT 0 c
+";
+        let mut prepared = PreparedDcNodeVoltageTestbench::from_spice(
+            source,
+            &["r", "c"],
+            DcNodeVoltageAnalysis::new("VOUT"),
+        )
+        .expect("DC testbench should prepare");
+
+        assert_eq!(prepared.parameter_names(), ["r", "c"]);
+        assert_eq!(prepared.analysis().node(), "VOUT");
+
+        let first = prepared
+            .instantiate(&[1.0e3, 1.0e-12])
+            .expect("first candidate should instantiate")
+            .analyze()
+            .expect("first candidate should solve");
+        let second = prepared
+            .instantiate(&[1.0e3, 1.0])
+            .expect("second candidate should instantiate")
+            .analyze()
+            .expect("second candidate should solve");
+
+        assert!((first.voltage_v() + 1.0).abs() < 1.0e-12);
+        assert_eq!(first, second, "capacitance must not affect the s = 0 solve");
+    }
+
+    #[test]
+    fn reports_a_missing_dc_node() {
+        let mut prepared = PreparedDcNodeVoltageTestbench::from_spice(
+            "V1 VIN 0 1\n",
+            &[],
+            DcNodeVoltageAnalysis::new("MISSING"),
+        )
+        .expect("DC testbench should prepare");
+        let error = prepared
+            .instantiate(&[])
+            .expect("testbench should instantiate")
+            .analyze()
+            .expect_err("missing node should fail");
+
+        assert_eq!(
+            error,
+            DcNodeVoltageTestbenchEvaluationError::NumericMna(NumericMnaError::MissingNode(
+                "MISSING".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn reports_a_singular_dc_system() {
+        let source = "\
+V1 VIN 0 1
+C1 VFLOAT 0 1e-12
+";
+        let mut prepared = PreparedDcNodeVoltageTestbench::from_spice(
+            source,
+            &[],
+            DcNodeVoltageAnalysis::new("VFLOAT"),
+        )
+        .expect("DC testbench should prepare");
+        let error = prepared
+            .instantiate(&[])
+            .expect("testbench should instantiate")
+            .analyze()
+            .expect_err("floating DC node should make the system singular");
+
+        assert_eq!(error, DcNodeVoltageTestbenchEvaluationError::SingularSystem);
     }
 }

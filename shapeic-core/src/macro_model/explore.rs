@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::ThreadPoolBuilder;
-use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, ParallelBridge, ParallelIterator};
 
 use crate::analysis::{AcCompletion, AcMetric, AdaptiveAcOutcome};
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
 use crate::exploration::candidate::CandidatePoint;
+use crate::testbench::DcNodeVoltageOutcome;
 use shapeic_layout::PhysicalLookupTable;
 
 use super::combination::MacroCandidateCombinationBatchIter;
@@ -17,11 +18,13 @@ use super::{
     CandidateBuildExecution, ElectricalAnalysisExecution, Macro, MacroAcCandidateAnalysisError,
     MacroAcCandidateEvaluation, MacroAnalysisDomain, MacroCandidateBuildError,
     MacroCandidateBuildInstanceReport, MacroCandidateCombinationError,
-    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog, MacroExecutionConfig,
-    MacroExplorationInput, MacroRenderMode, MacroSpecificationEvaluationError,
-    MacroTestbenchPrepareError, PreparedMacroAcCandidateEvaluator,
-    PreparedMacroAcCandidateEvaluatorError, PreparedMacroAcTestbench,
-    build_macro_candidate_sets_with_execution, prepare_macro_ac_testbench,
+    MacroCandidateCombinationJoin, MacroCandidateSets, MacroCatalog,
+    MacroDcNodeVoltageCandidateAnalysisError, MacroExecutionConfig, MacroExplorationInput,
+    MacroRenderMode, MacroSpecificationEvaluationError, MacroTestbenchPrepareError,
+    PreparedMacroAcCandidateEvaluator, PreparedMacroAcCandidateEvaluatorError,
+    PreparedMacroAcTestbench, PreparedMacroDcNodeVoltageCandidateEvaluator,
+    PreparedMacroDcNodeVoltageCandidateEvaluatorError, build_macro_candidate_sets_with_execution,
+    prepare_macro_ac_testbench, prepare_macro_dc_node_voltage_testbench,
 };
 
 /// One accepted macro candidate and all AC outcomes evaluated for it.
@@ -29,6 +32,7 @@ use super::{
 pub struct MacroAcceptedCandidate {
     pub(super) candidate_indices: Vec<usize>,
     pub(super) ac_outcomes: Vec<MacroAcTestbenchOutcome>,
+    pub(super) dc_node_voltage_outcomes: Vec<MacroDcNodeVoltageTestbenchOutcome>,
     specification_values: Vec<(String, f64)>,
 }
 
@@ -41,6 +45,11 @@ impl MacroAcceptedCandidate {
     /// Returns the successful testbench outcomes in macro declaration order.
     pub fn ac_outcomes(&self) -> &[MacroAcTestbenchOutcome] {
         &self.ac_outcomes
+    }
+
+    /// Returns successful DC node-voltage outcomes in declaration order.
+    pub fn dc_node_voltage_outcomes(&self) -> &[MacroDcNodeVoltageTestbenchOutcome] {
+        &self.dc_node_voltage_outcomes
     }
 
     /// Returns specification values in macro declaration order.
@@ -61,6 +70,25 @@ impl MacroAcceptedCandidate {
 pub struct MacroAcTestbenchOutcome {
     pub(super) testbench_index: usize,
     pub(super) outcome: AdaptiveAcOutcome,
+}
+
+/// Indexed DC node-voltage outcome retained for an accepted macro candidate.
+#[derive(Debug, PartialEq)]
+pub struct MacroDcNodeVoltageTestbenchOutcome {
+    pub(super) testbench_index: usize,
+    pub(super) outcome: DcNodeVoltageOutcome,
+}
+
+impl MacroDcNodeVoltageTestbenchOutcome {
+    /// Returns the testbench position in DC declaration order.
+    pub const fn testbench_index(&self) -> usize {
+        self.testbench_index
+    }
+
+    /// Returns the signed DC node-voltage result.
+    pub const fn outcome(&self) -> DcNodeVoltageOutcome {
+        self.outcome
+    }
 }
 
 /// Evaluation and rejection counts for one analysis-independent specification.
@@ -191,12 +219,39 @@ impl MacroAcTestbenchStatistics {
     }
 }
 
+/// Evaluation statistics for one macro DC node-voltage testbench.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroDcNodeVoltageTestbenchStatistics {
+    testbench: String,
+    evaluated_candidates: usize,
+}
+
+impl MacroDcNodeVoltageTestbenchStatistics {
+    fn new(testbench: impl Into<String>) -> Self {
+        Self {
+            testbench: testbench.into(),
+            evaluated_candidates: 0,
+        }
+    }
+
+    /// Returns the macro-local testbench name.
+    pub fn testbench(&self) -> &str {
+        &self.testbench
+    }
+
+    /// Returns the number of candidates resolved by this testbench.
+    pub const fn evaluated_candidates(&self) -> usize {
+        self.evaluated_candidates
+    }
+}
+
 /// Aggregate statistics for one macro candidate exploration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MacroExplorationStatistics {
     compatible_candidates: usize,
     accepted_candidates: usize,
     testbenches: Vec<MacroAcTestbenchStatistics>,
+    dc_node_voltage_testbenches: Vec<MacroDcNodeVoltageTestbenchStatistics>,
     specifications: Vec<MacroSpecificationStatistics>,
 }
 
@@ -224,6 +279,21 @@ impl MacroExplorationStatistics {
     /// Finds statistics for one macro-local testbench.
     pub fn testbench(&self, name: &str) -> Option<&MacroAcTestbenchStatistics> {
         self.testbenches
+            .iter()
+            .find(|testbench| testbench.testbench == name)
+    }
+
+    /// Returns DC node-voltage statistics in declaration order.
+    pub fn dc_node_voltage_testbenches(&self) -> &[MacroDcNodeVoltageTestbenchStatistics] {
+        &self.dc_node_voltage_testbenches
+    }
+
+    /// Finds statistics for one macro-local DC node-voltage testbench.
+    pub fn dc_node_voltage_testbench(
+        &self,
+        name: &str,
+    ) -> Option<&MacroDcNodeVoltageTestbenchStatistics> {
+        self.dc_node_voltage_testbenches
             .iter()
             .find(|testbench| testbench.testbench == name)
     }
@@ -272,6 +342,7 @@ impl MacroExplorationResult {
                 |(candidate_indices, specification_values)| MacroAcceptedCandidate {
                     candidate_indices,
                     ac_outcomes: Vec::new(),
+                    dc_node_voltage_outcomes: Vec::new(),
                     specification_values,
                 },
             )
@@ -393,6 +464,24 @@ impl MacroExplorationResult {
             .find(|outcome| outcome.testbench_index == testbench_index)
             .map(MacroAcTestbenchOutcome::outcome)
     }
+
+    /// Finds one accepted DC node-voltage outcome by macro-local testbench name.
+    pub fn dc_node_voltage_outcome(
+        &self,
+        accepted: &MacroAcceptedCandidate,
+        testbench: &str,
+    ) -> Option<DcNodeVoltageOutcome> {
+        let testbench_index = self
+            .statistics
+            .dc_node_voltage_testbenches
+            .iter()
+            .position(|statistics| statistics.testbench == testbench)?;
+        accepted
+            .dc_node_voltage_outcomes
+            .iter()
+            .find(|outcome| outcome.testbench_index == testbench_index)
+            .map(MacroDcNodeVoltageTestbenchOutcome::outcome)
+    }
 }
 
 /// Runtime measurements and workload counts for one macro exploration.
@@ -406,6 +495,7 @@ pub struct MacroExecutionReport {
     sequential_evaluation: Duration,
     parallel_electrical_analysis: Duration,
     sequential_tail: Duration,
+    dc_node_voltage_evaluation: Duration,
     total: Duration,
     electrical_batches: usize,
     electrical_survivors: usize,
@@ -455,9 +545,14 @@ impl MacroExecutionReport {
     pub const fn electrical_survivors(&self) -> usize {
         self.electrical_survivors
     }
+
+    /// Returns time spent resolving macro DC node-voltage testbenches.
+    pub const fn dc_node_voltage_evaluation(&self) -> Duration {
+        self.dc_node_voltage_evaluation
+    }
 }
 
-/// Errors produced while preparing or executing macro-wide AC exploration.
+/// Errors produced while preparing or executing macro-wide analyses.
 #[derive(Debug)]
 pub enum MacroAcExplorationError {
     CandidateCombination(MacroCandidateCombinationError),
@@ -473,6 +568,19 @@ pub enum MacroAcExplorationError {
         testbench: String,
         candidate_indices: Vec<usize>,
         error: Box<MacroAcCandidateAnalysisError>,
+    },
+    PrepareDcNodeVoltageTestbench {
+        testbench: String,
+        error: MacroTestbenchPrepareError,
+    },
+    PrepareDcNodeVoltageCandidateEvaluator {
+        testbench: String,
+        error: Box<PreparedMacroDcNodeVoltageCandidateEvaluatorError>,
+    },
+    AnalyzeDcNodeVoltageCandidate {
+        testbench: String,
+        candidate_indices: Vec<usize>,
+        error: Box<MacroDcNodeVoltageCandidateAnalysisError>,
     },
     InconsistentOutcome {
         testbench: String,
@@ -505,6 +613,22 @@ impl fmt::Display for MacroAcExplorationError {
                 formatter,
                 "could not analyze candidate selection {candidate_indices:?} with AC testbench '{testbench}': {error}"
             ),
+            Self::PrepareDcNodeVoltageTestbench { testbench, error } => write!(
+                formatter,
+                "could not prepare macro DC node-voltage testbench '{testbench}': {error}"
+            ),
+            Self::PrepareDcNodeVoltageCandidateEvaluator { testbench, error } => write!(
+                formatter,
+                "could not prepare candidate bindings for DC node-voltage testbench '{testbench}': {error}"
+            ),
+            Self::AnalyzeDcNodeVoltageCandidate {
+                testbench,
+                candidate_indices,
+                error,
+            } => write!(
+                formatter,
+                "could not resolve candidate selection {candidate_indices:?} with DC node-voltage testbench '{testbench}': {error}"
+            ),
             Self::InconsistentOutcome {
                 testbench,
                 candidate_indices,
@@ -531,6 +655,9 @@ impl Error for MacroAcExplorationError {
             Self::PrepareTestbench { error, .. } => Some(error),
             Self::PrepareCandidateEvaluator { error, .. } => Some(error.as_ref()),
             Self::AnalyzeCandidate { error, .. } => Some(error.as_ref()),
+            Self::PrepareDcNodeVoltageTestbench { error, .. } => Some(error),
+            Self::PrepareDcNodeVoltageCandidateEvaluator { error, .. } => Some(error.as_ref()),
+            Self::AnalyzeDcNodeVoltageCandidate { error, .. } => Some(error.as_ref()),
             Self::InconsistentOutcome { .. } => None,
             Self::Specification(error) => Some(error),
             Self::BuildElectricalThreadPool(error) => Some(error),
@@ -816,6 +943,18 @@ fn explore_macro_ac_candidates_with_execution_and_bounds(
     if execution_report.electrical_survivors == 0 {
         execution_report.electrical_survivors = electrical_survivor_count(macro_, &statistics);
     }
+    let dc_start = Instant::now();
+    evaluate_dc_node_voltage_testbenches(
+        macro_,
+        primitive_catalog,
+        macro_catalog,
+        &candidate_sets,
+        &mut accepted,
+        &mut statistics,
+        execution,
+        &mut execution_report,
+    )?;
+    execution_report.dc_node_voltage_evaluation = dc_start.elapsed();
     apply_macro_specifications(
         macro_,
         &candidate_sets,
@@ -848,6 +987,122 @@ fn electrical_survivor_count(macro_: &Macro, statistics: &MacroExplorationStatis
     } else {
         statistics.compatible_candidates
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_dc_node_voltage_testbenches(
+    macro_: &Macro,
+    primitive_catalog: &PrimitiveCatalog,
+    macro_catalog: &MacroCatalog,
+    candidate_sets: &MacroCandidateSets,
+    accepted: &mut Vec<MacroAcceptedCandidate>,
+    statistics: &mut MacroExplorationStatistics,
+    execution: MacroExecutionConfig,
+    execution_report: &mut MacroExecutionReport,
+) -> Result<(), MacroAcExplorationError> {
+    let definitions = macro_.exploration().dc_node_voltage_testbenches();
+    statistics.dc_node_voltage_testbenches = definitions
+        .iter()
+        .map(|testbench| MacroDcNodeVoltageTestbenchStatistics::new(testbench.name()))
+        .collect();
+    if definitions.is_empty() || accepted.is_empty() {
+        return Ok(());
+    }
+
+    let preparation_start = Instant::now();
+    let prepared = definitions
+        .iter()
+        .map(|testbench| {
+            prepare_macro_dc_node_voltage_testbench(
+                macro_,
+                testbench,
+                primitive_catalog,
+                macro_catalog,
+                MacroRenderMode::CompactSubmacros,
+            )
+            .map_err(
+                |error| MacroAcExplorationError::PrepareDcNodeVoltageTestbench {
+                    testbench: testbench.name().to_owned(),
+                    error,
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    execution_report.testbench_preparation += preparation_start.elapsed();
+    let candidate_refs = candidate_sets.candidate_sets().collect::<Vec<_>>();
+    let prototypes = prepared
+        .into_iter()
+        .enumerate()
+        .map(|(testbench_index, prepared)| {
+            PreparedMacroDcNodeVoltageCandidateEvaluator::new(prepared, &candidate_refs).map_err(
+                |error| MacroAcExplorationError::PrepareDcNodeVoltageCandidateEvaluator {
+                    testbench: definitions[testbench_index].name().to_owned(),
+                    error: Box::new(error),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let analyze_candidate =
+        |candidate: &mut MacroAcceptedCandidate,
+         evaluators: &mut [PreparedMacroDcNodeVoltageCandidateEvaluator<'_>]| {
+            let mut outcomes = Vec::with_capacity(evaluators.len());
+            for (testbench_index, evaluator) in evaluators.iter_mut().enumerate() {
+                let outcome = evaluator
+                    .analyze(&candidate.candidate_indices)
+                    .map_err(
+                        |error| MacroAcExplorationError::AnalyzeDcNodeVoltageCandidate {
+                            testbench: definitions[testbench_index].name().to_owned(),
+                            candidate_indices: candidate.candidate_indices.clone(),
+                            error: Box::new(error),
+                        },
+                    )?;
+                outcomes.push(MacroDcNodeVoltageTestbenchOutcome {
+                    testbench_index,
+                    outcome,
+                });
+            }
+            candidate.dc_node_voltage_outcomes = outcomes;
+            Ok::<_, MacroAcExplorationError>(())
+        };
+
+    match execution.electrical_analysis() {
+        ElectricalAnalysisExecution::Sequential => {
+            let mut evaluators = prototypes;
+            for candidate in accepted.iter_mut() {
+                analyze_candidate(candidate, &mut evaluators)?;
+            }
+        }
+        ElectricalAnalysisExecution::Parallel { workers, .. } => {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .map_err(MacroAcExplorationError::BuildElectricalThreadPool)?;
+            let candidates = std::mem::take(accepted);
+            let results = pool.install(|| {
+                candidates
+                    .into_par_iter()
+                    .map_init(
+                        || {
+                            prototypes
+                                .iter()
+                                .map(PreparedMacroDcNodeVoltageCandidateEvaluator::fork)
+                                .collect::<Vec<_>>()
+                        },
+                        |evaluators, mut candidate| {
+                            analyze_candidate(&mut candidate, evaluators).map(|()| candidate)
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            });
+            *accepted = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+        }
+    }
+
+    for testbench in &mut statistics.dc_node_voltage_testbenches {
+        testbench.evaluated_candidates = accepted.len();
+    }
+    Ok(())
 }
 
 fn map_candidate_loop_error(
@@ -1335,6 +1590,7 @@ fn evaluate_candidate_selection<E>(
     Ok(Some(MacroAcceptedCandidate {
         candidate_indices: candidate_indices.to_vec(),
         ac_outcomes,
+        dc_node_voltage_outcomes: Vec::new(),
         specification_values: Vec::new(),
     }))
 }
@@ -1380,15 +1636,16 @@ mod tests {
     use crate::exploration::filter::CandidateFilterReport;
     use crate::macro_model::{
         CompactMacroInstanceExplorationInput, MacroAcTestbench, MacroCompactOutputBinding,
-        MacroExplorationInput, MacroInstanceCandidateSet, MacroInterfaceBinding, MacroOutputSource,
-        MacroPort, MacroPortRole, MacroRenderMode, MacroSpecification, MacroSpecificationBounds,
-        MacroSpecificationSource, build_macro_candidate_sets, render_small_signal_netlist,
+        MacroDcNodeVoltageTestbench, MacroExplorationInput, MacroInstanceCandidateSet,
+        MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole, MacroRenderMode,
+        MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
+        build_macro_candidate_sets, render_small_signal_netlist,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::{PrimitiveBuildSpec, SweepMode};
     use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
     use crate::primitive::small_signal::{SmallSignalBranch, SmallSignalModel};
-    use crate::testbench::{AcAnalysis, TransferFunction};
+    use crate::testbench::{AcAnalysis, DcNodeVoltageAnalysis, TransferFunction};
     use shapeic_lut::{MosCapacitanceMatrix, MosExtrinsicCapacitances};
 
     use super::*;
@@ -1544,6 +1801,90 @@ mod tests {
     }
 
     #[test]
+    fn resolves_dc_node_voltage_in_parallel_and_filters_through_macro_specifications() {
+        let macro_ = Macro::new(
+            "dc_gain_stage",
+            vec![
+                MacroPort::new("VIN", MacroPortRole::Input),
+                MacroPort::new("VOUT", MacroPortRole::Output),
+                MacroPort::new("VSS", MacroPortRole::Ground),
+            ],
+            Circuit::builder()
+                .primitive(
+                    "xcore",
+                    "gain",
+                    [("VIN", "VIN"), ("VOUT", "VOUT"), ("VSS", "VSS")],
+                )
+                .resistor("rload", "VOUT", "VSS", 1.0e4)
+                .build(),
+            Circuit::builder()
+                .voltage_source("voutput", "VOUT", "VSS", "dc_output")
+                .build(),
+        )
+        .with_dc_node_voltage_testbench(MacroDcNodeVoltageTestbench::from_spice(
+            "operating_point",
+            "Vinput VIN VSS 1\n.end\n",
+            DcNodeVoltageAnalysis::new("VOUT"),
+        ))
+        .with_specification(MacroSpecification::new(
+            "output_v",
+            MacroSpecificationSource::dc_node_voltage("operating_point"),
+            MacroSpecificationBounds::at_most(-1.0),
+        ))
+        .with_specification(MacroSpecification::new(
+            "inverting_gain",
+            MacroSpecificationSource::expression("-operating_point.voltage_v"),
+            MacroSpecificationBounds::at_least(1.0),
+        ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "dc_output",
+            MacroOutputSource::dc_node_voltage("operating_point"),
+        ));
+        let execution = MacroExecutionConfig::sequential()
+            .with_parallel_electrical_analysis(2)
+            .unwrap()
+            .with_electrical_batch_size(1)
+            .unwrap();
+
+        let result = explore_macro_ac_candidates_with_execution(
+            &macro_,
+            &primitive_catalog(),
+            &MacroCatalog::new(),
+            candidates(),
+            None,
+            execution,
+        )
+        .unwrap();
+
+        assert_eq!(result.accepted().len(), 1);
+        let accepted = &result.accepted()[0];
+        let voltage = result
+            .dc_node_voltage_outcome(accepted, "operating_point")
+            .unwrap()
+            .voltage_v();
+        assert!(voltage < -1.0);
+        assert_eq!(accepted.specification_value("output_v"), Some(voltage));
+        assert_eq!(
+            accepted.specification_value("inverting_gain"),
+            Some(-voltage)
+        );
+        assert_eq!(
+            result
+                .statistics()
+                .dc_node_voltage_testbench("operating_point")
+                .unwrap()
+                .evaluated_candidates(),
+            2
+        );
+
+        let projection = Arc::new(result).project(&macro_, "xstage").unwrap();
+        assert_eq!(
+            projection.candidates().points[0].get(&compact_model_param_name("dc_output", "xstage")),
+            Some(voltage)
+        );
+    }
+
+    #[test]
     fn evaluates_testbenches_in_order_and_stops_after_the_first_rejection() {
         let macro_ = macro_();
         let primitives = primitive_catalog();
@@ -1617,6 +1958,7 @@ mod tests {
                     testbench_index: 0,
                     outcome: first_outcome,
                 }],
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             },
             MacroAcceptedCandidate {
@@ -1625,6 +1967,7 @@ mod tests {
                     testbench_index: 0,
                     outcome: second_outcome,
                 }],
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             },
         ];
@@ -1689,11 +2032,13 @@ mod tests {
             MacroAcceptedCandidate {
                 candidate_indices: vec![0],
                 ac_outcomes: Vec::new(),
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             },
             MacroAcceptedCandidate {
                 candidate_indices: vec![1],
                 ac_outcomes: Vec::new(),
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             },
         ];
@@ -2003,6 +2348,7 @@ mod tests {
                     candidate: MacroAcceptedCandidate {
                         candidate_indices: vec![0],
                         ac_outcomes: Vec::new(),
+                        dc_node_voltage_outcomes: Vec::new(),
                         specification_values: Vec::new(),
                     },
                 },
@@ -2011,6 +2357,7 @@ mod tests {
                     candidate: MacroAcceptedCandidate {
                         candidate_indices: vec![2],
                         ac_outcomes: Vec::new(),
+                        dc_node_voltage_outcomes: Vec::new(),
                         specification_values: Vec::new(),
                     },
                 },
@@ -2098,6 +2445,7 @@ mod tests {
             accepted: vec![MacroAcceptedCandidate {
                 candidate_indices: vec![0],
                 ac_outcomes: Vec::new(),
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             }],
             statistics: MacroExplorationStatistics::default(),
@@ -2267,6 +2615,7 @@ mod tests {
                         testbench_index: 0,
                         outcome: first_outcome,
                     }],
+                    dc_node_voltage_outcomes: Vec::new(),
                     specification_values: Vec::new(),
                 },
                 MacroAcceptedCandidate {
@@ -2275,6 +2624,7 @@ mod tests {
                         testbench_index: 0,
                         outcome: second_outcome,
                     }],
+                    dc_node_voltage_outcomes: Vec::new(),
                     specification_values: Vec::new(),
                 },
             ],
@@ -2282,6 +2632,7 @@ mod tests {
                 compatible_candidates: 2,
                 accepted_candidates: 2,
                 testbenches: vec![MacroAcTestbenchStatistics::new("gain")],
+                dc_node_voltage_testbenches: Vec::new(),
                 specifications: Vec::new(),
             },
             execution: MacroExecutionReport::default(),
@@ -2368,12 +2719,14 @@ mod tests {
             accepted: vec![MacroAcceptedCandidate {
                 candidate_indices: vec![0, 0],
                 ac_outcomes: Vec::new(),
+                dc_node_voltage_outcomes: Vec::new(),
                 specification_values: Vec::new(),
             }],
             statistics: MacroExplorationStatistics {
                 compatible_candidates: 1,
                 accepted_candidates: 1,
                 testbenches: Vec::new(),
+                dc_node_voltage_testbenches: Vec::new(),
                 specifications: Vec::new(),
             },
             execution: MacroExecutionReport::default(),
