@@ -1,5 +1,7 @@
 use std::error::Error;
+use shapeic_core::macro_model::MacroCompactOutputBinding;
 use shapeic_core::macro_model::MacroExploration;
+use shapeic_core::macro_model::MacroOutputSource;
 use shapeic_core::macro_model::explore_macro_hierarchy;
 use std::collections::HashMap;
 use shapeic_core::macro_model::MacroAcTestbench;
@@ -22,6 +24,8 @@ use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::analysis::{AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets, AcMetricSet, AcMetric};
 use shapeic_core::utils::linspace;
 use shapeic_core::exploration::filter::CandidateFilter;
+use shapeic_core::macro_model::MacroDcNodeVoltageTestbench;
+use shapeic_core::testbench::DcNodeVoltageAnalysis;
 
 const COMMON_SOURCE_INSTANCE: &str = "xcs";
 const OTA_1STAGE_INSTANCE: &str = "xota_1stage";
@@ -31,9 +35,11 @@ const OTA_2STAGE: &str = "ota_2stage";
 const OTA_2STAGE_TB: &str = "ota_2stage_gain";
 const DIFF_PAIR_INSTANCE: &str = "xdp";
 const CURRENT_MIRROR_INSTANCE: &str = "xcm";
+const OTA_1STAGE_ROUT_TB: &str = "ota_1stage_rout";
 
 
 const GAIN_SPECIFICATION: &str = "dc_gain_db";
+const ROUT_1STAGE_SPECIFICATION: &str = "rout_1stage";
 
 const VOUT_POINTS: usize = 5;
 const VBIAS_POINTS: usize = 5;
@@ -90,6 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let gain_2stage_testbench = manifest.join("examples/ota_2stage/gain_2stage.spice");
     let gain_1stage_testbench = manifest.join("examples/ota_2stage/gain_1stage.spice");
+    let rout_1stage_testbench = manifest.join("examples/ota_2stage/rout_1stage.spice");
     let primitive_catalog = load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives"))
         .map_err(|error| format!("{error:?}"))?;
 
@@ -99,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nmos = nmos_table.model(spec.nmos_model)?;
     let pmos = pmos_table.model(spec.pmos_model)?;
 
-    let ota_1stage = ota_1stage(spec, gain_1stage_testbench.clone());
+    let ota_1stage = ota_1stage(spec, gain_1stage_testbench.clone(), rout_1stage_testbench.clone());
     let ota_2stage = ota_2stage(spec, gain_2stage_testbench.clone());
     let macro_catalog = MacroCatalog::from_macros([ota_1stage, ota_2stage])?;
 
@@ -122,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
+fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -> Macro {
     let circuit = Circuit::builder()
         .primitive(
             DIFF_PAIR_INSTANCE,
@@ -153,8 +160,13 @@ fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
     )
     .with_ac_testbench(MacroAcTestbench::from_spice_file(
         OTA_1STAGE_TB,
-        testbench,
+        gain_testbench,
         ac_analysis(),
+    ))
+    .with_dc_node_voltage_testbench(MacroDcNodeVoltageTestbench::from_spice_file(
+        OTA_1STAGE_ROUT_TB,
+        rout_testbench,
+        DcNodeVoltageAnalysis::new("VOUT"),
     ))
     .with_specification(MacroSpecification::new(
         GAIN_SPECIFICATION,
@@ -190,6 +202,12 @@ fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         "vbias",
         PrimitiveBuildInputKind::Vector,
         vec![MacroDesignVariableBinding::new(DIFF_PAIR_INSTANCE, "VTAIL")],
+    ))
+    .with_compact_output(MacroCompactOutputBinding::new(
+        "rout_ota",
+        MacroOutputSource::dc_node_voltage(
+            OTA_1STAGE_ROUT_TB
+            )
     ))
 }
 
@@ -609,9 +627,9 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
 
     println!("\nAccepted two-stage OTA solutions");
     println!(
-        "{:<6} {:>8} {:>8} {:>10} {:>9} {:>11} {:>11} {:>11} {:>12} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>11} {:>12} {:>12} {:>9}",
+        "{:<6} {:>8} {:>8} {:>10} {:>9} {:>11} {:>11} {:>11} {:>12} {:>12} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>11} {:>12} {:>12} {:>9}",
         "root", "ota_idx", "cs_idx", "v1_v", "vout_v", "gm_ota_s", "ro_ota_ohm",
-        "c_ota_f", "gain_1stage", "w_um", "wf_um", "l_um", "nf", "vbs", "vgs", "vds",
+        "c_ota_f", "gain_1stage", "rout_1stage", "w_um", "wf_um", "l_um", "nf", "vbs", "vgs", "vds",
         "gain_db", "f3db_hz", "ugf_hz", "pm_deg"
     );
 
@@ -632,9 +650,21 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
             .ac_outcome(OTA_2STAGE_TB)
             .ok_or_else(|| io::Error::other("selected top result has no AC outcome"))?
             .metrics;
+        let rout_1stage = root
+            .result()
+            .dc_node_voltage_outcome(
+                root.accepted_candidate(),
+                OTA_1STAGE_ROUT_TB,
+            )
+            .ok_or_else(|| {
+                io::Error::other(
+                    "selected top result has no rout outcome",
+                )
+            })?
+            .voltage_v();
 
         println!(
-            "{:<6} {:>8} {:>8} {:>10.4} {:>9.4} {:>11.4e} {:>11.4e} {:>11.4e} {:>12.4} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>11.4} {:>12.4e} {:>12.4e} {:>9.4}",
+            "{:<6} {:>8} {:>8} {:>10.4} {:>9.4} {:>11.4e} {:>11.4e} {:>11.4e} {:>12.4} {:>12.4e} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>11.4} {:>12.4e} {:>12.4e} {:>9.4}",
             accepted_index,
             blackbox.candidate_index(),
             common_source.candidate_index(),
@@ -645,6 +675,7 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
             required_value(&blackbox, "c_ota__xota_1stage")?,
             root.specification_value("gain_1stage")
                 .ok_or_else(|| io::Error::other("selected top result has no gain_1stage value"))?,
+            rout_1stage,
             required_value(&common_source, "width__xcs__m1")? * 1.0e6,
             required_value(&common_source, "finger_width__xcs__m1")? * 1.0e6,
             required_value(&common_source, "length__xcs__m1")? * 1.0e6,
