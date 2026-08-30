@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus};
 use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
@@ -33,10 +33,10 @@ const GAIN_SPECIFICATION: &str = "dc_gain_db";
 const VOUT_POINTS: usize = 5;
 const VOUT_1STAGE_POINTS: usize = 3;
 
-const MIN_DC_GAIN_DB: f64 = 25.0;
+const MIN_DC_GAIN_DB: f64 = 40.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
-const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
+const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PdkSpec {
@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{} hierarchical four-transistor OTA", spec.label);
     print_hierarchy(&result);
     print_derivations(&result);
+    print_results(&result)?;
 
     Ok(())
 }
@@ -171,6 +172,13 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
             "vout", 
             "VOUT"
         ))
+        .with_specification(MacroSpecification::new(
+            "gain_1stage",
+            MacroSpecificationSource::expression(
+                "gm_ota__xota_1stage * ro_ota__xota_1stage",
+            ),
+            MacroSpecificationBounds::unbounded(),
+        ))
 }
 
 fn top_path_input(spec: PdkSpec) -> MacroHierarchyPathInput {
@@ -213,15 +221,15 @@ fn ota_2stage_compact_model() -> Circuit {
 
 fn ota_1stage_seed(spec: PdkSpec) -> MacroCompactSeedSet {
     MacroCompactSeedSet::aligned([
-        ("gm_ota", vec![0.7e-3, 1.0e-3, 1.3e-3, 1e-3]),
-        ("ro_ota", vec![140.0e3, 100.0e3, 75.0e3, 1e5]),
-        ("c_ota", vec![1.0e-12, 2.0e-12, 3.0e-12, 1e-12]),
+        ("gm_ota", vec![1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]),
+        ("ro_ota", vec![1e3, 1e3, 1.0e3, 1e3, 1e4, 1e4, 1e4, 1e4, 1e5, 1e5, 1e5, 1e5, 1e6, 1e6, 1e6, 1e6, 1e7, 1e7, 1e7, 1e7]),
+        ("c_ota", vec![1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13]),
     ])
 }
 
 fn ac_analysis() -> AcAnalysis {
     AcAnalysis::new(
-        TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Negative),
+        TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Positive),
         AdaptiveAcConfig {
             min_frequency_hz: 1.0,
             max_frequency_hz: 100.0e9,
@@ -234,9 +242,9 @@ fn ac_analysis() -> AcAnalysis {
             mode: AnalysisMode::Prune,
             targets: AnalysisTargets {
                 min_dc_gain_db: None,
-                min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
-                min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
-                min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
+                min_bandwidth_3db_hz: None,
+                min_unity_gain_hz: None,
+                min_phase_margin_deg: None,
             },
             metrics: AcMetricSet::ALL,
         },
@@ -451,4 +459,160 @@ fn print_derivations(result: &MacroHierarchyExplorationResult) {
     }
 }
 
+fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Error> {
+    println!("\nExploration summaries");
+    for (path, node) in result.nodes() {
+        match node.status() {
+            MacroHierarchyNodeStatus::PreviewFinalized => {
+                if let Some(final_result) = node.result() {
+                    print_exploration_summary(
+                        &format!("{path} [preview/final]"),
+                        final_result.statistics(),
+                        final_result.execution_report(),
+                    );
+                }
+            }
+            MacroHierarchyNodeStatus::PreviewRejected => {
+                if let Some(final_result) = node.result() {
+                    print_exploration_summary(
+                        &format!("{path} [preview/rejected]"),
+                        final_result.statistics(),
+                        final_result.execution_report(),
+                    );
+                }
+            }
+            _ => {
+                if let Some(preview) = node.preview() {
+                    print_exploration_summary(
+                        &format!("{path} [preview]"),
+                        preview.statistics(),
+                        preview.execution_report(),
+                    );
+                }
+                if let Some(final_result) = node.result() {
+                    print_exploration_summary(
+                        &format!("{path} [final]"),
+                        final_result.statistics(),
+                        final_result.execution_report(),
+                    );
+                }
+            }
+        }
+    }
 
+    println!("\nAccepted two-stage OTA solutions");
+    println!(
+        "{:<6} {:>8} {:>8} {:>10} {:>9} {:>11} {:>11} {:>11} {:>12} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>11} {:>12} {:>12} {:>9}",
+        "root", "ota_idx", "cs_idx", "v1_v", "vout_v", "gm_ota_s", "ro_ota_ohm",
+        "c_ota_f", "gain_1stage", "w_um", "wf_um", "l_um", "nf", "vbs", "vgs", "vds",
+        "gain_db", "f3db_hz", "ugf_hz", "pm_deg"
+    );
+
+    for accepted_index in 0..result.root_result().accepted().len() {
+        let selection = result.selection(accepted_index).map_err(io::Error::other)?;
+        let root = selection
+            .node(result.root_path())
+            .ok_or_else(|| io::Error::other("selection has no root node"))?;
+        let blackbox = selection
+            .instances()
+            .find(|instance| instance.instance() == OTA_1STAGE_INSTANCE)
+            .ok_or_else(|| io::Error::other("selection has no ota_1stage compact candidate"))?;
+        let common_source = selection
+            .instances()
+            .find(|instance| instance.instance() == COMMON_SOURCE_INSTANCE)
+            .ok_or_else(|| io::Error::other("selection has no common-source candidate"))?;
+        let metrics = &root
+            .ac_outcome(OTA_2STAGE_TB)
+            .ok_or_else(|| io::Error::other("selected top result has no AC outcome"))?
+            .metrics;
+
+        println!(
+            "{:<6} {:>8} {:>8} {:>10.4} {:>9.4} {:>11.4e} {:>11.4e} {:>11.4e} {:>12.4} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>11.4} {:>12.4e} {:>12.4e} {:>9.4}",
+            accepted_index,
+            blackbox.candidate_index(),
+            common_source.candidate_index(),
+            required_value(&common_source, "xcs.vin")?,
+            required_value(&common_source, "xcs.vout")?,
+            required_value(&blackbox, "gm_ota__xota_1stage")?,
+            required_value(&blackbox, "ro_ota__xota_1stage")?,
+            required_value(&blackbox, "c_ota__xota_1stage")?,
+            root.specification_value("gain_1stage")
+                .ok_or_else(|| io::Error::other("selected top result has no gain_1stage value"))?,
+            required_value(&common_source, "width__xcs__m1")? * 1.0e6,
+            required_value(&common_source, "finger_width__xcs__m1")? * 1.0e6,
+            required_value(&common_source, "length__xcs__m1")? * 1.0e6,
+            required_value(&common_source, "nf__xcs__m1")?,
+            required_value(&common_source, "vbs__xcs__m1")?,
+            required_value(&common_source, "vgs__xcs__m1")?,
+            required_value(&common_source, "vds__xcs__m1")?,
+            metric(metrics.dc_gain_db, "DC gain")?,
+            metric(metrics.bandwidth_3db_hz, "bandwidth")?,
+            metric(metrics.unity_gain_hz, "UGF")?,
+            metric(metrics.phase_margin_deg, "phase margin")?,
+        );
+    }
+    Ok(())
+}
+
+fn print_exploration_summary(
+    label: &str,
+    statistics: &MacroExplorationStatistics,
+    execution: &MacroExecutionReport,
+) {
+    println!(
+        "  {label}: compatible={}, accepted={}, rejected={}, frequency_evaluations={}",
+        statistics.compatible_candidates(),
+        statistics.accepted_candidates(),
+        statistics.rejected_candidates(),
+        statistics.frequency_evaluations(),
+    );
+    for testbench in statistics.testbenches() {
+        let rejections = testbench.rejections();
+        println!(
+            "    {}: evaluated={}, physical_domain={}, dc_gain={}, f3db={}, ugf={}, phase_margin={}, frequency_evaluations={}",
+            testbench.testbench(),
+            testbench.evaluated_candidates(),
+            testbench.physical_domain_rejections(),
+            rejections.count(AcMetric::DcGainDb),
+            rejections.count(AcMetric::Bandwidth3DbHz),
+            rejections.count(AcMetric::UnityGainHz),
+            rejections.count(AcMetric::PhaseMarginDeg),
+            testbench.frequency_evaluations(),
+        );
+    }
+    for specification in statistics.specifications() {
+        println!(
+            "    specification {}: evaluated={}, rejected={}",
+            specification.specification(),
+            specification.evaluated_candidates(),
+            specification.rejected_candidates(),
+        );
+    }
+    println!(
+        "    execution: candidate_build={:?}, preparation={:?}, sequential={:?}, parallel={:?}, tail={:?}, batches={}, survivors={}, total={:?}",
+        execution.candidate_build(),
+        execution.testbench_preparation(),
+        execution.sequential_evaluation(),
+        execution.parallel_electrical_analysis(),
+        execution.sequential_tail(),
+        execution.electrical_batches(),
+        execution.electrical_survivors(),
+        execution.total(),
+    );
+}
+
+fn required_value(
+    instance: &shapeic_core::macro_model::MacroHierarchySelectedInstance<'_>,
+    column: &str,
+) -> Result<f64, io::Error> {
+    instance
+        .value(column)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| io::Error::other(format!("{} has no finite '{column}'", instance.path())))
+}
+
+fn metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
+    value
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| io::Error::other(format!("AC outcome has no finite {name}")))
+}
