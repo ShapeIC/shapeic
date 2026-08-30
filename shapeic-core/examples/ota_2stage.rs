@@ -14,13 +14,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus, MacroDesignVariableBinding};
 use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::analysis::{AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets, AcMetricSet, AcMetric};
 use shapeic_core::utils::linspace;
+use shapeic_core::exploration::filter::CandidateFilter;
 
 const COMMON_SOURCE_INSTANCE: &str = "xcs";
 const OTA_1STAGE_INSTANCE: &str = "xota_1stage";
@@ -28,15 +29,26 @@ const OTA_1STAGE_TB: &str = "ota_1stage_gain";
 const OTA_1STAGE: &str = "ota_1stage"; 
 const OTA_2STAGE: &str = "ota_2stage";
 const OTA_2STAGE_TB: &str = "ota_2stage_gain";
+const DIFF_PAIR_INSTANCE: &str = "xdp";
+const CURRENT_MIRROR_INSTANCE: &str = "xcm";
+
+
 const GAIN_SPECIFICATION: &str = "dc_gain_db";
 
 const VOUT_POINTS: usize = 5;
+const VBIAS_POINTS: usize = 5;
 const VOUT_1STAGE_POINTS: usize = 3;
 
 const MIN_DC_GAIN_DB: f64 = 40.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
+
+const MAX_WIDTH: f64 = 100.0e-6;
+
+
+const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
+const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PdkSpec {
@@ -52,6 +64,8 @@ struct PdkSpec {
     vin: f64,
     vout_1stage_start: f64,
     vout_1stage_stop: f64,
+    vbias_start: f64,
+    vbias_stop: f64,
 }
 
 const IHP_SPEC: PdkSpec = PdkSpec {
@@ -67,12 +81,15 @@ const IHP_SPEC: PdkSpec = PdkSpec {
     vin: 0.9,
     vout_1stage_start: 0.95,
     vout_1stage_stop: 1.1,
+    vbias_start: 0.65,
+    vbias_stop: 0.79,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = cli_options()?;
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let testbench = manifest.join("examples/ota_2stage/gain.spice");
+    let gain_2stage_testbench = manifest.join("examples/ota_2stage/gain_2stage.spice");
+    let gain_1stage_testbench = manifest.join("examples/ota_2stage/gain_1stage.spice");
     let primitive_catalog = load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives"))
         .map_err(|error| format!("{error:?}"))?;
 
@@ -82,8 +99,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nmos = nmos_table.model(spec.nmos_model)?;
     let pmos = pmos_table.model(spec.pmos_model)?;
 
-    let ota_1stage = ota_1stage(spec, testbench.clone());
-    let ota_2stage = ota_2stage(spec, testbench.clone());
+    let ota_1stage = ota_1stage(spec, gain_1stage_testbench.clone());
+    let ota_2stage = ota_2stage(spec, gain_2stage_testbench.clone());
     let macro_catalog = MacroCatalog::from_macros([ota_1stage, ota_2stage])?;
 
     let mut input = MacroHierarchyExplorationInput::new();
@@ -106,18 +123,73 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
+    let circuit = Circuit::builder()
+        .primitive(
+            DIFF_PAIR_INSTANCE,
+            "simplediffpair",
+            [
+                ("VINP", "VINP"),
+                ("VINN", "VINN"),
+                ("VOUTP", "VOUT"),
+                ("VOUTN", "N1"),
+                ("VTAIL", "IBIAS"),
+                ("VSS", "IBIAS"),
+            ],
+        )
+        .primitive(
+            CURRENT_MIRROR_INSTANCE,
+            "simplecurrentmirror",
+            [
+                ("VINP", "N1"), 
+                ("VOUTP", "VOUT"), 
+                ("VDD", "VDD")],
+        )
+        .build();
     Macro::new(
         OTA_1STAGE,
         ota_1stage_ports(),
         Circuit::default(),
         ota_1stage_compact_model()
     )
-    .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+    .with_ac_testbench(MacroAcTestbench::from_spice_file(
+        OTA_1STAGE_TB,
+        testbench,
+        ac_analysis(),
+    ))
+    .with_specification(MacroSpecification::new(
+        GAIN_SPECIFICATION,
+        MacroSpecificationSource::ac_metric(OTA_1STAGE_TB, AcMetric::DcGainDb),
+        MacroSpecificationBounds::unbounded(),
+    ))
+    .with_primitive_default(MacroPrimitiveDefault::new(
+        DIFF_PAIR_INSTANCE,
+        diff_pair_input(spec),
+        vec![
+            CandidateFilter::at_most(DIFF_PAIR_WIDTH_COLUMN, MAX_WIDTH)
+                .expect("finite width filter"),
+        ],
+    ))
+    .with_primitive_default(MacroPrimitiveDefault::new(
+        CURRENT_MIRROR_INSTANCE,
+        current_mirror_input(spec),
+        vec![
+            CandidateFilter::at_most(CURRENT_MIRROR_WIDTH_COLUMN, MAX_WIDTH)
+                .expect("finite width filter"),
+        ],
+    ))
     .with_compact_seeds(ota_1stage_seed(spec))
     .with_design_variable(MacroDesignVariable::new(
-        "vout",
+        "vout_1stage",
         PrimitiveBuildInputKind::Vector,
-        Vec::new(),
+        vec![
+            MacroDesignVariableBinding::new(DIFF_PAIR_INSTANCE, "VOUTP"),
+            MacroDesignVariableBinding::new(CURRENT_MIRROR_INSTANCE, "VOUTP"),
+        ],
+    ))
+    .with_design_variable(MacroDesignVariable::new(
+        "vbias",
+        PrimitiveBuildInputKind::Vector,
+        vec![MacroDesignVariableBinding::new(DIFF_PAIR_INSTANCE, "VTAIL")],
     ))
 }
 
@@ -169,7 +241,7 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         .with_public_input_alias(MacroPublicInputAlias::new(
             "vout_1stage", 
             OTA_1STAGE_INSTANCE, 
-            "vout", 
+            "vout_1stage", 
             "VOUT"
         ))
         .with_specification(MacroSpecification::new(
@@ -249,6 +321,41 @@ fn ac_analysis() -> AcAnalysis {
             metrics: AcMetricSet::ALL,
         },
     )
+}
+
+fn diff_pair_input(spec: PdkSpec) -> PrimitiveBuildInput {
+    PrimitiveBuildInput::new(HashMap::from([
+        (
+            "current".to_owned(),
+            PrimitiveBuildValue::Scalar(spec.tail_current),
+        ),
+        ("VINP".to_owned(), PrimitiveBuildValue::Scalar(spec.vin)),
+        (
+            "VOUTP".to_owned(),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+        ),
+        (
+            "VTAIL".to_owned(),
+            PrimitiveBuildValue::Vector(linspace(spec.vbias_start, spec.vbias_stop, VBIAS_POINTS)),
+        ),
+    ]))
+}
+fn current_mirror_input(spec: PdkSpec) -> PrimitiveBuildInput {
+    PrimitiveBuildInput::new(HashMap::from([
+        (
+            "current".to_owned(),
+            PrimitiveBuildValue::Scalar(spec.tail_current),
+        ),
+        (
+            "VINP".to_owned(),
+            PrimitiveBuildValue::Scalar(spec.mirror_reference),
+        ),
+        (
+            "VOUTP".to_owned(),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+        ),
+        ("VDD".to_owned(), PrimitiveBuildValue::Scalar(spec.vdd)),
+    ]))
 }
 
 fn common_source_input(spec: PdkSpec) -> PrimitiveBuildInput {
