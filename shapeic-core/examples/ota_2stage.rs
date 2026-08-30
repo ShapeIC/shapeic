@@ -1,4 +1,5 @@
 use std::error::Error;
+use shapeic_core::macro_model::MacroExploration;
 use shapeic_core::macro_model::explore_macro_hierarchy;
 use std::collections::HashMap;
 use shapeic_core::macro_model::MacroAcTestbench;
@@ -13,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy};
 use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
@@ -88,6 +89,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut input = MacroHierarchyExplorationInput::new();
     input.register_device_model("nmos", nmos)?;
     input.register_device_model("pmos", pmos)?;
+    input.register_path(MacroHierarchyPath::root(OTA_2STAGE)?, top_path_input(spec))?;
+    input.set_retention_policy(
+        MacroHierarchyRetentionPolicy::FullPreviews,
+    );
     input.set_execution_config(options.execution_config()?);
 
     let result = explore_macro_hierarchy(OTA_2STAGE, &macro_catalog, &primitive_catalog, &input)?;
@@ -106,7 +111,13 @@ fn ota_1stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         Circuit::default(),
         ota_1stage_compact_model()
     )
+    .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
     .with_compact_seeds(ota_1stage_seed(spec))
+    .with_design_variable(MacroDesignVariable::new(
+        "vout",
+        PrimitiveBuildInputKind::Vector,
+        Vec::new(),
+    ))
 }
 
 fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
@@ -129,6 +140,7 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
                 ("VOUT", "VOUT_1STAGE"),
                 ("IBIAS", "IBIAS"),
                 ("VDD", "VDD"),
+                ("VSS", "VSS")
             ],
         )
         .build();
@@ -161,6 +173,17 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         ))
 }
 
+fn top_path_input(spec: PdkSpec) -> MacroHierarchyPathInput {
+    let mut input = MacroHierarchyPathInput::new();
+    input
+        .register_design_variable_override(
+            "vout_1stage",
+            PrimitiveBuildValue::Vector(linspace(spec.vout_1stage_start, spec.vout_1stage_stop, VOUT_1STAGE_POINTS)),
+        )
+        .expect("top-level VOUT_1STAGE is registered once");
+    input
+}
+
 fn ota_1stage_ports() -> Vec<MacroPort> {
     vec![
         MacroPort::new("VINP", MacroPortRole::Input),
@@ -168,6 +191,7 @@ fn ota_1stage_ports() -> Vec<MacroPort> {
         MacroPort::new("VOUT", MacroPortRole::Output),
         MacroPort::new("IBIAS", MacroPortRole::Bias),
         MacroPort::new("VDD", MacroPortRole::Supply),
+        MacroPort::new("VSS", MacroPortRole::Ground),
     ]
 }
 
@@ -181,23 +205,17 @@ fn ota_1stage_compact_model() -> Circuit {
 
 fn ota_2stage_compact_model() -> Circuit {
     Circuit::builder()
-        .vccs("gm_dp_m1", "VOUT", "IBIAS", "VINP", "IBIAS", "gm_dp")
-        .resistor("ro_dp_m1", "VOUT", "IBIAS", "ro_dp")
-        .vccs("gm_dp_m2", "N1", "IBIAS", "VINN", "IBIAS", "gm_dp")
-        .resistor("ro_dp_m2", "N1", "IBIAS", "ro_dp")
-        .vccs("gm_cm_m1", "VOUT", "VDD", "N1", "VDD", "gm_cm")
-        .resistor("ro_cm_m1", "VOUT", "VDD", "ro_cm")
-        .vccs("gm_cm_m2", "N1", "VDD", "N1", "VDD", "gm_cm")
-        .resistor("ro_cm_m2", "N1", "VDD", "ro_cm")
-        .capacitor("c_out", "VOUT", "IBIAS", 1.0e-12)
+        .vccs("gm_ota", "VOUT", "VSS", "VINP", "VSS", 1.0)
+        .resistor("ro_ota", "VOUT", "VSS", 1.0)
+        .capacitor("c_ota", "VOUT", "VSS", 1.0)
         .build()
 }
 
 fn ota_1stage_seed(spec: PdkSpec) -> MacroCompactSeedSet {
     MacroCompactSeedSet::aligned([
-        ("gm_ota", vec![0.7e-3, 1.0e-3, 1.3e-3]),
-        ("ro_ota", vec![140.0e3, 100.0e3, 75.0e3]),
-        ("c_ota", vec![1.0e-12, 2.0e-12, 3.0e-12]),
+        ("gm_ota", vec![0.7e-3, 1.0e-3, 1.3e-3, 1e-3]),
+        ("ro_ota", vec![140.0e3, 100.0e3, 75.0e3, 1e5]),
+        ("c_ota", vec![1.0e-12, 2.0e-12, 3.0e-12, 1e-12]),
     ])
 }
 
