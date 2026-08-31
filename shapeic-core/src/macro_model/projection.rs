@@ -194,6 +194,11 @@ fn resolve_source(
                 testbench: testbench.clone(),
             })?
             .voltage_v(),
+        MacroOutputSource::Specification { specification } => accepted
+            .specification_value(specification)
+            .ok_or_else(|| MacroOutputResolutionError::MissingSpecificationValue {
+                specification: specification.clone(),
+            })?,
     };
     if !value.is_finite() {
         return Err(MacroOutputResolutionError::NonFiniteValue);
@@ -293,6 +298,9 @@ pub enum MacroOutputResolutionError {
     MissingDcNodeVoltageOutcome {
         testbench: String,
     },
+    MissingSpecificationValue {
+        specification: String,
+    },
     UnavailableAcMetric {
         testbench: String,
         metric: AcMetric,
@@ -324,6 +332,10 @@ impl fmt::Display for MacroOutputResolutionError {
                 formatter,
                 "accepted result has no DC node-voltage outcome for '{testbench}'"
             ),
+            Self::MissingSpecificationValue { specification } => write!(
+                formatter,
+                "accepted result has no calculated value for specification '{specification}'"
+            ),
             Self::UnavailableAcMetric { testbench, metric } => write!(
                 formatter,
                 "AC metric {} is unavailable for testbench '{testbench}'",
@@ -335,3 +347,34 @@ impl fmt::Display for MacroOutputResolutionError {
 }
 
 impl Error for MacroOutputResolutionError {}
+
+#[cfg(test)]
+mod tests {
+    use crate::macro_model::{MacroCandidateSets, MacroExplorationResult, MacroOutputSource};
+
+    use super::{MacroOutputResolutionError, resolve_source};
+
+    #[test]
+    fn resolves_an_accepted_specification_value_and_reports_missing_results() {
+        let result = MacroExplorationResult::test_fixture(
+            "derived_stage",
+            MacroCandidateSets::default(),
+            vec![
+                (Vec::new(), vec![("gm_ota".to_owned(), 2.5e-3)]),
+                (Vec::new(), Vec::new()),
+            ],
+        );
+        let source = MacroOutputSource::specification("gm_ota");
+
+        assert_eq!(
+            resolve_source(&result, &result.accepted()[0], &source),
+            Ok(2.5e-3)
+        );
+        assert_eq!(
+            resolve_source(&result, &result.accepted()[1], &source),
+            Err(MacroOutputResolutionError::MissingSpecificationValue {
+                specification: "gm_ota".to_owned(),
+            })
+        );
+    }
+}

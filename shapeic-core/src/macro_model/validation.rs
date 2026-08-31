@@ -1450,6 +1450,17 @@ fn validate_output_source(
                 None
             }
         }
+        MacroOutputSource::Specification { specification } => {
+            if specification.trim().is_empty() {
+                Some("specification name is empty".to_owned())
+            } else if macro_.exploration().specification(specification).is_none() {
+                Some(format!(
+                    "macro specification '{specification}' is not declared"
+                ))
+            } else {
+                None
+            }
+        }
     };
     if let Some(reason) = reason {
         errors.push(MacroValidationError::InvalidOutputSource {
@@ -1538,6 +1549,7 @@ mod tests {
         Macro, MacroAcTestbench, MacroCatalog, MacroCompactOutputBinding, MacroCompactSeedSet,
         MacroDcNodeVoltageTestbench, MacroDesignVariable, MacroExplorationDefinitionError,
         MacroHierarchyMode, MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
+        MacroSpecification, MacroSpecificationBounds, MacroSpecificationSource,
     };
     use crate::netlist::names::{compact_model_param_name, small_signal_param_name};
     use crate::primitive::build::PrimitiveBuildInputKind;
@@ -1713,6 +1725,54 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn validates_specification_output_sources() {
+        let valid = Macro::new(
+            "specification_output",
+            ports(),
+            leaf_macro().circuit().clone(),
+            compact_model(),
+        )
+        .with_specification(MacroSpecification::new(
+            "gm_calculated",
+            MacroSpecificationSource::expression("1.0e-3"),
+            MacroSpecificationBounds::unbounded(),
+        ))
+        .with_compact_output(MacroCompactOutputBinding::new(
+            "gm_eq",
+            MacroOutputSource::specification("gm_calculated"),
+        ));
+        let errors = validate_macro_catalog(
+            &MacroCatalog::from_macros([valid]).unwrap(),
+            &primitive_catalog(),
+        );
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        let invalid = leaf_macro()
+            .with_interface_binding(MacroInterfaceBinding::new(
+                "VOUT",
+                MacroOutputSource::specification("missing"),
+            ))
+            .with_interface_binding(MacroInterfaceBinding::new(
+                "VIN",
+                MacroOutputSource::specification(" "),
+            ));
+        let errors = validate_macro_catalog(
+            &MacroCatalog::from_macros([invalid]).unwrap(),
+            &primitive_catalog(),
+        );
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::InvalidOutputSource { reason, .. }
+                if reason.contains("'missing'")
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroValidationError::InvalidOutputSource { reason, .. }
+                if reason == "specification name is empty"
+        )));
     }
 
     #[test]

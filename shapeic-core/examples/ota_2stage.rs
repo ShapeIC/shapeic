@@ -1,6 +1,7 @@
 use std::error::Error;
 use shapeic_core::macro_model::MacroCompactOutputBinding;
 use shapeic_core::macro_model::MacroExploration;
+use shapeic_core::macro_model::MacroInterfaceBinding;
 use shapeic_core::macro_model::MacroOutputSource;
 use shapeic_core::macro_model::explore_macro_hierarchy;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus, MacroDesignVariableBinding};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus, MacroDesignVariableBinding, MacroDerivationRule, MacroDerivationTarget, MacroDerivationReduction};
 use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
@@ -38,14 +39,15 @@ const CURRENT_MIRROR_INSTANCE: &str = "xcm";
 const OTA_1STAGE_ROUT_TB: &str = "ota_1stage_rout";
 
 
-const GAIN_SPECIFICATION: &str = "dc_gain_db";
+const GAIN_1STAGE_SPECIFICATION: &str = "gain_1stage";
+const GAIN_2STAGE_SPECIFICATION: &str = "gain_2stage";
 const ROUT_1STAGE_SPECIFICATION: &str = "rout_1stage";
 
 const VOUT_POINTS: usize = 5;
 const VBIAS_POINTS: usize = 5;
 const VOUT_1STAGE_POINTS: usize = 3;
 
-const MIN_DC_GAIN_DB: f64 = 40.0;
+const MIN_DC_GAIN_DB: f64 = 79.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
@@ -140,7 +142,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
                 ("VOUTP", "VOUT"),
                 ("VOUTN", "N1"),
                 ("VTAIL", "IBIAS"),
-                ("VSS", "IBIAS"),
+                ("VSS", "VSS"),
             ],
         )
         .primitive(
@@ -155,7 +157,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
     Macro::new(
         OTA_1STAGE,
         ota_1stage_ports(),
-        Circuit::default(),
+        circuit,
         ota_1stage_compact_model()
     )
     .with_ac_testbench(MacroAcTestbench::from_spice_file(
@@ -169,9 +171,25 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
         DcNodeVoltageAnalysis::new("VOUT"),
     ))
     .with_specification(MacroSpecification::new(
-        GAIN_SPECIFICATION,
+        GAIN_1STAGE_SPECIFICATION,
         MacroSpecificationSource::ac_metric(OTA_1STAGE_TB, AcMetric::DcGainDb),
         MacroSpecificationBounds::unbounded(),
+    ))
+    .with_specification(MacroSpecification::new(
+        ROUT_1STAGE_SPECIFICATION,
+        MacroSpecificationSource::dc_node_voltage(OTA_1STAGE_ROUT_TB),
+        MacroSpecificationBounds::unbounded(),
+    ))
+    .with_specification(MacroSpecification::new(
+        "gm_ota",
+        MacroSpecificationSource::expression(
+        "gain_1stage / rout_1stage",
+        ),
+        MacroSpecificationBounds::unbounded(),
+    ))
+    .with_compact_output(MacroCompactOutputBinding::new(
+        "gm_ota",
+        MacroOutputSource::specification("gm_ota"),
     ))
     .with_primitive_default(MacroPrimitiveDefault::new(
         DIFF_PAIR_INSTANCE,
@@ -204,10 +222,14 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
         vec![MacroDesignVariableBinding::new(DIFF_PAIR_INSTANCE, "VTAIL")],
     ))
     .with_compact_output(MacroCompactOutputBinding::new(
-        "rout_ota",
+        "ro_ota",
         MacroOutputSource::dc_node_voltage(
             OTA_1STAGE_ROUT_TB
             )
+    ))
+    .with_interface_binding(MacroInterfaceBinding::new(
+        "VOUT",
+        MacroOutputSource::candidate_column(DIFF_PAIR_INSTANCE, "xdp.voutp")
     ))
 }
 
@@ -242,7 +264,7 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
             ac_analysis()
         ))
         .with_specification(MacroSpecification::new(
-            GAIN_SPECIFICATION,
+            GAIN_2STAGE_SPECIFICATION,
             MacroSpecificationSource::ac_metric(OTA_2STAGE_TB, AcMetric::DcGainDb),
             MacroSpecificationBounds::at_least(MIN_DC_GAIN_DB),
         ))
@@ -268,6 +290,12 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
                 "gm_ota__xota_1stage * ro_ota__xota_1stage",
             ),
             MacroSpecificationBounds::unbounded(),
+        ))
+        .with_derivation_rule(MacroDerivationRule::new(
+            OTA_1STAGE_INSTANCE,
+            "gain_1stage",
+            MacroDerivationReduction::Minimum,
+            MacroDerivationTarget::specification_minimum(GAIN_1STAGE_SPECIFICATION),
         ))
 }
 
@@ -297,7 +325,6 @@ fn ota_1stage_compact_model() -> Circuit {
     Circuit::builder()
         .vccs("gm_ota", "VOUT", "VSS", "VINP", "VSS", "gm_ota")
         .resistor("ro_ota", "VOUT", "VSS", "ro_ota")
-        .capacitor("c_ota", "VOUT", "VSS", "c_ota")
         .build()
 }
 
@@ -313,7 +340,6 @@ fn ota_1stage_seed(spec: PdkSpec) -> MacroCompactSeedSet {
     MacroCompactSeedSet::aligned([
         ("gm_ota", vec![1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]),
         ("ro_ota", vec![1e3, 1e3, 1.0e3, 1e3, 1e4, 1e4, 1e4, 1e4, 1e5, 1e5, 1e5, 1e5, 1e6, 1e6, 1e6, 1e6, 1e7, 1e7, 1e7, 1e7]),
-        ("c_ota", vec![1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13, 1e-13]),
     ])
 }
 
@@ -627,9 +653,9 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
 
     println!("\nAccepted two-stage OTA solutions");
     println!(
-        "{:<6} {:>8} {:>8} {:>10} {:>9} {:>11} {:>11} {:>11} {:>12} {:>12} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>11} {:>12} {:>12} {:>9}",
+        "{:<6} {:>8} {:>8} {:>10} {:>9} {:>11} {:>11} {:>12} {:>9} {:>9} {:>8} {:>5} {:>8} {:>8} {:>8} {:>11} {:>12} {:>12} {:>9}",
         "root", "ota_idx", "cs_idx", "v1_v", "vout_v", "gm_ota_s", "ro_ota_ohm",
-        "c_ota_f", "gain_1stage", "rout_1stage", "w_um", "wf_um", "l_um", "nf", "vbs", "vgs", "vds",
+        "gain_1stage", "w_um", "wf_um", "l_um", "nf", "vbs", "vgs", "vds",
         "gain_db", "f3db_hz", "ugf_hz", "pm_deg"
     );
 
@@ -650,21 +676,9 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
             .ac_outcome(OTA_2STAGE_TB)
             .ok_or_else(|| io::Error::other("selected top result has no AC outcome"))?
             .metrics;
-        let rout_1stage = root
-            .result()
-            .dc_node_voltage_outcome(
-                root.accepted_candidate(),
-                OTA_1STAGE_ROUT_TB,
-            )
-            .ok_or_else(|| {
-                io::Error::other(
-                    "selected top result has no rout outcome",
-                )
-            })?
-            .voltage_v();
 
         println!(
-            "{:<6} {:>8} {:>8} {:>10.4} {:>9.4} {:>11.4e} {:>11.4e} {:>11.4e} {:>12.4} {:>12.4e} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>11.4} {:>12.4e} {:>12.4e} {:>9.4}",
+            "{:<6} {:>8} {:>8} {:>10.4} {:>9.4} {:>11.4e} {:>11.4e} {:>12.4} {:>9.4} {:>9.4} {:>8.4} {:>5.0} {:>8.4} {:>8.4} {:>8.4} {:>11.4} {:>12.4e} {:>12.4e} {:>9.4}",
             accepted_index,
             blackbox.candidate_index(),
             common_source.candidate_index(),
@@ -672,10 +686,8 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
             required_value(&common_source, "xcs.vout")?,
             required_value(&blackbox, "gm_ota__xota_1stage")?,
             required_value(&blackbox, "ro_ota__xota_1stage")?,
-            required_value(&blackbox, "c_ota__xota_1stage")?,
             root.specification_value("gain_1stage")
                 .ok_or_else(|| io::Error::other("selected top result has no gain_1stage value"))?,
-            rout_1stage,
             required_value(&common_source, "width__xcs__m1")? * 1.0e6,
             required_value(&common_source, "finger_width__xcs__m1")? * 1.0e6,
             required_value(&common_source, "length__xcs__m1")? * 1.0e6,

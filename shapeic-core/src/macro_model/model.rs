@@ -934,6 +934,8 @@ pub enum MacroOutputSource {
     AcMetric { testbench: String, metric: AcMetric },
     /// Signed voltage produced by a named DC node-voltage testbench.
     DcNodeVoltage { testbench: String },
+    /// Value calculated by one accepted macro specification.
+    Specification { specification: String },
 }
 
 impl MacroOutputSource {
@@ -957,6 +959,13 @@ impl MacroOutputSource {
     pub fn dc_node_voltage(testbench: impl Into<String>) -> Self {
         Self::DcNodeVoltage {
             testbench: testbench.into(),
+        }
+    }
+
+    /// Selects the calculated value of one macro-local specification.
+    pub fn specification(specification: impl Into<String>) -> Self {
+        Self::Specification {
+            specification: specification.into(),
         }
     }
 }

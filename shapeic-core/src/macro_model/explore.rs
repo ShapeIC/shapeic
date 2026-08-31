@@ -1838,7 +1838,7 @@ mod tests {
         ))
         .with_compact_output(MacroCompactOutputBinding::new(
             "dc_output",
-            MacroOutputSource::dc_node_voltage("operating_point"),
+            MacroOutputSource::specification("output_v"),
         ));
         let execution = MacroExecutionConfig::sequential()
             .with_parallel_electrical_analysis(2)
