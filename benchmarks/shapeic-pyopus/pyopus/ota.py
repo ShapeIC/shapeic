@@ -53,6 +53,12 @@ analyses = {
         "saves": ["all()"],
         "command": "ac(1, 1e9, 'dec', 100)",
     },
+
+    # Analisis sin simulacion para medidas que dependen solo de parametros.
+    "blank": {
+        "head": "ngspice",
+        "command": None,
+    },
 }
 
 
@@ -90,6 +96,15 @@ measures = {
         "expression":
             "-i('vdd')",
     },
+
+    "area": {
+        "analysis": "blank",
+        "corners": ["nominal"],
+
+        # Dos NMOS y dos PMOS. No incluye contactos ni interconexion.
+        "expression":
+            "2*param['w_n']*param['l_n'] + 2*param['w_p']*param['l_p']",
+    },
 }
 
 
@@ -117,9 +132,10 @@ params = {
     "l_p": 0.5e-6,
 }
 
-results, analysis_count = evaluator(params)
+if __name__ == "__main__":
+    results, analysis_count = evaluator(params)
 
-print(results)
-print("SPICE analyses:", analysis_count)
+    print(results)
+    print("SPICE analyses:", analysis_count)
 
-evaluator.finalize()
+    evaluator.finalize()
