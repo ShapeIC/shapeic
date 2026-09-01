@@ -558,11 +558,19 @@ impl MacroDesignVariableCondition {
     }
 }
 
-/// Correlated compact-model parameter vectors used for a parent preview.
+/// Compact-model parameter vectors used to build parent-preview candidates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacroCompactSeedSet {
     compact_parameters: Vec<(String, Vec<f64>)>,
     row_count: usize,
+    mode: MacroCompactSeedMode,
+    candidate_count_overflow: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacroCompactSeedMode {
+    Aligned,
+    Cartesian,
 }
 
 impl MacroCompactSeedSet {
@@ -586,6 +594,34 @@ impl MacroCompactSeedSet {
         Self {
             compact_parameters,
             row_count,
+            mode: MacroCompactSeedMode::Aligned,
+            candidate_count_overflow: false,
+        }
+    }
+
+    /// Creates a Cartesian seed mesh from independent compact-parameter axes.
+    ///
+    /// Every combination of the supplied values becomes one compact-model
+    /// candidate. Iteration is deterministic and the last parameter changes
+    /// fastest. Empty axes and a candidate-count overflow are rejected during
+    /// macro validation.
+    pub fn cartesian<P, N>(compact_parameters: P) -> Self
+    where
+        P: IntoIterator<Item = (N, Vec<f64>)>,
+        N: Into<String>,
+    {
+        let compact_parameters = compact_parameters
+            .into_iter()
+            .map(|(name, values)| (name.into(), values))
+            .collect::<Vec<_>>();
+        let row_count = compact_parameters
+            .iter()
+            .try_fold(1usize, |count, (_, values)| count.checked_mul(values.len()));
+        Self {
+            compact_parameters,
+            row_count: row_count.unwrap_or(0),
+            mode: MacroCompactSeedMode::Cartesian,
+            candidate_count_overflow: row_count.is_none(),
         }
     }
 
@@ -594,15 +630,17 @@ impl MacroCompactSeedSet {
         Self {
             compact_parameters: Vec::new(),
             row_count: 1,
+            mode: MacroCompactSeedMode::Aligned,
+            candidate_count_overflow: false,
         }
     }
 
-    /// Returns unscoped compact-model parameter vectors.
+    /// Returns unscoped aligned rows or Cartesian parameter axes.
     pub fn compact_parameters(&self) -> &[(String, Vec<f64>)] {
         &self.compact_parameters
     }
 
-    /// Returns the number of correlated preview rows.
+    /// Returns the number of preview candidates represented by this set.
     pub const fn len(&self) -> usize {
         self.row_count
     }
@@ -610,6 +648,29 @@ impl MacroCompactSeedSet {
     /// Returns whether the set contains no preview rows.
     pub const fn is_empty(&self) -> bool {
         self.row_count == 0
+    }
+
+    pub(super) const fn is_aligned(&self) -> bool {
+        matches!(self.mode, MacroCompactSeedMode::Aligned)
+    }
+
+    pub(super) const fn candidate_count_overflow(&self) -> bool {
+        self.candidate_count_overflow
+    }
+
+    pub(super) fn value(&self, parameter_index: usize, row_index: usize) -> f64 {
+        let values = &self.compact_parameters[parameter_index].1;
+        let value_index = match self.mode {
+            MacroCompactSeedMode::Aligned => row_index,
+            MacroCompactSeedMode::Cartesian => {
+                let stride = self.compact_parameters[parameter_index + 1..]
+                    .iter()
+                    .map(|(_, values)| values.len())
+                    .product::<usize>();
+                (row_index / stride) % values.len()
+            }
+        };
+        values[value_index]
     }
 }
 

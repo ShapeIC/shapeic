@@ -23,7 +23,7 @@ use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInpu
 use shapeic_lut::LookupTable;
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
 use shapeic_core::analysis::{AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode, AnalysisTargets, AcMetricSet, AcMetric};
-use shapeic_core::utils::linspace;
+use shapeic_core::utils::{linspace, logspace};
 use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::MacroDcNodeVoltageTestbench;
 use shapeic_core::testbench::DcNodeVoltageAnalysis;
@@ -47,7 +47,7 @@ const VOUT_POINTS: usize = 5;
 const VBIAS_POINTS: usize = 5;
 const VOUT_1STAGE_POINTS: usize = 3;
 
-const MIN_DC_GAIN_DB: f64 = 79.0;
+const MIN_DC_GAIN_DB: f64 = 80.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
@@ -336,10 +336,10 @@ fn ota_2stage_compact_model() -> Circuit {
         .build()
 }
 
-fn ota_1stage_seed(spec: PdkSpec) -> MacroCompactSeedSet {
-    MacroCompactSeedSet::aligned([
-        ("gm_ota", vec![1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]),
-        ("ro_ota", vec![1e3, 1e3, 1.0e3, 1e3, 1e4, 1e4, 1e4, 1e4, 1e5, 1e5, 1e5, 1e5, 1e6, 1e6, 1e6, 1e6, 1e7, 1e7, 1e7, 1e7]),
+fn ota_1stage_seed(_spec: PdkSpec) -> MacroCompactSeedSet {
+    MacroCompactSeedSet::cartesian([
+        ("gm_ota", logspace(-5.0, -2.0, 10)),
+        ("ro_ota", logspace(3.0, 7.0, 10)),
     ])
 }
 
@@ -697,8 +697,8 @@ fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Err
             required_value(&common_source, "vds__xcs__m1")?,
             metric(metrics.dc_gain_db, "DC gain")?,
             metric(metrics.bandwidth_3db_hz, "bandwidth")?,
-            metric(metrics.unity_gain_hz, "UGF")?,
-            metric(metrics.phase_margin_deg, "phase margin")?,
+            optional_metric(metrics.unity_gain_hz),
+            optional_metric(metrics.phase_margin_deg)
         );
     }
     Ok(())
@@ -765,4 +765,8 @@ fn metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
     value
         .filter(|value| value.is_finite())
         .ok_or_else(|| io::Error::other(format!("AC outcome has no finite {name}")))
+}
+fn optional_metric(value: Option<f64>) -> f64 {
+    value.filter(|value| value.is_finite())
+    .unwrap_or(f64::NAN)
 }

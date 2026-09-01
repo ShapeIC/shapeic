@@ -1,4 +1,4 @@
-//! Validation, transposition, and instance scoping of aligned compact seeds.
+//! Validation, expansion, and instance scoping of compact seeds.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -37,6 +37,7 @@ pub enum MacroCompactSeedError {
         expected: usize,
         actual: usize,
     },
+    CandidateCountOverflow,
     NonFiniteParameter {
         parameter: String,
         index: usize,
@@ -86,6 +87,9 @@ impl fmt::Display for MacroCompactSeedError {
                     "compact seed parameter '{parameter}' has {actual} values; expected {expected}"
                 )
             }
+            Self::CandidateCountOverflow => {
+                formatter.write_str("compact Cartesian seed candidate count overflows usize")
+            }
             Self::NonFiniteParameter { parameter, index } => {
                 write!(
                     formatter,
@@ -104,7 +108,9 @@ pub(super) fn validate_compact_seeds(
 ) -> Vec<MacroCompactSeedError> {
     let required_parameters = compact_parameters(macro_);
     let mut errors = Vec::new();
-    if seeds.is_empty() {
+    if seeds.candidate_count_overflow() {
+        errors.push(MacroCompactSeedError::CandidateCountOverflow);
+    } else if seeds.is_empty() {
         errors.push(MacroCompactSeedError::EmptySeedSet);
     }
     let mut parameters = BTreeSet::new();
@@ -127,7 +133,7 @@ pub(super) fn validate_compact_seeds(
             errors.push(MacroCompactSeedError::EmptyParameterValues {
                 parameter: parameter.clone(),
             });
-        } else if values.len() != seeds.len() {
+        } else if seeds.is_aligned() && values.len() != seeds.len() {
             errors.push(MacroCompactSeedError::ParameterLengthMismatch {
                 parameter: parameter.clone(),
                 expected: seeds.len(),
@@ -151,7 +157,7 @@ pub(super) fn validate_compact_seeds(
     errors
 }
 
-/// Validates that a macro has a complete aligned compact seed set.
+/// Validates that a macro has a complete compact seed set.
 pub fn validate_macro_compact_seeds(macro_: &Macro) -> Vec<MacroCompactSeedError> {
     match macro_.exploration().compact_seeds() {
         Some(seeds) => validate_compact_seeds(macro_, seeds),
@@ -183,10 +189,11 @@ pub(super) fn build_compact_seed_set_input(
                 seeds
                     .compact_parameters()
                     .iter()
-                    .map(|(parameter, values)| {
+                    .enumerate()
+                    .map(|(parameter_index, (parameter, _))| {
                         (
                             compact_model_param_name(parameter, &instance_path),
-                            values[index],
+                            seeds.value(parameter_index, index),
                         )
                     })
                     .collect(),
@@ -262,6 +269,84 @@ mod tests {
         assert!(first.interface_ports.is_empty());
         assert_eq!(second.candidates.points[0].get("r_eq__x2"), Some(10.0));
         assert!(first.provenance.is_none());
+    }
+
+    #[test]
+    fn expands_and_scopes_cartesian_seeds_with_the_last_axis_changing_fastest() {
+        let macro_ = child(MacroCompactSeedSet::cartesian([
+            ("r_eq", vec![10.0, 20.0]),
+            ("gm_eq", vec![1.0, 2.0, 3.0]),
+        ]));
+
+        let input = build_compact_seed_set_input(&macro_, "x1".to_owned(), Vec::new()).unwrap();
+        let rows = input
+            .candidates
+            .points
+            .iter()
+            .map(|point| {
+                (
+                    point.get("r_eq__x1").unwrap(),
+                    point.get("gm_eq__x1").unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            [
+                (10.0, 1.0),
+                (10.0, 2.0),
+                (10.0, 3.0),
+                (20.0, 1.0),
+                (20.0, 2.0),
+                (20.0, 3.0),
+            ]
+        );
+
+        let second = build_compact_seed_set_input(&macro_, "x2".to_owned(), Vec::new()).unwrap();
+        assert_eq!(second.candidates.points.len(), 6);
+        assert_eq!(second.candidates.points[0].get("r_eq__x2"), Some(10.0));
+        assert_eq!(second.candidates.points[5].get("gm_eq__x2"), Some(3.0));
+    }
+
+    #[test]
+    fn accepts_different_axis_lengths_only_for_cartesian_seeds() {
+        let cartesian = child(MacroCompactSeedSet::cartesian([
+            ("r_eq", vec![10.0, 20.0]),
+            ("gm_eq", vec![1.0, 2.0, 3.0]),
+        ]));
+        assert!(validate_macro_compact_seeds(&cartesian).is_empty());
+
+        let aligned = child(MacroCompactSeedSet::aligned([
+            ("r_eq", vec![10.0, 20.0]),
+            ("gm_eq", vec![1.0, 2.0, 3.0]),
+        ]));
+        assert!(validate_macro_compact_seeds(&aligned).iter().any(|error| {
+            matches!(error, MacroCompactSeedError::ParameterLengthMismatch { .. })
+        }));
+    }
+
+    #[test]
+    fn rejects_empty_cartesian_axes_and_candidate_count_overflow() {
+        let empty = child(MacroCompactSeedSet::cartesian([
+            ("r_eq", Vec::new()),
+            ("gm_eq", vec![1.0]),
+        ]));
+        let errors = validate_macro_compact_seeds(&empty);
+        assert!(errors.contains(&MacroCompactSeedError::EmptySeedSet));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MacroCompactSeedError::EmptyParameterValues { parameter } if parameter == "r_eq"
+        )));
+
+        let overflow = MacroCompactSeedSet::cartesian(
+            (0..usize::BITS).map(|index| (format!("p{index}"), vec![0.0, 1.0])),
+        );
+        let overflow_macro = child(overflow);
+        assert!(
+            validate_macro_compact_seeds(&overflow_macro)
+                .contains(&MacroCompactSeedError::CandidateCountOverflow)
+        );
     }
 
     #[test]
