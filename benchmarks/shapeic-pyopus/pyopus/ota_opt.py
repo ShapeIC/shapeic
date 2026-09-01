@@ -14,7 +14,7 @@ names = ["w_n", "l_n", "w_p", "l_p"]
 
 # Limites electricos del modelo LV y punto inicial.
 xlo = np.array([0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6])
-xhi = np.array([10e-6, 4.0e-6, 10e-6, 4.0e-6])
+xhi = np.array([10e-6, 6.4e-6, 10e-6, 6.4e-6])
 xinit = np.array([5e-6, 0.5e-6, 10e-6, 0.5e-6])
 
 # Cada contribucion es positiva si se viola la especificacion y cero si se
@@ -25,8 +25,12 @@ requirements = [
         "norm": Nabove(30.0, 3.0),       # ganancia >= 30 dB
     },
     {
+        "measure": "f3db",
+        "norm": Nabove(1e6, 100e3),    # frecuencia -3 dB >= 300 kHz
+    },
+    {
         "measure": "isupply",
-        "norm": Nbelow(20e-6, 5e-6),    # corriente <= 25 uA
+        "norm": Nbelow(20e-6, 5e-6),     # corriente <= 20 uA
     },
     {
         "measure": "area",

@@ -89,6 +89,15 @@ measures = {
             "20*np.log10(abs(v('out')[0]))",
     },
 
+    "f3db": {
+        "analysis": "ac",
+        "corners": ["nominal"],
+
+        # Primer cruce a -3 dB respecto de la ganancia AC maxima.
+        "expression":
+            "m.ACbandwidth(m.ACtf(v('out'), v('inp', 'inn')), scale())",
+    },
+
     "isupply": {
         "analysis": "op",
         "corners": ["nominal"],
