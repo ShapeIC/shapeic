@@ -1,0 +1,31 @@
+
+\RequirePackage{hmcolors}
+
+\defbeamertemplate*{title page}{hm}{
+  \begin{tikzpicture}[remember picture,overlay]
+
+    \node[anchor=west] at ([xshift=10cm,yshift=9.7cm]current page.south west) {
+      \parbox{18cm}{
+        \textbf{\textsf{\fontsize{24.88}{34}\selectfont \expandafter\MakeUppercase\expandafter\inserttitle}}
+      }
+    };
+    \node[anchor=west] at ([xshift=10cm,yshift=7.4cm]current page.south west) {
+      \parbox{18cm}{
+        \textit{\textsf{\fontsize{24}{32}\selectfont \insertsubtitle}}
+      }
+    };
+    \node[anchor=south west] at ([xshift=10cm,yshift=5.251cm]current page.south west) {\fontsize{18}{24}\selectfont \insertauthor};
+    \node[anchor=south west] at ([xshift=10cm,yshift=3.820cm]current page.south west) {\fontsize{18}{24}\selectfont \insertinstitute};
+
+    \node[anchor=south west] at ([xshift=19.828cm,yshift=12.429cm]current page.south west) {\includegraphics[width=12cm]{HM_Schriftzug_Logo_rot_RGB}};
+
+    \if@ccby
+    \node[anchor=east] at ([xshift=-2.6cm,yshift=1cm]current page.south east) {\fontsize{11}{14}\selectfont This work is licensed under a Creative Commons Attribution 4.0 International License.};
+    \node[anchor=west] at ([xshift=-2.7cm,yshift=1cm]current page.south east) {\ccCopy\hspace{0.1cm}\ccAttribution};
+    \fi
+    \if@ccbysa
+    \node[anchor=east] at ([xshift=-2.6cm,yshift=1cm]current page.south east) {\fontsize{11}{14}\selectfont This work is licensed under a Creative Commons Attribution 4.0 International License.};
+    \node[anchor=west] at ([xshift=-2.7cm,yshift=1cm]current page.south east) {\ccCopy\hspace{0.1cm}\ccAttribution\hspace{0.1cm}\ccShareAlike};
+    \fi
+  \end{tikzpicture}
+}

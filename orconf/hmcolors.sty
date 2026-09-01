@@ -1,0 +1,120 @@
+\NeedsTeXFormat{LaTeX2e}[1999/12/01]
+\ProvidesPackage{hmcolors}[Farben der Hochschule München]
+\DeclareOption*{\PassOptionsToPackage{\CurrentOption}{xcolor}}%
+\ProcessOptions\relax%
+\RequirePackageWithOptions{xcolor}%
+\definecolorset{RGB}{HM}{}{%
+Red, 252, 85, 85;%
+Green, 74, 211, 134;%
+Yellow, 255, 255, 0;%
+Blue, 62, 70, 217;%
+DarkGray,   110,  110,  110;%
+LightGray, 198, 198, 198;%
+Accent1, 87, 66, 63;%
+Accent2, 191, 165, 163;%
+Accent3, 110, 158, 0;%
+Accent4, 55, 106, 0%
+}%
+
+\colorlet{HMRedLight}{HMRed!80}
+\colorlet{HMRedLighter}{HMRed!55}
+\colorlet{HMRedLightest}{HMRed!30}
+
+\colorlet{HMRedDark}{HMRed!80!black}
+\colorlet{HMRedDarker}{HMRed!55!black}
+\colorlet{HMRedDarkest}{HMRed!30!black}
+
+
+\colorlet{HMGreenLight}{HMGreen!80}
+\colorlet{HMGreenLighter}{HMGreen!55}
+\colorlet{HMGreenLightest}{HMGreen!30}
+
+\colorlet{HMGreenDark}{HMGreen!80!black}
+\colorlet{HMGreenDarker}{HMGreen!55!black}
+\colorlet{HMGreenDarkest}{HMGreen!30!black}
+
+
+\colorlet{HMYellowLight}{HMYellow!80}
+\colorlet{HMYellowLighter}{HMYellow!55}
+\colorlet{HMYellowLightest}{HMYellow!30}
+
+\colorlet{HMYellowDark}{HMYellow!80!black}
+\colorlet{HMYellowDarker}{HMYellow!55!black}
+\colorlet{HMYellowDarkest}{HMYellow!30!black}
+
+
+\colorlet{HMBlueLight}{HMBlue!80}
+\colorlet{HMBlueLighter}{HMBlue!55}
+\colorlet{HMBlueLightest}{HMBlue!30}
+
+\colorlet{HMBlueDark}{HMBlue!80!black}
+\colorlet{HMBlueDarker}{HMBlue!55!black}
+\colorlet{HMBlueDarkest}{HMBlue!30!black}
+
+
+\colorlet{HMAccent1Light}{HMAccent1!80}
+\colorlet{HMAccent1Lighter}{HMAccent1!55}
+\colorlet{HMAccent1Lightest}{HMAccent1!30}
+
+\colorlet{HMAccent1Dark}{HMAccent1!80!black}
+\colorlet{HMAccent1Darker}{HMAccent1!55!black}
+\colorlet{HMAccent1Darkest}{HMAccent1!30!black}
+
+
+\colorlet{HMAccent2Light}{HMAccent2!80}
+\colorlet{HMAccent2Lighter}{HMAccent2!55}
+\colorlet{HMAccent2Lightest}{HMAccent2!30}
+
+\colorlet{HMAccent2Dark}{HMAccent2!80!black}
+\colorlet{HMAccent2Darker}{HMAccent2!55!black}
+\colorlet{HMAccent2Darkest}{HMAccent2!30!black}
+
+
+\colorlet{HMAccent3Light}{HMAccent3!80}
+\colorlet{HMAccent3Lighter}{HMAccent3!55}
+\colorlet{HMAccent3Lightest}{HMAccent3!30}
+
+\colorlet{HMAccent3Dark}{HMAccent3!80!black}
+\colorlet{HMAccent3Darker}{HMAccent3!55!black}
+\colorlet{HMAccent3Darkest}{HMAccent3!30!black}
+
+
+\colorlet{HMAccent4Light}{HMAccent4!80}
+\colorlet{HMAccent4Lighter}{HMAccent4!55}
+\colorlet{HMAccent4Lightest}{HMAccent4!30}
+
+\colorlet{HMAccent4Dark}{HMAccent4!80!black}
+\colorlet{HMAccent4Darker}{HMAccent4!55!black}
+\colorlet{HMAccent4Darkest}{HMAccent4!30!black}
+
+
+\colorlet{HMLightGray80}{HMLightGray!80}
+\colorlet{HMLightGray55}{HMLightGray!55}
+\colorlet{HMLightGray30}{HMLightGray!30}
+
+\colorlet{HMDarkGray80}{HMDarkGray!80}
+\colorlet{HMDarkGray55}{HMDarkGray!55}
+\colorlet{HMDarkGray30}{HMDarkGray!30}
+
+\tikzset{
+  hmboxtitled0/.style={
+    shape=rectangle split,
+    rectangle split parts=2,
+    rectangle split part fill={HMLightGray80,HMLightGray30},
+    rounded corners,
+    draw=HMLightGray80,
+  },
+  hmgray0/.style={draw=HMLightGray80,fill=HMLightGray30},
+  source/.style={text=HMLightGray80,font=\tiny,rotate=90},
+  marker/.style={fill=yellow,opacity=0.5},
+  hmconnector0/.style={line width=1.5mm,HMDarkGray,{Stealth[length=5mm,inset=0pt]}-{Stealth[length=5mm,inset=0pt]}},
+  hmredbox0/.style={draw=HMRedDark,fill=HMRed,text=white,very thick},
+  hmredbox1/.style={draw=HMRed,fill=HMRedLight,text=white,very thick},
+  hmredbox2/.style={draw=HMRedLight,fill=HMRedLighter,text=white,very thick},
+  hmaccent1/.style={draw=HMAccent1,fill=HMAccent1Light},
+  hmaccent2/.style={draw=HMAccent2,fill=HMAccent2Light},
+  hmaccent3/.style={draw=HMAccent3,fill=HMAccent3Light},
+  hmaccent4/.style={draw=HMAccent4,fill=HMAccent4Light},
+}
+
+\endinput
