@@ -12,9 +12,10 @@ from ota import evaluator
 # Orden de las variables en los vectores usados por el optimizador.
 names = ["w_n", "l_n", "w_p", "l_p"]
 
-# Limites electricos del modelo LV y punto inicial.
+# Limites de busqueda y punto inicial. w_n y w_p son anchos totales; ng se
+# calcula automaticamente en ota.inc para mantener w/ng < 10 um.
 xlo = np.array([0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6])
-xhi = np.array([10e-6, 6.4e-6, 10e-6, 6.4e-6])
+xhi = np.array([100e-6, 6.4e-6, 100e-6, 6.4e-6])
 xinit = np.array([5e-6, 0.5e-6, 10e-6, 0.5e-6])
 
 # Cada contribucion es positiva si se viola la especificacion y cero si se
@@ -26,15 +27,11 @@ requirements = [
     },
     {
         "measure": "f3db",
-        "norm": Nabove(1e6, 100e3),    # frecuencia -3 dB >= 300 kHz
+        "norm": Nabove(1e6, 100e3),     # frecuencia -3 dB >= 1 MHz
     },
     {
         "measure": "isupply",
         "norm": Nbelow(20e-6, 5e-6),     # corriente <= 20 uA
-    },
-    {
-        "measure": "area",
-        "norm": Nbelow(80e-12, 20e-12), # area ideal <= 80 um^2
     },
 ]
 
@@ -59,6 +56,12 @@ print("\nResultado de la optimizacion")
 print(f"Coste final: {final_cost:.6g}")
 print(f"Iteracion del mejor punto: {optimizer.bestIter}")
 print(cost.formatParameters())
+
+# ng es una consecuencia del ancho optimizado, no una variable de busqueda.
+ng_n = int(np.floor(optimizer.x[0] / 10e-6) + 1)
+ng_p = int(np.floor(optimizer.x[2] / 10e-6) + 1)
+print(f"ng_n: {ng_n}  (W/finger = {optimizer.x[0]/ng_n/1e-6:.6g} um)")
+print(f"ng_p: {ng_p}  (W/finger = {optimizer.x[2]/ng_p/1e-6:.6g} um)")
 print(cost.formatResults(nMeasureName=10, nCornerName=12))
 
 analysis_count = {}

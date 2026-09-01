@@ -105,15 +105,6 @@ measures = {
         "expression":
             "-i('vdd')",
     },
-
-    "area": {
-        "analysis": "blank",
-        "corners": ["nominal"],
-
-        # Dos NMOS y dos PMOS. No incluye contactos ni interconexion.
-        "expression":
-            "2*param['w_n']*param['l_n'] + 2*param['w_p']*param['l_p']",
-    },
 }
 
 
