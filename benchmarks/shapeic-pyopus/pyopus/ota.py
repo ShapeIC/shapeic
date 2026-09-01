@@ -1,4 +1,10 @@
+from pathlib import Path
+
 from pyopus.evaluator.performance import PerformanceEvaluator
+
+
+PDK = Path(__file__).resolve().parents[3] / "pdks" / "ihp-sg13g2"
+MODELS = PDK / "libs.tech" / "ngspice" / "models"
 
 
 # ---------------------------------------------------------
@@ -10,6 +16,12 @@ heads = {
         "simulator": "Ngspice",
 
         "moddefs": {
+            # Esquina nominal de los MOS LV de SG13G2.
+            "mos_tt": {
+                "file": str(MODELS / "cornerMOSlv.lib"),
+                "section": "mos_tt",
+            },
+
             "ota": {
                 "file": "ota.inc"
             },
@@ -50,8 +62,8 @@ analyses = {
 
 corners = {
     "nominal": {
-        "modules": [],
-        "params": {},
+        "modules": ["mos_tt"],
+        "params": {"temperature": 27},
     }
 }
 
@@ -99,9 +111,9 @@ evaluator = PerformanceEvaluator(
 # ---------------------------------------------------------
 
 params = {
-    "w_n": 10e-6,
+    "w_n": 5e-6,
     "l_n": 0.5e-6,
-    "w_p": 20e-6,
+    "w_p": 10e-6,
     "l_p": 0.5e-6,
 }
 

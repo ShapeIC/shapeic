@@ -1,17 +1,14 @@
-* OTA diferencial sencilla con carga activa
-* Modelos de nivel 1: adecuados para comprobar el flujo PyOPUS/ngspice,
-* no para predecir el comportamiento de una tecnologia real.
-.model nch nmos level=1 vto=0.45  kp=200u lambda=0.02
-.model pch pmos level=1 vto=-0.45 kp=80u  lambda=0.02
+* OTA diferencial sencilla con dispositivos LV de IHP SG13G2.
+* Los MOS del PDK son subcircuitos; por eso las instancias empiezan por X.
 
 .subckt ota inp inn out vdd vss
 
-M1 n1  inp tail vss nch W={w_n} L={l_n}
-M2 out inn tail vss nch W={w_n} L={l_n}
+X1 n1  inp tail vss sg13_lv_nmos w={w_n} l={l_n} ng=1
+X2 out inn tail vss sg13_lv_nmos w={w_n} l={l_n} ng=1
 
-M3 n1  n1  vdd vdd pch W={w_p} L={l_p}
-M4 out n1  vdd vdd pch W={w_p} L={l_p}
+X3 n1  n1  vdd vdd sg13_lv_pmos w={w_p} l={l_p} ng=1
+X4 out n1  vdd vdd sg13_lv_pmos w={w_p} l={l_p} ng=1
 
-Ibias tail vss 50u
+Ibias tail vss 20u
 
 .ends ota
