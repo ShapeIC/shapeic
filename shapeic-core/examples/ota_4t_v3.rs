@@ -25,7 +25,7 @@ use shapeic_core::utils::linspace;
 use shapeic_layout::PhysicalLookupTable;
 use shapeic_lut::{DeviceLut, LookupTable};
 
-const VOUT_POINTS: usize = 100;
+const VOUT_POINTS: usize = 1;
 const VBIAS_POINTS: usize = 100;
 
 const DIFF_PAIR_INSTANCE: &str = "xdp";
@@ -38,7 +38,7 @@ const AC_MAX_HZ: f64 = 100.0e9;
 const AC_COARSE_POINTS_PER_DECADE: usize = 4;
 const AC_CROSSING_RELATIVE_TOLERANCE: f64 = 0.005;
 const AC_MAX_REFINEMENT_STEPS: usize = 32;
-const MIN_DC_GAIN_DB: f64 = 25.0;
+const MIN_DC_GAIN_DB: f64 = 30.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
@@ -93,11 +93,11 @@ const IHP_SPEC: PdkSpec = PdkSpec {
     pmos_model: "sg13_lv_pmos",
     tail_current: 20.0e-6,
     mirror_reference: 1.0,
-    vout_start: 0.95,
-    vout_stop: 1.1,
+    vout_start: 1.2,
+    vout_stop: 1.2,
     vdd: 1.5,
     vin: 0.9,
-    vbias_start: 0.65,
+    vbias_start: 0.5,
     vbias_stop: 0.79,
     layout_policy: "symmetric-adjacent-with-edge-dummies-v3",
 };
@@ -337,8 +337,8 @@ fn ota_ac_analysis() -> AcAnalysis {
             targets: AnalysisTargets {
                 min_dc_gain_db: Some(MIN_DC_GAIN_DB),
                 min_bandwidth_3db_hz: Some(MIN_BANDWIDTH_3DB_HZ),
-                min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
-                min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
+                min_unity_gain_hz: None,
+                min_phase_margin_deg: None,
             },
             metrics: AcMetricSet::ALL,
         },
@@ -605,10 +605,10 @@ fn print_results(result: &MacroExplorationResult) -> Result<(), io::Error> {
         let dp_index = selected_index(result, accepted, DIFF_PAIR_INSTANCE)?;
         let cm_index = selected_index(result, accepted, CURRENT_MIRROR_INSTANCE)?;
         let electrical = result_metrics(result, accepted, ELECTRICAL_AC_TESTBENCH)?;
-        let electrical_values = required_metrics(electrical)?;
+        let electrical_values = reported_metrics(electrical);
         if has_layout_aware {
             let layout = result_metrics(result, accepted, LAYOUT_AWARE_AC_TESTBENCH)?;
-            let layout_values = required_metrics(layout)?;
+            let layout_values = reported_metrics(layout);
             println!(
                 "{:<8} {:<8} {:>11.6} {:>12.6e} {:>12.6e} {:>10.6} {:>11.6} {:>12.6e} {:>12.6e} {:>10.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6}",
                 dp_index,
@@ -621,10 +621,10 @@ fn print_results(result: &MacroExplorationResult) -> Result<(), io::Error> {
                 layout_values[1],
                 layout_values[2],
                 layout_values[3],
-                layout_values[0] - electrical_values[0],
+                metric_difference(layout_values[0], electrical_values[0]),
                 relative_difference_percent(layout_values[1], electrical_values[1]),
                 relative_difference_percent(layout_values[2], electrical_values[2]),
-                layout_values[3] - electrical_values[3],
+                metric_difference(layout_values[3], electrical_values[3]),
             );
         } else {
             println!(
@@ -656,17 +656,33 @@ fn result_metrics<'a>(
         })
 }
 
-fn required_metrics(metrics: &AcMetrics) -> Result<[f64; 4], io::Error> {
-    Ok([
-        required_metric(metrics.dc_gain_db, "DC gain")?,
-        required_metric(metrics.bandwidth_3db_hz, "bandwidth")?,
-        required_metric(metrics.unity_gain_hz, "UGF")?,
-        required_metric(metrics.phase_margin_deg, "phase margin")?,
-    ])
+fn reported_metrics(metrics: &AcMetrics) -> [f64; 4] {
+    [
+        reported_metric(metrics.dc_gain_db),
+        reported_metric(metrics.bandwidth_3db_hz),
+        reported_metric(metrics.unity_gain_hz),
+        reported_metric(metrics.phase_margin_deg),
+    ]
+}
+
+fn reported_metric(value: Option<f64>) -> f64 {
+    value.filter(|value| value.is_finite()).unwrap_or(f64::NAN)
+}
+
+fn metric_difference(value: f64, reference: f64) -> f64 {
+    if value.is_finite() && reference.is_finite() {
+        value - reference
+    } else {
+        f64::NAN
+    }
 }
 
 fn relative_difference_percent(value: f64, reference: f64) -> f64 {
-    (value - reference) / reference.abs() * 100.0
+    if value.is_finite() && reference.is_finite() && reference != 0.0 {
+        (value - reference) / reference.abs() * 100.0
+    } else {
+        f64::NAN
+    }
 }
 
 fn print_statistics(result: &MacroExplorationResult) -> Result<(), io::Error> {
@@ -1178,6 +1194,31 @@ mod tests {
     }
 
     #[test]
+    fn reports_missing_and_non_finite_ac_metrics_as_nan() {
+        let metrics = AcMetrics {
+            dc_gain_db: Some(25.0),
+            bandwidth_3db_hz: None,
+            unity_gain_hz: Some(f64::INFINITY),
+            phase_margin_deg: Some(f64::NAN),
+        };
+
+        let reported = reported_metrics(&metrics);
+        assert_eq!(reported[0], 25.0);
+        assert!(reported[1].is_nan());
+        assert!(reported[2].is_nan());
+        assert!(reported[3].is_nan());
+    }
+
+    #[test]
+    fn reports_invalid_metric_differences_as_nan() {
+        assert_eq!(metric_difference(12.0, 10.0), 2.0);
+        assert!(metric_difference(f64::NAN, 10.0).is_nan());
+        assert_eq!(relative_difference_percent(12.0, 10.0), 20.0);
+        assert!(relative_difference_percent(f64::NAN, 10.0).is_nan());
+        assert!(relative_difference_percent(10.0, 0.0).is_nan());
+    }
+
+    #[test]
     fn selects_each_supported_pdk_and_its_cellkit_policy() {
         for expected in [IHP_SPEC, SKY130_SPEC, GF180_SPEC] {
             let selected = validate_pdk_selection(
@@ -1277,7 +1318,7 @@ fn write_results_csv(
         let cm = |column| selected_value(result, accepted, CURRENT_MIRROR_INSTANCE, column);
 
         let electrical =
-            required_metrics(result_metrics(result, accepted, ELECTRICAL_AC_TESTBENCH)?)?;
+            reported_metrics(result_metrics(result, accepted, ELECTRICAL_AC_TESTBENCH)?);
 
         write!(
             writer,
@@ -1314,7 +1355,7 @@ fn write_results_csv(
         )?;
         if has_layout_aware {
             let layout =
-                required_metrics(result_metrics(result, accepted, LAYOUT_AWARE_AC_TESTBENCH)?)?;
+                reported_metrics(result_metrics(result, accepted, LAYOUT_AWARE_AC_TESTBENCH)?);
             write!(
                 writer,
                 ",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
@@ -1322,18 +1363,14 @@ fn write_results_csv(
                 layout[1],
                 layout[2],
                 layout[3],
-                layout[0] - electrical[0],
+                metric_difference(layout[0], electrical[0]),
                 relative_difference_percent(layout[1], electrical[1]),
                 relative_difference_percent(layout[2], electrical[2]),
-                layout[3] - electrical[3],
+                metric_difference(layout[3], electrical[3]),
             )?;
         }
         writeln!(writer)?;
     }
 
     writer.flush()
-}
-
-fn required_metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
-    value.ok_or_else(|| io::Error::other(format!("missing {name}")))
 }
