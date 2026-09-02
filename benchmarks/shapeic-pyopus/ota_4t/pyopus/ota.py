@@ -3,7 +3,7 @@ from pathlib import Path
 from pyopus.evaluator.performance import PerformanceEvaluator
 
 
-PDK = Path(__file__).resolve().parents[3] / "pdks" / "ihp-sg13g2"
+PDK = Path(__file__).resolve().parents[4] / "pdks" / "ihp-sg13g2"
 MODELS = PDK / "libs.tech" / "ngspice" / "models"
 
 
@@ -104,6 +104,15 @@ measures = {
 
         "expression":
             "-i('vdd')",
+    },
+
+    "area": {
+        "analysis": "blank",
+        "corners": ["nominal"],
+
+        # Dos NMOS y dos PMOS. No incluye contactos ni interconexion.
+        "expression":
+            "2*param['w_n']*param['l_n'] + 2*param['w_p']*param['l_p']",
     },
 }
 
