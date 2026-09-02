@@ -17,8 +17,9 @@ use shapeic_core::exploration::filter::CandidateFilter;
 use shapeic_core::macro_model::{
     CandidateBuildExecution, ElectricalAnalysisExecution, Macro, MacroAcTestbench,
     MacroAnalysisDomain, MacroCatalog, MacroCompactOutputBinding, MacroExecutionConfig,
-    MacroExplorationInput, MacroExplorationResult, MacroInterfaceBinding, MacroOutputSource,
-    MacroPort, MacroPortRole, PrimitiveInstanceExplorationInput,
+    MacroExplorationInput, MacroExplorationInstanceKind, MacroExplorationResult,
+    MacroInterfaceBinding, MacroOutputSource, MacroPort, MacroPortRole,
+    PrimitiveInstanceExplorationInput,
 };
 use shapeic_core::primitive::build::{PrimitiveBuildInput, PrimitiveBuildValue};
 use shapeic_core::testbench::{AcAnalysis, TransferFunction, TransferPolarity};
@@ -47,6 +48,7 @@ const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
 #[derive(Debug, Serialize)]
 struct ExplorationSummary {
     timing: ExplorationTiming,
+    exploration: ExplorationStatisticsSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,15 +58,69 @@ struct ExplorationTiming {
     total_seconds: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct ExplorationStatisticsSummary {
+    primitive_candidates_rejected_by_pre_exploration_filters: usize,
+    candidates_entering_analysis: usize,
+    stages: Vec<ExplorationStageSummary>,
+    final_accepted_candidates: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplorationStageSummary {
+    name: String,
+    evaluated_candidates: usize,
+    rejected_candidates: usize,
+    retained_candidates: usize,
+}
+
 impl ExplorationSummary {
-    fn new(lut_load: Duration, exploration: Duration, total: Duration) -> Self {
+    fn new(
+        lut_load: Duration,
+        exploration: Duration,
+        total: Duration,
+        result: &MacroExplorationResult,
+    ) -> Self {
         Self {
             timing: ExplorationTiming {
                 lut_load_seconds: lut_load.as_secs_f64(),
                 exploration_seconds: exploration.as_secs_f64(),
                 total_seconds: total.as_secs_f64(),
             },
+            exploration: summarize_exploration(result),
         }
+    }
+}
+
+fn summarize_exploration(result: &MacroExplorationResult) -> ExplorationStatisticsSummary {
+    let statistics = result.statistics();
+    let primitive_candidates_rejected_by_pre_exploration_filters = result
+        .candidate_sets()
+        .instances()
+        .iter()
+        .filter(|instance| instance.kind() == MacroExplorationInstanceKind::Primitive)
+        .map(|instance| instance.filter_report().rejected_count())
+        .sum();
+    let stages = statistics
+        .testbenches()
+        .iter()
+        .map(|testbench| {
+            let rejected_candidates =
+                testbench.physical_domain_rejections() + testbench.rejections().total();
+            ExplorationStageSummary {
+                name: testbench.testbench().to_owned(),
+                evaluated_candidates: testbench.evaluated_candidates(),
+                rejected_candidates,
+                retained_candidates: testbench.evaluated_candidates() - rejected_candidates,
+            }
+        })
+        .collect();
+
+    ExplorationStatisticsSummary {
+        primitive_candidates_rejected_by_pre_exploration_filters,
+        candidates_entering_analysis: statistics.compatible_candidates(),
+        stages,
+        final_accepted_candidates: statistics.accepted_candidates(),
     }
 }
 
@@ -212,7 +268,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     print_execution_comparison(&runs);
     write_summary(
         &summary_path,
-        &ExplorationSummary::new(lut_load, exploration, total),
+        &ExplorationSummary::new(lut_load, exploration, total, result),
     )?;
     println!("Summary JSON: {}", summary_path.display());
     Ok(())
@@ -1252,11 +1308,24 @@ mod tests {
 
     #[test]
     fn serializes_the_exploration_timing_summary_in_seconds() {
-        let summary = ExplorationSummary::new(
-            Duration::from_millis(125),
-            Duration::from_millis(250),
-            Duration::from_millis(500),
-        );
+        let summary = ExplorationSummary {
+            timing: ExplorationTiming {
+                lut_load_seconds: Duration::from_millis(125).as_secs_f64(),
+                exploration_seconds: Duration::from_millis(250).as_secs_f64(),
+                total_seconds: Duration::from_millis(500).as_secs_f64(),
+            },
+            exploration: ExplorationStatisticsSummary {
+                primitive_candidates_rejected_by_pre_exploration_filters: 3,
+                candidates_entering_analysis: 10,
+                stages: vec![ExplorationStageSummary {
+                    name: "gain_electrical".to_owned(),
+                    evaluated_candidates: 10,
+                    rejected_candidates: 4,
+                    retained_candidates: 6,
+                }],
+                final_accepted_candidates: 6,
+            },
+        };
         let value = serde_json::to_value(summary).unwrap();
         let timing = value.get("timing").unwrap();
 
@@ -1276,6 +1345,18 @@ mod tests {
             timing["total_seconds"].as_f64().unwrap()
                 >= timing["exploration_seconds"].as_f64().unwrap()
         );
+
+        let exploration = value.get("exploration").unwrap();
+        assert_eq!(
+            exploration["primitive_candidates_rejected_by_pre_exploration_filters"],
+            3
+        );
+        assert_eq!(exploration["candidates_entering_analysis"], 10);
+        assert_eq!(exploration["stages"][0]["name"], "gain_electrical");
+        assert_eq!(exploration["stages"][0]["evaluated_candidates"], 10);
+        assert_eq!(exploration["stages"][0]["rejected_candidates"], 4);
+        assert_eq!(exploration["stages"][0]["retained_candidates"], 6);
+        assert_eq!(exploration["final_accepted_candidates"], 6);
     }
 
     #[test]
