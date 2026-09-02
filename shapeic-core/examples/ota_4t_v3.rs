@@ -97,7 +97,7 @@ const IHP_SPEC: PdkSpec = PdkSpec {
     vout_stop: 1.2,
     vdd: 1.5,
     vin: 0.9,
-    vbias_start: 0.5,
+    vbias_start: 0.4,
     vbias_stop: 0.79,
     layout_policy: "symmetric-adjacent-with-edge-dummies-v3",
 };
