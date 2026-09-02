@@ -32,3 +32,6 @@ benchmarks/shapeic-pyopus/ota_4t/pyopus_iterations.png
 benchmarks/shapeic-pyopus/ota_4t/shapeic_design_space.png
 benchmarks/shapeic-pyopus/ota_4t/shapeic_design_space.png
 benchmarks/shapeic-pyopus/ota_4t/pyopus/PyOPUS/
+shapeic-core/examples/ota_4t_v3/summary.json
+benchmarks/shapeic-pyopus/ota_4t/shapeic/summary.json
+output.log

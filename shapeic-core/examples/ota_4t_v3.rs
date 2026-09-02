@@ -4,8 +4,9 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use shapeic_core::analysis::{
     AcMetric, AcMetricSet, AcMetrics, AdaptiveAcConfig, AdaptiveAcPolicy, AnalysisMode,
     AnalysisTargets,
@@ -42,6 +43,30 @@ const MIN_DC_GAIN_DB: f64 = 30.0;
 const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 45.0;
+
+#[derive(Debug, Serialize)]
+struct ExplorationSummary {
+    timing: ExplorationTiming,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplorationTiming {
+    lut_load_seconds: f64,
+    exploration_seconds: f64,
+    total_seconds: f64,
+}
+
+impl ExplorationSummary {
+    fn new(lut_load: Duration, exploration: Duration, total: Duration) -> Self {
+        Self {
+            timing: ExplorationTiming {
+                lut_load_seconds: lut_load.as_secs_f64(),
+                exploration_seconds: exploration.as_secs_f64(),
+                total_seconds: total.as_secs_f64(),
+            },
+        }
+    }
+}
 
 const DIFF_PAIR_GM_COLUMN: &str = "gm__xdp__m1";
 const DIFF_PAIR_RO_COLUMN: &str = "ro__xdp__m1";
@@ -159,6 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ota = ota_macro(testbench_path, physical_table.is_some());
     let macro_catalog = MacroCatalog::from_macros([ota.clone()])?;
 
+    let exploration_start = Instant::now();
     let executions = options.execution_configs()?;
     let mut runs = Vec::with_capacity(executions.len());
     for (label, execution) in executions {
@@ -167,22 +193,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         runs.push((label, result));
     }
     validate_comparison_results(&runs)?;
+    let exploration = exploration_start.elapsed();
     let (_, result) = runs
         .first()
         .ok_or_else(|| io::Error::other("no OTA exploration was requested"))?;
 
-    write_results_csv(
-        result,
-        &spec,
-        manifest.join("examples/ota_4t_v3/results.csv"),
-    )?;
+    let results_path = manifest.join("examples/ota_4t_v3/results.csv");
+    let summary_path = manifest.join("examples/ota_4t_v3/summary.json");
+    write_results_csv(result, &spec, &results_path)?;
 
     println!("{} four-transistor OTA exploration", spec.label);
     print_results(result)?;
     print_statistics(result)?;
+    let total = total_start.elapsed();
     println!("LUT load took: {lut_load:?}");
-    println!("Total process time: {:?}", total_start.elapsed());
+    println!("Exploration took: {exploration:?}");
+    println!("Total process time: {total:?}");
     print_execution_comparison(&runs);
+    write_summary(
+        &summary_path,
+        &ExplorationSummary::new(lut_load, exploration, total),
+    )?;
+    println!("Summary JSON: {}", summary_path.display());
     Ok(())
 }
 
@@ -1219,6 +1251,34 @@ mod tests {
     }
 
     #[test]
+    fn serializes_the_exploration_timing_summary_in_seconds() {
+        let summary = ExplorationSummary::new(
+            Duration::from_millis(125),
+            Duration::from_millis(250),
+            Duration::from_millis(500),
+        );
+        let value = serde_json::to_value(summary).unwrap();
+        let timing = value.get("timing").unwrap();
+
+        assert_eq!(timing.as_object().unwrap().len(), 3);
+        assert_eq!(timing["lut_load_seconds"], 0.125);
+        assert_eq!(timing["exploration_seconds"], 0.25);
+        assert_eq!(timing["total_seconds"], 0.5);
+        for value in timing.as_object().unwrap().values() {
+            assert!(value.as_f64().unwrap().is_finite());
+            assert!(value.as_f64().unwrap() >= 0.0);
+        }
+        assert!(
+            timing["total_seconds"].as_f64().unwrap()
+                >= timing["lut_load_seconds"].as_f64().unwrap()
+        );
+        assert!(
+            timing["total_seconds"].as_f64().unwrap()
+                >= timing["exploration_seconds"].as_f64().unwrap()
+        );
+    }
+
+    #[test]
     fn selects_each_supported_pdk_and_its_cellkit_policy() {
         for expected in [IHP_SPEC, SKY130_SPEC, GF180_SPEC] {
             let selected = validate_pdk_selection(
@@ -1279,6 +1339,13 @@ mod tests {
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
+
+fn write_summary(path: impl AsRef<Path>, summary: &ExplorationSummary) -> Result<(), io::Error> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    serde_json::to_writer_pretty(&mut writer, summary).map_err(io::Error::other)?;
+    writeln!(writer)?;
+    writer.flush()
+}
 
 fn write_results_csv(
     result: &MacroExplorationResult,
