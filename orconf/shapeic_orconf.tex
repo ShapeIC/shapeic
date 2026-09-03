@@ -57,18 +57,52 @@
 
 \end{frame}
 
-\section{The Analog Sizing Problem}
+\section{Analog Sizing: Optimize or Explore ?}
 
-\begin{frame}
-\frametitle{The Analog Sizing Problem}
-a
+\begin{frame}{Analog Sizing: Optimize or Explore ?}
+\begin{columns}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item Optimization-driven 
+      \end{itemize}
+      \uncover<2->{
+          \center
+          \includegraphics[width=0.6\textwidth]{img/optimization-driven.pdf}
+      } 
+      \begin{itemize}
+        \item<3->[\checkmark] Efficient search
+        \item<3->[\checkmark] Many algorithms available
+      \end{itemize}
+      \begin{itemize}
+        \item<3->[$\times$] Partial View of design space
+        \item<3->[$\times$] May converge to local optima
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item Design-space exploration
+      \end{itemize}
+      \uncover<2->{
+          \center
+          \includegraphics[width=0.6\textwidth]{img/design-space-exploration.pdf}
+      }
+      \begin{itemize}
+        \item<3->[\checkmark] Design insight
+        \item<3->[\checkmark] Alternative solutions
+      \end{itemize}
+      \begin{itemize}
+        \item<3->[$\times$] Expensive to build
+        \item<3->[$\times$] Scales poorly without abstraction
+      \end{itemize}
+    \end{column}
+\end{columns}
+
 \end{frame}
 
 \section{ShapeIC: Building the Design Space}
-
 \begin{frame}
 \frametitle{ShapeIC: Building the Design Space}
-a
+
 \end{frame}
 
 \section{Simulation-Based vs ShapeIC Exploration}
