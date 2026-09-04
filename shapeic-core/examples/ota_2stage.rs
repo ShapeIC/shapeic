@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fs::File;
 use shapeic_core::macro_model::MacroCompactOutputBinding;
 use shapeic_core::macro_model::MacroExploration;
 use shapeic_core::macro_model::MacroInterfaceBinding;
@@ -13,11 +14,13 @@ use shapeic_core::macro_model::MacroPublicInputAlias;
 use shapeic_core::macro_model::MacroSpecification;
 use std::ffi::OsString;
 use std::env;
-use std::io;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use serde::Serialize;
 use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_core::circuit::Circuit;
-use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationStatistics, MacroExecutionReport, MacroHierarchyNodeStatus, MacroDesignVariableBinding, MacroDerivationRule, MacroDerivationTarget, MacroDerivationReduction};
+use shapeic_core::macro_model::{MacroExecutionConfig, Macro, MacroPort, MacroPortRole, MacroCompactSeedSet, MacroSpecificationBounds, MacroSpecificationSource, MacroCatalog, MacroHierarchyExplorationResult, MacroHierarchyMode, MacroHierarchyPathInput, MacroHierarchyPath, MacroHierarchyRetentionPolicy, MacroExplorationResult, MacroExplorationStatistics, MacroExecutionReport, MacroExplorationInstanceKind, MacroHierarchyNodeStatus, MacroDesignVariableBinding, MacroDerivationRule, MacroDerivationTarget, MacroDerivationReduction};
 use shapeic_core::primitive::build::{PrimitiveBuildInputKind, PrimitiveBuildInput, PrimitiveBuildValue};
 
 use shapeic_lut::LookupTable;
@@ -76,6 +79,56 @@ struct PdkSpec {
     vbias_stop: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct HierarchicalExplorationSummary {
+    timing: ExplorationTiming,
+    hierarchy: HierarchySummary,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplorationTiming {
+    lut_load_seconds: f64,
+    exploration_seconds: f64,
+    total_seconds: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct HierarchySummary {
+    total_paths: usize,
+    previews_executed: usize,
+    definitive_evaluations: usize,
+    frequency_evaluations: usize,
+    final_accepted_candidates: usize,
+    nodes: Vec<HierarchyNodeSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HierarchyNodeSummary {
+    path: String,
+    macro_name: String,
+    status: &'static str,
+    blackbox_candidates: Option<usize>,
+    preview: Option<LocalExplorationSummary>,
+    final_exploration: Option<LocalExplorationSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalExplorationSummary {
+    primitive_candidates_rejected_by_pre_exploration_filters: usize,
+    candidates_entering_analysis: usize,
+    stages: Vec<ExplorationStageSummary>,
+    final_accepted_candidates: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplorationStageSummary {
+    kind: &'static str,
+    name: String,
+    evaluated_candidates: usize,
+    rejected_candidates: usize,
+    retained_candidates: usize,
+}
+
 const IHP_SPEC: PdkSpec = PdkSpec {
     label: "IHP SG13G2",
     pdk: "ihp-sg13g2",
@@ -94,6 +147,7 @@ const IHP_SPEC: PdkSpec = PdkSpec {
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let total_start = Instant::now();
     let options = cli_options()?;
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let gain_2stage_testbench = manifest.join("examples/ota_2stage/gain_2stage.spice");
@@ -102,8 +156,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let primitive_catalog = load_primitive_catalog(&manifest.join("../shapeic-cellkit/primitives"))
         .map_err(|error| format!("{error:?}"))?;
 
+    let lut_start = Instant::now();
     let nmos_table = LookupTable::open(&options.nmos_path)?;
     let pmos_table = LookupTable::open(&options.pmos_path)?;
+    let lut_load = lut_start.elapsed();
     let spec = resolve_pdk_spec(&nmos_table, &pmos_table)?;
     let nmos = nmos_table.model(spec.nmos_model)?;
     let pmos = pmos_table.model(spec.pmos_model)?;
@@ -121,12 +177,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     input.set_execution_config(options.execution_config()?);
 
+    let exploration_start = Instant::now();
     let result = explore_macro_hierarchy(OTA_2STAGE, &macro_catalog, &primitive_catalog, &input)?;
+    let exploration = exploration_start.elapsed();
+
+    let results_path = manifest.join("examples/ota_2stage/results.csv");
+    let summary_path = manifest.join("examples/ota_2stage/summary.json");
+    write_results_csv(&result, &results_path)?;
 
     println!("{} hierarchical four-transistor OTA", spec.label);
     print_hierarchy(&result);
     print_derivations(&result);
     print_results(&result)?;
+
+    let total = total_start.elapsed();
+    write_summary(
+        &summary_path,
+        &summarize_hierarchy(lut_load, exploration, total, &result)?,
+    )?;
+    println!("LUT load took: {lut_load:?}");
+    println!("Exploration took: {exploration:?}");
+    println!("Total process time: {total:?}");
+    println!("Results CSV: {}", results_path.display());
+    println!("Summary JSON: {}", summary_path.display());
 
     Ok(())
 }
@@ -769,4 +842,271 @@ fn metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
 fn optional_metric(value: Option<f64>) -> f64 {
     value.filter(|value| value.is_finite())
     .unwrap_or(f64::NAN)
+}
+
+const RESULTS_CSV_HEADER: &str = "candidate_id,ota_1stage_candidate_index,common_source_candidate_index,\
+vout_1stage_v,vout_v,gm_ota_s,ro_ota_ohm,gain_1stage,\
+common_source_width_m,common_source_finger_width_m,common_source_length_m,\
+common_source_nf,common_source_vbs_v,common_source_vgs_v,common_source_vds_v,\
+dc_gain_db,bandwidth_3db_hz,unity_gain_hz,phase_margin_deg";
+
+fn write_results_csv(
+    result: &MacroHierarchyExplorationResult,
+    path: impl AsRef<Path>,
+) -> Result<(), io::Error> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    writeln!(writer, "{RESULTS_CSV_HEADER}")?;
+
+    for candidate_id in 0..result.root_result().accepted().len() {
+        let selection = result.selection(candidate_id).map_err(io::Error::other)?;
+        let root = selection
+            .node(result.root_path())
+            .ok_or_else(|| io::Error::other("selection has no root node"))?;
+        let ota_1stage = selection
+            .instances()
+            .find(|instance| instance.instance() == OTA_1STAGE_INSTANCE)
+            .ok_or_else(|| io::Error::other("selection has no ota_1stage compact candidate"))?;
+        let common_source = selection
+            .instances()
+            .find(|instance| instance.instance() == COMMON_SOURCE_INSTANCE)
+            .ok_or_else(|| io::Error::other("selection has no common-source candidate"))?;
+        let metrics = &root
+            .ac_outcome(OTA_2STAGE_TB)
+            .ok_or_else(|| io::Error::other("selected top result has no AC outcome"))?
+            .metrics;
+        let gain_1stage = root
+            .specification_value(GAIN_1STAGE_SPECIFICATION)
+            .ok_or_else(|| io::Error::other("selected top result has no gain_1stage value"))?;
+
+        writeln!(
+            writer,
+            "{candidate_id},{},{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.17e},{:.17e}",
+            ota_1stage.candidate_index(),
+            common_source.candidate_index(),
+            required_value(&common_source, "xcs.vin")?,
+            required_value(&common_source, "xcs.vout")?,
+            required_value(&ota_1stage, "gm_ota__xota_1stage")?,
+            required_value(&ota_1stage, "ro_ota__xota_1stage")?,
+            gain_1stage,
+            required_value(&common_source, "width__xcs__m1")?,
+            required_value(&common_source, "finger_width__xcs__m1")?,
+            required_value(&common_source, "length__xcs__m1")?,
+            required_value(&common_source, "nf__xcs__m1")?,
+            required_value(&common_source, "vbs__xcs__m1")?,
+            required_value(&common_source, "vgs__xcs__m1")?,
+            required_value(&common_source, "vds__xcs__m1")?,
+            optional_metric(metrics.dc_gain_db),
+            optional_metric(metrics.bandwidth_3db_hz),
+            optional_metric(metrics.unity_gain_hz),
+            optional_metric(metrics.phase_margin_deg),
+        )?;
+    }
+
+    writer.flush()
+}
+
+fn write_summary(
+    path: impl AsRef<Path>,
+    summary: &HierarchicalExplorationSummary,
+) -> Result<(), io::Error> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    serde_json::to_writer_pretty(&mut writer, summary).map_err(io::Error::other)?;
+    writeln!(writer)?;
+    writer.flush()
+}
+
+fn summarize_hierarchy(
+    lut_load: Duration,
+    exploration: Duration,
+    total: Duration,
+    result: &MacroHierarchyExplorationResult,
+) -> Result<HierarchicalExplorationSummary, io::Error> {
+    let statistics = result.statistics();
+    let nodes = result
+        .nodes()
+        .map(|(path, node)| {
+            let (status, blackbox_candidates) = hierarchy_status(node.status());
+            let preview = node
+                .preview()
+                .map(|preview| {
+                    let retained = preview.retained_result().ok_or_else(|| {
+                        io::Error::other(format!(
+                            "preview result for '{path}' was not retained"
+                        ))
+                    })?;
+                    summarize_local_exploration(retained)
+                })
+                .transpose()?;
+            let final_exploration = node
+                .result()
+                .map(|final_result| summarize_local_exploration(final_result))
+                .transpose()?;
+
+            Ok(HierarchyNodeSummary {
+                path: path.to_string(),
+                macro_name: node.macro_name().to_owned(),
+                status,
+                blackbox_candidates,
+                preview,
+                final_exploration,
+            })
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+
+    Ok(HierarchicalExplorationSummary {
+        timing: ExplorationTiming {
+            lut_load_seconds: lut_load.as_secs_f64(),
+            exploration_seconds: exploration.as_secs_f64(),
+            total_seconds: total.as_secs_f64(),
+        },
+        hierarchy: HierarchySummary {
+            total_paths: statistics.total_paths(),
+            previews_executed: statistics.previews_executed(),
+            definitive_evaluations: statistics.definitive_evaluations(),
+            frequency_evaluations: statistics.frequency_evaluations(),
+            final_accepted_candidates: result.root_result().accepted().len(),
+            nodes,
+        },
+    })
+}
+
+fn hierarchy_status(status: &MacroHierarchyNodeStatus) -> (&'static str, Option<usize>) {
+    match status {
+        MacroHierarchyNodeStatus::NotReached { .. } => ("not_reached", None),
+        MacroHierarchyNodeStatus::ExploredLeaf => ("explored_leaf", None),
+        MacroHierarchyNodeStatus::BlackBox { candidates } => ("black_box", Some(*candidates)),
+        MacroHierarchyNodeStatus::PreviewRejected => ("preview_rejected", None),
+        MacroHierarchyNodeStatus::DerivationPruned { .. } => ("derivation_pruned", None),
+        MacroHierarchyNodeStatus::Refreshed => ("refreshed", None),
+        MacroHierarchyNodeStatus::PreviewFinalized => ("preview_finalized", None),
+    }
+}
+
+fn summarize_local_exploration(
+    result: &MacroExplorationResult,
+) -> Result<LocalExplorationSummary, io::Error> {
+    let statistics = result.statistics();
+    let primitive_candidates_rejected_by_pre_exploration_filters = result
+        .candidate_sets()
+        .instances()
+        .iter()
+        .filter(|instance| instance.kind() == MacroExplorationInstanceKind::Primitive)
+        .map(|instance| instance.filter_report().rejected_count())
+        .sum();
+
+    let mut retained = statistics.compatible_candidates();
+    let mut stages = Vec::new();
+    for testbench in statistics.testbenches() {
+        let rejected = testbench
+            .physical_domain_rejections()
+            .checked_add(testbench.rejections().total())
+            .ok_or_else(|| io::Error::other("AC rejection count overflow"))?;
+        let stage_retained = testbench
+            .evaluated_candidates()
+            .checked_sub(rejected)
+            .ok_or_else(|| io::Error::other("AC rejections exceed evaluated candidates"))?;
+        stages.push(ExplorationStageSummary {
+            kind: "ac_testbench",
+            name: testbench.testbench().to_owned(),
+            evaluated_candidates: testbench.evaluated_candidates(),
+            rejected_candidates: rejected,
+            retained_candidates: stage_retained,
+        });
+        retained = stage_retained;
+    }
+    for testbench in statistics.dc_node_voltage_testbenches() {
+        retained = testbench.evaluated_candidates();
+        stages.push(ExplorationStageSummary {
+            kind: "dc_node_voltage",
+            name: testbench.testbench().to_owned(),
+            evaluated_candidates: testbench.evaluated_candidates(),
+            rejected_candidates: 0,
+            retained_candidates: retained,
+        });
+    }
+    for specification in statistics.specifications() {
+        let evaluated = retained;
+        retained = retained
+            .checked_sub(specification.rejected_candidates())
+            .ok_or_else(|| io::Error::other(format!(
+                "specification '{}' rejected more candidates than it received",
+                specification.specification()
+            )))?;
+        stages.push(ExplorationStageSummary {
+            kind: "specification",
+            name: specification.specification().to_owned(),
+            evaluated_candidates: evaluated,
+            rejected_candidates: specification.rejected_candidates(),
+            retained_candidates: retained,
+        });
+    }
+
+    if retained != statistics.accepted_candidates() {
+        return Err(io::Error::other(format!(
+            "exploration stage counts for '{}' retain {retained} candidates, but the result reports {}",
+            result.macro_name(),
+            statistics.accepted_candidates()
+        )));
+    }
+
+    Ok(LocalExplorationSummary {
+        primitive_candidates_rejected_by_pre_exploration_filters,
+        candidates_entering_analysis: statistics.compatible_candidates(),
+        stages,
+        final_accepted_candidates: statistics.accepted_candidates(),
+    })
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn optional_metrics_are_csv_safe() {
+        assert_eq!(optional_metric(Some(12.5)), 12.5);
+        assert!(optional_metric(None).is_nan());
+        assert!(optional_metric(Some(f64::INFINITY)).is_nan());
+    }
+
+    #[test]
+    fn results_csv_header_uses_explicit_units() {
+        let columns = RESULTS_CSV_HEADER.split(',').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 19);
+        assert!(columns.contains(&"common_source_width_m"));
+        assert!(columns.contains(&"gm_ota_s"));
+        assert!(columns.contains(&"ro_ota_ohm"));
+        assert!(columns.contains(&"bandwidth_3db_hz"));
+    }
+
+    #[test]
+    fn hierarchy_summary_has_stable_json_sections() {
+        let summary = HierarchicalExplorationSummary {
+            timing: ExplorationTiming {
+                lut_load_seconds: 1.0,
+                exploration_seconds: 2.0,
+                total_seconds: 3.0,
+            },
+            hierarchy: HierarchySummary {
+                total_paths: 1,
+                previews_executed: 1,
+                definitive_evaluations: 1,
+                frequency_evaluations: 10,
+                final_accepted_candidates: 2,
+                nodes: vec![HierarchyNodeSummary {
+                    path: "top".to_owned(),
+                    macro_name: "top".to_owned(),
+                    status: "preview_finalized",
+                    blackbox_candidates: None,
+                    preview: None,
+                    final_exploration: None,
+                }],
+            },
+        };
+        let value = serde_json::to_value(summary).unwrap();
+        assert_eq!(value["timing"]["total_seconds"], 3.0);
+        assert_eq!(value["hierarchy"]["nodes"][0]["status"], "preview_finalized");
+        assert_eq!(value["hierarchy"]["final_accepted_candidates"], 2);
+    }
 }
