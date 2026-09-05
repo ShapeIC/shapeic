@@ -95,16 +95,9 @@ measures = {
 
         # Primer cruce a -3 dB respecto de la ganancia AC maxima.
         "expression":
-            "m.ACbandwidth(m.ACtf(v('out'), v('inp', 'inn')), scale())",
+            "m.ACbandwidth(m.ACtf(v('out'), v('vfb', 'inn')), scale())",
     },
 
-    "isupply": {
-        "analysis": "op",
-        "corners": ["nominal"],
-
-        "expression":
-            "-i('vdd')",
-    },
 
     "area": {
         "analysis": "blank",

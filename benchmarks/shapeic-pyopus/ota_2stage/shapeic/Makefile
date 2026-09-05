@@ -11,5 +11,5 @@ run-ota:
 		$(ROOT)/shapeic-lut/lut_generation/generated/ihp_sg13g2_lv_pmos_5d.npz \
 		> output.log 2>&1
 
-#	cp $(ROOT)/shapeic-core/examples/ota_4t_v3/results.csv .
-#	cp $(ROOT)/shapeic-core/examples/ota_4t_v3/summary.json .
+	cp $(ROOT)/shapeic-core/examples/ota_2stage/results.csv .
+	cp $(ROOT)/shapeic-core/examples/ota_2stage/summary.json .
