@@ -256,7 +256,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
     .with_specification(MacroSpecification::new(
         "gm_ota",
         MacroSpecificationSource::expression(
-        "gain_1stage / rout_1stage",
+            "pow10(gain_1stage / 20) / abs(rout_1stage)",
         ),
         MacroSpecificationBounds::unbounded(),
     ))
@@ -360,7 +360,7 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         .with_specification(MacroSpecification::new(
             "gain_1stage",
             MacroSpecificationSource::expression(
-                "gm_ota__xota_1stage * ro_ota__xota_1stage",
+                "20 * log10(abs(gm_ota__xota_1stage * ro_ota__xota_1stage))",
             ),
             MacroSpecificationBounds::unbounded(),
         ))

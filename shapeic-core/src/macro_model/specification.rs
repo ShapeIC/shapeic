@@ -591,7 +591,12 @@ impl<'a> ExpressionParser<'a> {
             return self.parse_number();
         }
         if self.peek().is_some_and(is_identifier_start) {
-            let symbol = self.parse_symbol_name();
+            let identifier = self.parse_symbol_name();
+            self.skip_whitespace();
+            if self.consume(b'(') {
+                return self.parse_function_call(identifier, resolve);
+            }
+            let symbol = identifier;
             self.referenced.insert(symbol.to_owned());
             return if resolve {
                 self.symbols
@@ -603,6 +608,36 @@ impl<'a> ExpressionParser<'a> {
             };
         }
         Err(format!("expected value at byte {}", self.pos))
+    }
+
+    fn parse_function_call(&mut self, function: &str, resolve: bool) -> Result<f64, String> {
+        if !matches!(function, "abs" | "log10" | "pow10") {
+            return Err(format!("unknown function '{function}'"));
+        }
+
+        let argument = self.parse_expression(resolve)?;
+        self.skip_whitespace();
+        if self.consume(b',') {
+            return Err(format!(
+                "function '{function}' expects exactly one argument"
+            ));
+        }
+        if !self.consume(b')') {
+            return Err(format!("missing closing ')' for function '{function}'"));
+        }
+        if !resolve {
+            return Ok(0.0);
+        }
+
+        match function {
+            "abs" => Ok(argument.abs()),
+            "log10" if argument > 0.0 => Ok(argument.log10()),
+            "log10" => Err(format!(
+                "function 'log10' requires a positive argument, found {argument}"
+            )),
+            "pow10" => Ok(10.0_f64.powf(argument)),
+            _ => unreachable!("function name was validated above"),
+        }
     }
 
     fn parse_number(&mut self) -> Result<f64, String> {
@@ -863,6 +898,71 @@ mod tests {
         assert_eq!(
             ExpressionParser::new(expression, &values).parse().unwrap(),
             7.0
+        );
+    }
+
+    #[test]
+    fn evaluates_log10_and_abs_and_collects_nested_symbols() {
+        let expression = "20 * log10(abs(gm_ota * ro_ota))";
+        let symbols = ExpressionParser::new(expression, &HashMap::new())
+            .symbols()
+            .unwrap();
+        assert_eq!(symbols, ["gm_ota", "ro_ota"]);
+        let values = HashMap::from([("gm_ota".to_owned(), -1.0e-3), ("ro_ota".to_owned(), 1.0e5)]);
+        assert_eq!(
+            ExpressionParser::new(expression, &values).parse().unwrap(),
+            40.0
+        );
+    }
+
+    #[test]
+    fn evaluates_pow10_and_converts_db_gain_to_transconductance() {
+        let inverse_expression = "pow10(log10(value))";
+        let values = HashMap::from([("value".to_owned(), 1.0e3)]);
+        let reconstructed = ExpressionParser::new(inverse_expression, &values)
+            .parse()
+            .unwrap();
+        assert!((reconstructed - 1.0e3).abs() < 1.0e-12);
+
+        let gm_expression = "pow10(gain_db / 20) / abs(rout)";
+        let symbols = ExpressionParser::new(gm_expression, &HashMap::new())
+            .symbols()
+            .unwrap();
+        assert_eq!(symbols, ["gain_db", "rout"]);
+        let values = HashMap::from([("gain_db".to_owned(), 40.0), ("rout".to_owned(), -1.0e5)]);
+        let gm = ExpressionParser::new(gm_expression, &values)
+            .parse()
+            .unwrap();
+        assert!((gm - 1.0e-3).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn rejects_unknown_functions_and_invalid_log10_domains() {
+        assert_eq!(
+            ExpressionParser::new("ln(value)", &HashMap::new())
+                .symbols()
+                .unwrap_err(),
+            "unknown function 'ln'"
+        );
+
+        let values = HashMap::from([("value".to_owned(), 0.0)]);
+        assert_eq!(
+            ExpressionParser::new("log10(value)", &values)
+                .parse()
+                .unwrap_err(),
+            "function 'log10' requires a positive argument, found 0"
+        );
+        assert_eq!(
+            ExpressionParser::new("abs(value", &values)
+                .parse()
+                .unwrap_err(),
+            "missing closing ')' for function 'abs'"
+        );
+        assert_eq!(
+            ExpressionParser::new("log10(value, 10)", &values)
+                .parse()
+                .unwrap_err(),
+            "function 'log10' expects exactly one argument"
         );
     }
 }
