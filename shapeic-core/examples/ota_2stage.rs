@@ -45,21 +45,24 @@ const OTA_1STAGE_ROUT_TB: &str = "ota_1stage_rout";
 const GAIN_1STAGE_SPECIFICATION: &str = "gain_1stage";
 const GAIN_2STAGE_SPECIFICATION: &str = "gain_2stage";
 const ROUT_1STAGE_SPECIFICATION: &str = "rout_1stage";
+const BW_2STAGE_SPECIFICATION: &str = "bw_2stage";
 
-const VOUT_POINTS: usize = 5;
-const VBIAS_POINTS: usize = 5;
-const VOUT_1STAGE_POINTS: usize = 3;
+const VOUT_POINTS: usize = 1;
+const VBIAS_POINTS: usize = 10;
+const VOUT_1STAGE_POINTS: usize = 10;
 
 const MIN_DC_GAIN_DB: f64 = 80.0;
-const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e6;
+const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e3;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
 
 const MAX_WIDTH: f64 = 100.0e-6;
+const MAX_CS_WIDTH: f64 = 1000.0e-6;
 
 
 const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
 const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
+const COMMON_SOURCE_WIDTH_COLUMN: &str = "width__xcs__m1";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PdkSpec {
@@ -135,9 +138,9 @@ const IHP_SPEC: PdkSpec = PdkSpec {
     nmos_model: "sg13_lv_nmos",
     pmos_model: "sg13_lv_pmos",
     tail_current: 20.0e-6,
-    mirror_reference: 0.9,
-    vout_start: 0.95,
-    vout_stop: 1.1,
+    mirror_reference: 1.0,
+    vout_start: 1.2,
+    vout_stop: 1.2,
     vdd: 1.5,
     vin: 0.9,
     vout_1stage_start: 0.95,
@@ -181,13 +184,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = explore_macro_hierarchy(OTA_2STAGE, &macro_catalog, &primitive_catalog, &input)?;
     let exploration = exploration_start.elapsed();
 
+    let preview_results_path = manifest.join("examples/ota_2stage/preview_results.csv");
     let results_path = manifest.join("examples/ota_2stage/results.csv");
     let summary_path = manifest.join("examples/ota_2stage/summary.json");
+    write_preview_results_csv(&result, &preview_results_path)?;
     write_results_csv(&result, &results_path)?;
 
     println!("{} hierarchical four-transistor OTA", spec.label);
     print_hierarchy(&result);
     print_derivations(&result);
+    print_preview_common_source_candidates(&result)?;
     print_results(&result)?;
 
     let total = total_start.elapsed();
@@ -198,6 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("LUT load took: {lut_load:?}");
     println!("Exploration took: {exploration:?}");
     println!("Total process time: {total:?}");
+    println!("Preview results CSV: {}", preview_results_path.display());
     println!("Results CSV: {}", results_path.display());
     println!("Summary JSON: {}", summary_path.display());
 
@@ -215,7 +222,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
                 ("VOUTP", "VOUT"),
                 ("VOUTN", "N1"),
                 ("VTAIL", "IBIAS"),
-                ("VSS", "VSS"),
+                ("VSS", "IBIAS"),
             ],
         )
         .primitive(
@@ -326,7 +333,6 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
                 ("VOUT", "VOUT_1STAGE"),
                 ("IBIAS", "IBIAS"),
                 ("VDD", "VDD"),
-                ("VSS", "VSS")
             ],
         )
         .build();
@@ -344,7 +350,15 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
         .with_primitive_default(MacroPrimitiveDefault::new(
             COMMON_SOURCE_INSTANCE, 
             common_source_input(spec),
-            Vec::new()
+            vec![
+                CandidateFilter::at_most(COMMON_SOURCE_WIDTH_COLUMN, MAX_CS_WIDTH)
+                    .expect("finite width filter"),
+            ],
+        ))
+        .with_specification(MacroSpecification::new(
+            BW_2STAGE_SPECIFICATION,
+            MacroSpecificationSource::ac_metric(OTA_2STAGE_TB, AcMetric::Bandwidth3DbHz),
+            MacroSpecificationBounds::at_least(MIN_BANDWIDTH_3DB_HZ),
         ))
         .with_design_variable(MacroDesignVariable::new(
             "vout_1stage",
@@ -390,14 +404,13 @@ fn ota_1stage_ports() -> Vec<MacroPort> {
         MacroPort::new("VOUT", MacroPortRole::Output),
         MacroPort::new("IBIAS", MacroPortRole::Bias),
         MacroPort::new("VDD", MacroPortRole::Supply),
-        MacroPort::new("VSS", MacroPortRole::Ground),
     ]
 }
 
 fn ota_1stage_compact_model() -> Circuit {
     Circuit::builder()
-        .vccs("gm_ota", "VOUT", "VSS", "VINP", "VSS", "gm_ota")
-        .resistor("ro_ota", "VOUT", "VSS", "ro_ota")
+        .vccs("gm_ota", "VOUT", "VDD", "VINP", "VINN", "gm_ota")
+        .resistor("ro_ota", "VOUT", "VDD", "ro_ota")
         .build()
 }
 
@@ -449,7 +462,7 @@ fn diff_pair_input(spec: PdkSpec) -> PrimitiveBuildInput {
         ("VINP".to_owned(), PrimitiveBuildValue::Scalar(spec.vin)),
         (
             "VOUTP".to_owned(),
-            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_1stage_start, spec.vout_1stage_stop, VOUT_1STAGE_POINTS)),
         ),
         (
             "VTAIL".to_owned(),
@@ -469,7 +482,7 @@ fn current_mirror_input(spec: PdkSpec) -> PrimitiveBuildInput {
         ),
         (
             "VOUTP".to_owned(),
-            PrimitiveBuildValue::Vector(linspace(spec.vout_start, spec.vout_stop, VOUT_POINTS)),
+            PrimitiveBuildValue::Vector(linspace(spec.vout_1stage_start, spec.vout_1stage_stop, VOUT_1STAGE_POINTS)),
         ),
         ("VDD".to_owned(), PrimitiveBuildValue::Scalar(spec.vdd)),
     ]))
@@ -683,6 +696,48 @@ fn print_derivations(result: &MacroHierarchyExplorationResult) {
     }
 }
 
+fn print_preview_common_source_candidates(
+    result: &MacroHierarchyExplorationResult,
+) -> Result<(), io::Error> {
+    let root = result
+        .node(result.root_path())
+        .ok_or_else(|| io::Error::other("hierarchy result has no root node"))?;
+    let preview = root
+        .preview()
+        .ok_or_else(|| io::Error::other("root node has no preview exploration"))?;
+    let preview_result = preview
+        .retained_result()
+        .ok_or_else(|| io::Error::other("root preview result was not retained"))?;
+    let common_source = preview_result
+        .candidate_sets()
+        .instance(COMMON_SOURCE_INSTANCE)
+        .ok_or_else(|| io::Error::other("root preview has no common-source candidates"))?;
+
+    println!("\nCommon-source candidates entering the preview analysis");
+    println!(
+        "  retained after pre-exploration filters: {}; rejected by pre-exploration filters: {}",
+        common_source.candidates().points.len(),
+        common_source.filter_report().rejected_count(),
+    );
+    println!(
+        "{:<8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>6}",
+        "cs_idx", "vin_v", "vout_v", "w_um", "wf_um", "l_um", "nf"
+    );
+    for (candidate_index, candidate) in common_source.candidates().points.iter().enumerate() {
+        println!(
+            "{:<8} {:>10.4} {:>10.4} {:>12.4} {:>12.4} {:>12.4} {:>6.0}",
+            candidate_index,
+            required_candidate_value(candidate, "xcs.vin")?,
+            required_candidate_value(candidate, "xcs.vout")?,
+            required_candidate_value(candidate, "width__xcs__m1")? * 1.0e6,
+            required_candidate_value(candidate, "finger_width__xcs__m1")? * 1.0e6,
+            required_candidate_value(candidate, "length__xcs__m1")? * 1.0e6,
+            required_candidate_value(candidate, "nf__xcs__m1")?,
+        );
+    }
+    Ok(())
+}
+
 fn print_results(result: &MacroHierarchyExplorationResult) -> Result<(), io::Error> {
     println!("\nExploration summaries");
     for (path, node) in result.nodes() {
@@ -834,6 +889,16 @@ fn required_value(
         .ok_or_else(|| io::Error::other(format!("{} has no finite '{column}'", instance.path())))
 }
 
+fn required_candidate_value(
+    candidate: &shapeic_core::exploration::candidate::CandidatePoint,
+    column: &str,
+) -> Result<f64, io::Error> {
+    candidate
+        .get(column)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| io::Error::other(format!("preview candidate has no finite '{column}'")))
+}
+
 fn metric(value: Option<f64>, name: &str) -> Result<f64, io::Error> {
     value
         .filter(|value| value.is_finite())
@@ -846,9 +911,99 @@ fn optional_metric(value: Option<f64>) -> f64 {
 
 const RESULTS_CSV_HEADER: &str = "candidate_id,ota_1stage_candidate_index,common_source_candidate_index,\
 vout_1stage_v,vout_v,gm_ota_s,ro_ota_ohm,gain_1stage,\
+diff_pair_candidate_index,diff_pair_width_m,diff_pair_finger_width_m,diff_pair_length_m,diff_pair_nf,\
+current_mirror_candidate_index,current_mirror_width_m,current_mirror_finger_width_m,current_mirror_length_m,current_mirror_nf,\
 common_source_width_m,common_source_finger_width_m,common_source_length_m,\
 common_source_nf,common_source_vbs_v,common_source_vgs_v,common_source_vds_v,\
 dc_gain_db,bandwidth_3db_hz,unity_gain_hz,phase_margin_deg";
+
+const PREVIEW_RESULTS_CSV_HEADER: &str = "preview_candidate_id,ota_1stage_seed_candidate_index,common_source_candidate_index,\
+vout_1stage_v,vout_v,gm_ota_s,ro_ota_ohm,gain_1stage,\
+common_source_width_m,common_source_finger_width_m,common_source_length_m,common_source_nf,\
+common_source_vbs_v,common_source_vgs_v,common_source_vds_v,\
+gain_2stage,bw_2stage_hz,dc_gain_db,bandwidth_3db_hz,unity_gain_hz,phase_margin_deg";
+
+fn write_preview_results_csv(
+    result: &MacroHierarchyExplorationResult,
+    path: impl AsRef<Path>,
+) -> Result<(), io::Error> {
+    let root = result
+        .node(result.root_path())
+        .ok_or_else(|| io::Error::other("hierarchy result has no root node"))?;
+    let preview = root
+        .preview()
+        .ok_or_else(|| io::Error::other("root node has no preview exploration"))?;
+    let preview_result = preview
+        .retained_result()
+        .ok_or_else(|| io::Error::other("root preview result was not retained"))?;
+
+    let mut writer = BufWriter::new(File::create(path)?);
+    writeln!(writer, "{PREVIEW_RESULTS_CSV_HEADER}")?;
+    for (preview_candidate_id, accepted) in preview_result.accepted().iter().enumerate() {
+        let ota_1stage_index = preview_result
+            .selected_candidate_index(accepted, OTA_1STAGE_INSTANCE)
+            .ok_or_else(|| io::Error::other("preview row has no ota_1stage seed index"))?;
+        let common_source_index = preview_result
+            .selected_candidate_index(accepted, COMMON_SOURCE_INSTANCE)
+            .ok_or_else(|| io::Error::other("preview row has no common-source index"))?;
+        let ota_1stage = preview_result
+            .selected_candidate(accepted, OTA_1STAGE_INSTANCE)
+            .ok_or_else(|| io::Error::other("preview row has no ota_1stage seed candidate"))?;
+        let common_source = preview_result
+            .selected_candidate(accepted, COMMON_SOURCE_INSTANCE)
+            .ok_or_else(|| io::Error::other("preview row has no common-source candidate"))?;
+        let metrics = &preview_result
+            .ac_outcome(accepted, OTA_2STAGE_TB)
+            .ok_or_else(|| io::Error::other("preview row has no AC outcome"))?
+            .metrics;
+
+        writeln!(
+            writer,
+            "{preview_candidate_id},{ota_1stage_index},{common_source_index},\
+             {:.17e},{:.17e},{:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
+             {:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
+            required_candidate_value(common_source, "xcs.vin")?,
+            required_candidate_value(common_source, "xcs.vout")?,
+            required_candidate_value(ota_1stage, "gm_ota__xota_1stage")?,
+            required_candidate_value(ota_1stage, "ro_ota__xota_1stage")?,
+            required_specification_value(accepted, GAIN_1STAGE_SPECIFICATION)?,
+            required_candidate_value(common_source, "width__xcs__m1")?,
+            required_candidate_value(common_source, "finger_width__xcs__m1")?,
+            required_candidate_value(common_source, "length__xcs__m1")?,
+            required_candidate_value(common_source, "nf__xcs__m1")?,
+            required_candidate_value(common_source, "vbs__xcs__m1")?,
+            required_candidate_value(common_source, "vgs__xcs__m1")?,
+            required_candidate_value(common_source, "vds__xcs__m1")?,
+            required_specification_value(accepted, GAIN_2STAGE_SPECIFICATION)?,
+            required_specification_value(accepted, BW_2STAGE_SPECIFICATION)?,
+            optional_metric(metrics.dc_gain_db),
+            optional_metric(metrics.bandwidth_3db_hz),
+            optional_metric(metrics.unity_gain_hz),
+            optional_metric(metrics.phase_margin_deg),
+        )?;
+    }
+    if preview_result.accepted().len() != preview.accepted_candidates() {
+        return Err(io::Error::other(
+            "retained preview row count does not match preview statistics",
+        ));
+    }
+    writer.flush()
+}
+
+fn required_specification_value(
+    candidate: &shapeic_core::macro_model::MacroAcceptedCandidate,
+    specification: &str,
+) -> Result<f64, io::Error> {
+    candidate
+        .specification_value(specification)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "preview candidate has no finite specification '{specification}'"
+            ))
+        })
+}
 
 fn write_results_csv(
     result: &MacroHierarchyExplorationResult,
@@ -859,17 +1014,41 @@ fn write_results_csv(
 
     for candidate_id in 0..result.root_result().accepted().len() {
         let selection = result.selection(candidate_id).map_err(io::Error::other)?;
+        let ota_1stage_path = result
+            .root_path()
+            .child(OTA_1STAGE_INSTANCE)
+            .map_err(io::Error::other)?;
         let root = selection
             .node(result.root_path())
             .ok_or_else(|| io::Error::other("selection has no root node"))?;
         let ota_1stage = selection
             .instances()
-            .find(|instance| instance.instance() == OTA_1STAGE_INSTANCE)
+            .find(|instance| {
+                instance.macro_path() == result.root_path()
+                    && instance.instance() == OTA_1STAGE_INSTANCE
+            })
             .ok_or_else(|| io::Error::other("selection has no ota_1stage compact candidate"))?;
         let common_source = selection
             .instances()
-            .find(|instance| instance.instance() == COMMON_SOURCE_INSTANCE)
+            .find(|instance| {
+                instance.macro_path() == result.root_path()
+                    && instance.instance() == COMMON_SOURCE_INSTANCE
+            })
             .ok_or_else(|| io::Error::other("selection has no common-source candidate"))?;
+        let diff_pair = selection
+            .primitive_instances()
+            .find(|instance| {
+                instance.macro_path() == &ota_1stage_path
+                    && instance.instance() == DIFF_PAIR_INSTANCE
+            })
+            .ok_or_else(|| io::Error::other("selection has no ota_1stage diff-pair candidate"))?;
+        let current_mirror = selection
+            .primitive_instances()
+            .find(|instance| {
+                instance.macro_path() == &ota_1stage_path
+                    && instance.instance() == CURRENT_MIRROR_INSTANCE
+            })
+            .ok_or_else(|| io::Error::other("selection has no ota_1stage current-mirror candidate"))?;
         let metrics = &root
             .ac_outcome(OTA_2STAGE_TB)
             .ok_or_else(|| io::Error::other("selected top result has no AC outcome"))?
@@ -881,6 +1060,8 @@ fn write_results_csv(
         writeln!(
             writer,
             "{candidate_id},{},{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},\
+             {},{:.17e},{:.17e},{:.17e},{:.0},\
+             {},{:.17e},{:.17e},{:.17e},{:.0},\
              {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
              {:.17e},{:.17e},{:.17e},{:.17e}",
             ota_1stage.candidate_index(),
@@ -890,6 +1071,16 @@ fn write_results_csv(
             required_value(&ota_1stage, "gm_ota__xota_1stage")?,
             required_value(&ota_1stage, "ro_ota__xota_1stage")?,
             gain_1stage,
+            diff_pair.candidate_index(),
+            required_value(&diff_pair, "width__xdp__m1")?,
+            required_value(&diff_pair, "finger_width__xdp__m1")?,
+            required_value(&diff_pair, "length__xdp__m1")?,
+            required_value(&diff_pair, "nf__xdp__m1")?,
+            current_mirror.candidate_index(),
+            required_value(&current_mirror, "width__xcm__m1")?,
+            required_value(&current_mirror, "finger_width__xcm__m1")?,
+            required_value(&current_mirror, "length__xcm__m1")?,
+            required_value(&current_mirror, "nf__xcm__m1")?,
             required_value(&common_source, "width__xcs__m1")?,
             required_value(&common_source, "finger_width__xcs__m1")?,
             required_value(&common_source, "length__xcs__m1")?,
@@ -1073,11 +1264,26 @@ mod report_tests {
     #[test]
     fn results_csv_header_uses_explicit_units() {
         let columns = RESULTS_CSV_HEADER.split(',').collect::<Vec<_>>();
-        assert_eq!(columns.len(), 19);
+        assert_eq!(columns.len(), 29);
+        assert!(columns.contains(&"diff_pair_width_m"));
+        assert!(columns.contains(&"diff_pair_nf"));
+        assert!(columns.contains(&"current_mirror_width_m"));
+        assert!(columns.contains(&"current_mirror_nf"));
         assert!(columns.contains(&"common_source_width_m"));
         assert!(columns.contains(&"gm_ota_s"));
         assert!(columns.contains(&"ro_ota_ohm"));
         assert!(columns.contains(&"bandwidth_3db_hz"));
+    }
+
+    #[test]
+    fn preview_results_csv_header_describes_the_parent_preview() {
+        let columns = PREVIEW_RESULTS_CSV_HEADER.split(',').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 21);
+        assert!(columns.contains(&"ota_1stage_seed_candidate_index"));
+        assert!(columns.contains(&"common_source_width_m"));
+        assert!(columns.contains(&"gain_1stage"));
+        assert!(columns.contains(&"gain_2stage"));
+        assert!(columns.contains(&"bw_2stage_hz"));
     }
 
     #[test]
