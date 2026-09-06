@@ -30,13 +30,13 @@ class CsvLogger(Plugin):
 
 def ota_2stage_opt():
     # Orden de las variables en los vectores usados por el optimizador.
-    names = ["w_n", "l_n", "w_p", "l_p", "w_c", "l_c"]
+    names = ["w_n", "l_n", "w_p", "l_p", "w_c", "l_c", "r_comp", "c_comp",]
     
     # Limites de busqueda y punto inicial. w_n y w_p son anchos totales; ng se
     # calcula automaticamente en ota.inc para mantener w/ng < 10 um.
-    xlo = np.array([0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6])
-    xhi = np.array([100e-6, 6.4e-6, 100e-6, 6.4e-6, 1000e-6, 6.4e-6])
-    xinit = np.array([43.6e-6, 6.4e-6, 28.8e-6, 3.2e-6, 233.2e-6, 3.2e-6])
+    xlo = np.array([0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6, 1e2, 1e-15])
+    xhi = np.array([100e-6, 6.4e-6, 100e-6, 6.4e-6, 1000e-6, 6.4e-6, 1e5, 1e-11])
+    xinit = np.array([44.12e-6, 6.4e-6, 56.88e-6, 6.4e-6, 31.25e-6, 0.8e-6, 1e4, 0.46e-12])
 
     # if I give it the start point as the better option from shapeic...
     #xinit = np.array([12.67e-6, 3.2e-6, 15e-6, 1.6e-6])
@@ -46,12 +46,17 @@ def ota_2stage_opt():
     requirements = [
         {
             "measure": "gain",
-            "norm": Nabove(80.0, 3.0),       # ganancia >= 30 dB
+            "norm": Nabove(70.0, 3.0),
             "shape": Slinear2(100.0, 0.0),
         },
         {
             "measure": "f3db",
-            "norm": Nabove(1e3, 1e1),     # frecuencia -3 dB >= 1 MHz
+            "norm": Nabove(1e4, 1e1),     # frecuencia -3 dB >= 1 MHz
+            "shape": Slinear2(100.0, 0.0),
+        },
+        {
+            "measure": "pm",
+            "norm": Nabove(60.0, 5.0),
             "shape": Slinear2(100.0, 0.0),
         },
         {

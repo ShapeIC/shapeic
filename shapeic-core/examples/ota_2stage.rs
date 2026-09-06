@@ -46,13 +46,14 @@ const GAIN_1STAGE_SPECIFICATION: &str = "gain_1stage";
 const GAIN_2STAGE_SPECIFICATION: &str = "gain_2stage";
 const ROUT_1STAGE_SPECIFICATION: &str = "rout_1stage";
 const BW_2STAGE_SPECIFICATION: &str = "bw_2stage";
+const PM_2STAGE_SPECIFICATION: &str = "pm_2stage";
 
 const VOUT_POINTS: usize = 1;
 const VBIAS_POINTS: usize = 10;
 const VOUT_1STAGE_POINTS: usize = 10;
 
-const MIN_DC_GAIN_DB: f64 = 80.0;
-const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e3;
+const MIN_DC_GAIN_DB: f64 = 70.0;
+const MIN_BANDWIDTH_3DB_HZ: f64 = 1.0e4;
 const MIN_UNITY_GAIN_HZ: f64 = 1.0e7;
 const MIN_PHASE_MARGIN_DEG: f64 = 60.0;
 
@@ -63,6 +64,9 @@ const MAX_CS_WIDTH: f64 = 1000.0e-6;
 const DIFF_PAIR_WIDTH_COLUMN: &str = "width__xdp__m1";
 const CURRENT_MIRROR_WIDTH_COLUMN: &str = "width__xcm__m1";
 const COMMON_SOURCE_WIDTH_COLUMN: &str = "width__xcs__m1";
+
+const MILLER_COMPENSATION: &str = "miller_compensation";
+const MILLER_INSTANCE: &str = "xcomp";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PdkSpec {
@@ -169,7 +173,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let ota_1stage = ota_1stage(spec, gain_1stage_testbench.clone(), rout_1stage_testbench.clone());
     let ota_2stage = ota_2stage(spec, gain_2stage_testbench.clone());
-    let macro_catalog = MacroCatalog::from_macros([ota_1stage, ota_2stage])?;
+    let miller_compensation = miller_compensation();
+    let macro_catalog = MacroCatalog::from_macros([ota_1stage, miller_compensation, ota_2stage])?;
 
     let mut input = MacroHierarchyExplorationInput::new();
     input.register_device_model("nmos", nmos)?;
@@ -211,6 +216,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn miller_compensation() -> Macro {
+    let compact_model = Circuit::builder()
+        .resistor("r_comp", "P", "N_RC", "r_comp")
+        .capacitor("c_comp", "N_RC", "N", "c_comp")
+        .build();
+
+    Macro::new(
+        MILLER_COMPENSATION,
+        vec![
+            MacroPort::new("P", MacroPortRole::Inout),
+            MacroPort::new("N", MacroPortRole::Inout),
+        ],
+        Circuit::default(),
+        compact_model,
+    )
+    .with_hierarchy_mode(MacroHierarchyMode::BlackBox)
+    .with_compact_seeds(MacroCompactSeedSet::cartesian([
+        (
+            "r_comp", logspace(2.0, 5.0, 10)
+        ),
+        (
+            "c_comp", logspace(-15.0, -11.0, 10)
+        ),
+    ]))
+}
 fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -> Macro {
     let circuit = Circuit::builder()
         .primitive(
@@ -243,7 +273,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
     .with_ac_testbench(MacroAcTestbench::from_spice_file(
         OTA_1STAGE_TB,
         gain_testbench,
-        ac_analysis(),
+        ac_analysis_1stage(),
     ))
     .with_dc_node_voltage_testbench(MacroDcNodeVoltageTestbench::from_spice_file(
         OTA_1STAGE_ROUT_TB,
@@ -257,13 +287,15 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
     ))
     .with_specification(MacroSpecification::new(
         ROUT_1STAGE_SPECIFICATION,
-        MacroSpecificationSource::dc_node_voltage(OTA_1STAGE_ROUT_TB),
+        MacroSpecificationSource::expression(
+            "abs(ota_1stage_rout.voltage_v)",
+        ),
         MacroSpecificationBounds::unbounded(),
     ))
     .with_specification(MacroSpecification::new(
         "gm_ota",
         MacroSpecificationSource::expression(
-            "pow10(gain_1stage / 20) / abs(rout_1stage)",
+            "pow10(gain_1stage / 20) / rout_1stage",
         ),
         MacroSpecificationBounds::unbounded(),
     ))
@@ -303,9 +335,7 @@ fn ota_1stage(spec: PdkSpec, gain_testbench: PathBuf, rout_testbench: PathBuf) -
     ))
     .with_compact_output(MacroCompactOutputBinding::new(
         "ro_ota",
-        MacroOutputSource::dc_node_voltage(
-            OTA_1STAGE_ROUT_TB
-            )
+        MacroOutputSource::specification(ROUT_1STAGE_SPECIFICATION),
     ))
     .with_interface_binding(MacroInterfaceBinding::new(
         "VOUT",
@@ -333,6 +363,14 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
                 ("VOUT", "VOUT_1STAGE"),
                 ("IBIAS", "IBIAS"),
                 ("VDD", "VDD"),
+            ],
+        )
+        .macro_instance(
+            MILLER_INSTANCE,
+            MILLER_COMPENSATION,
+            [
+                ("P", "VOUT_1STAGE"),
+                ("N", "VOUT"),
             ],
         )
         .build();
@@ -384,6 +422,21 @@ fn ota_2stage(spec: PdkSpec, testbench: PathBuf) -> Macro {
             MacroDerivationReduction::Minimum,
             MacroDerivationTarget::specification_minimum(GAIN_1STAGE_SPECIFICATION),
         ))
+        .with_specification(MacroSpecification::new(
+            ROUT_1STAGE_SPECIFICATION,
+            MacroSpecificationSource::expression(
+                "abs(ro_ota__xota_1stage)",
+            ),
+            MacroSpecificationBounds::unbounded(),
+        ))
+        .with_derivation_rule(MacroDerivationRule::new(
+            OTA_1STAGE_INSTANCE,
+            ROUT_1STAGE_SPECIFICATION,
+            MacroDerivationReduction::Minimum,
+            MacroDerivationTarget::specification_minimum(
+                ROUT_1STAGE_SPECIFICATION,
+            ),
+        ))
 }
 
 fn top_path_input(spec: PdkSpec) -> MacroHierarchyPathInput {
@@ -429,7 +482,7 @@ fn ota_1stage_seed(_spec: PdkSpec) -> MacroCompactSeedSet {
     ])
 }
 
-fn ac_analysis() -> AcAnalysis {
+fn ac_analysis_1stage() -> AcAnalysis {
     AcAnalysis::new(
         TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Positive),
         AdaptiveAcConfig {
@@ -447,6 +500,29 @@ fn ac_analysis() -> AcAnalysis {
                 min_bandwidth_3db_hz: None,
                 min_unity_gain_hz: None,
                 min_phase_margin_deg: None,
+            },
+            metrics: AcMetricSet::ALL,
+        },
+    )
+}
+fn ac_analysis() -> AcAnalysis {
+    AcAnalysis::new(
+        TransferFunction::new("VINP", "VOUT").with_polarity(TransferPolarity::Positive),
+        AdaptiveAcConfig {
+            min_frequency_hz: 1.0,
+            max_frequency_hz: 100.0e9,
+            coarse_points_per_decade: 4,
+            crossing_relative_tolerance: 0.005,
+            max_refinement_steps: 32,
+            retain_samples: false,
+        },
+        AdaptiveAcPolicy {
+            mode: AnalysisMode::Prune,
+            targets: AnalysisTargets {
+                min_dc_gain_db: None,
+                min_bandwidth_3db_hz: None,
+                min_unity_gain_hz: Some(MIN_UNITY_GAIN_HZ),
+                min_phase_margin_deg: Some(MIN_PHASE_MARGIN_DEG),
             },
             metrics: AcMetricSet::ALL,
         },
@@ -910,7 +986,7 @@ fn optional_metric(value: Option<f64>) -> f64 {
 }
 
 const RESULTS_CSV_HEADER: &str = "candidate_id,ota_1stage_candidate_index,common_source_candidate_index,\
-vout_1stage_v,vout_v,gm_ota_s,ro_ota_ohm,gain_1stage,\
+vout_1stage_v,vout_v,gm_ota_s,ro_ota_ohm,r_comp,c_comp,gain_1stage,\
 diff_pair_candidate_index,diff_pair_width_m,diff_pair_finger_width_m,diff_pair_length_m,diff_pair_nf,\
 current_mirror_candidate_index,current_mirror_width_m,current_mirror_finger_width_m,current_mirror_length_m,current_mirror_nf,\
 common_source_width_m,common_source_finger_width_m,common_source_length_m,\
@@ -1028,6 +1104,13 @@ fn write_results_csv(
                     && instance.instance() == OTA_1STAGE_INSTANCE
             })
             .ok_or_else(|| io::Error::other("selection has no ota_1stage compact candidate"))?;
+        let miller_compensation = selection
+            .instances()
+            .find(|instance| {
+                instance.macro_path() == result.root_path()
+                    && instance.instance() == MILLER_INSTANCE
+            })
+            .ok_or_else(|| io::Error::other("selection has no miller_compensation compact candidate"))?;
         let common_source = selection
             .instances()
             .find(|instance| {
@@ -1059,7 +1142,7 @@ fn write_results_csv(
 
         writeln!(
             writer,
-            "{candidate_id},{},{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},\
+            "{candidate_id},{},{},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},\
              {},{:.17e},{:.17e},{:.17e},{:.0},\
              {},{:.17e},{:.17e},{:.17e},{:.0},\
              {:.17e},{:.17e},{:.17e},{:.0},{:.17e},{:.17e},{:.17e},\
@@ -1070,6 +1153,8 @@ fn write_results_csv(
             required_value(&common_source, "xcs.vout")?,
             required_value(&ota_1stage, "gm_ota__xota_1stage")?,
             required_value(&ota_1stage, "ro_ota__xota_1stage")?,
+            required_value(&miller_compensation, "r_comp__xcomp")?,
+            required_value(&miller_compensation, "c_comp__xcomp")?,
             gain_1stage,
             diff_pair.candidate_index(),
             required_value(&diff_pair, "width__xdp__m1")?,
