@@ -48,14 +48,13 @@
 \titlepage
 \end{frame}
 
-\setlength{\parskip}{0mm}
-\begin{frame}
-\frametitle{Table of Contents}
-\vspace{3cm}
-\tableofcontents
-\vspace{2cm}
-
-\end{frame}
+%\setlength{\parskip}{0mm}
+%\begin{frame}
+%\frametitle{Table of Contents}
+%\vspace{3cm}
+%\tableofcontents
+%\vspace{2cm}
+%\end{frame}
 
 \section{Analog Sizing: Optimize or Explore ?}
 
@@ -63,26 +62,26 @@
 \begin{columns}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
-        \item Optimization-driven 
+        \item<2-> Optimization-driven 
       \end{itemize}
       \uncover<2->{
           \center
           \includegraphics[width=0.6\textwidth]{img/optimization-driven.pdf}
       } 
       \begin{itemize}
-        \item<3->[\checkmark] Efficient search
-        \item<3->[\checkmark] Many algorithms available
+        \item<2->[\checkmark] Targeted evaluations
+        \item<2->[\checkmark] Many algorithms available
       \end{itemize}
       \begin{itemize}
-        \item<3->[$\times$] Partial View of design space
-        \item<3->[$\times$] May converge to local optima
+        \item<2->[$\times$] Partial View of the design space
+        \item<2->[$\times$] May converge to local optima
       \end{itemize}
     \end{column}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
-        \item Design-space exploration
+        \item<3-> Design-space exploration
       \end{itemize}
-      \uncover<2->{
+      \uncover<3->{
           \center
           \includegraphics[width=0.6\textwidth]{img/design-space-exploration.pdf}
       }
@@ -100,30 +99,164 @@
 \end{frame}
 
 \section{ShapeIC: Building the Design Space}
-\begin{frame}
-\frametitle{ShapeIC: Building the Design Space}
 
+\begin{frame}
+  \frametitle{ShapeIC: Building the Design Space}
+  \vspace{3cm}
+  \begin{overlayarea}{\textwidth}{0.75\textheight}
+  \only<1>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.pdf}%
+    }
+  }
+  \only<2>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p2.pdf}%
+    }
+  }
+  \only<3>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p3.pdf}%
+    }
+  }
+  \end{overlayarea}
 \end{frame}
 
-\section{Simulation-Based vs ShapeIC Exploration}
+\section{ShapeIC in Action: 2 Stage OTA}
 
-\begin{frame}
-\frametitle{Simulation-Based vs ShapeIC Exploration}
-a
+\begin{frame}{ShapeIC in Action: 2 Stage OTA}
+\begin{columns}
+    \begin{column}{0.45\textwidth}
+      \center
+      \only<2->{
+        \includegraphics[width=\textwidth]{img/ota_2stage.pdf} 
+        \begin{itemize}
+          \item Testbench: AC analysis
+          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
+        \end{itemize}
+      }
+      \only<1>{
+        \includegraphics[width=\textwidth]{img/ota_2stage-pre.pdf} 
+      }
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \uncover<2->{
+          \center
+          %\includegraphics[width=0.8\textwidth]{img/shapeic_exploration.png}
+          \includegraphics[width=\textwidth]{img/ota_2stage_hier.pdf} 
+      }
+    \end{column}
+\end{columns}
+\only<2->{
+  \begin{tikzpicture}[remember picture,overlay]
+    \draw[->, ultra thick]
+      ([xshift=-0.5cm,yshift=0.2cm]current page.center)
+      --
+      ([xshift=0.5cm,yshift=0.2cm]current page.center);
+  \end{tikzpicture}
+}
+\end{frame}
+
+\begin{frame}{ShapeIC in Action: 2 Stage OTA}
+\begin{columns}
+  \begin{column}{0.45\textwidth}
+      \begin{enumerate}
+          \item Runtime
+            \begin{itemize}
+                \item Exploration only: $\approx 2.79s$
+                \item Full run incl. LUT load: $\approx 8.38s$
+            \end{itemize}
+
+          \item Hierarchical exploration
+            \begin{itemize}
+              \item Parent preview: $500k \rightarrow 2021$
+              \item Derived constraint: $Gain \geq 28.89\,[dB]$
+              \item Child exploration: $1050 \rightarrow 446$
+              \item Parent refresh: $223k \rightarrow 224$
+            \end{itemize}
+
+          \item<2-> {\color{red!70!black} Simulation-based optimization}
+            \begin{itemize}
+              \item<2-> {\color{red!70!black} Random initialization: no feasible solution found}
+              \item<2-> {\color{red!70!black} ShapeIC-seeded initialization: converged to a feasible solution ($\star$)}
+            \end{itemize}
+
+      \end{enumerate}
+  \end{column}
+
+  \begin{column}{0.45\textwidth}
+  \only<1>{
+    \centering
+    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain.png} 
+  }
+  \only<2>{
+    \centering
+    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain_with_pyopus.png} 
+  }
+  \end{column}
+\end{columns}
 \end{frame}
 
 \section{Layout-Aware Exploration}
 
-\begin{frame}
-\frametitle{Layout-Aware Exploration}
-a
+\begin{frame}{Layout-Aware Exploration}
+  \vspace{2.5cm}
+  \begin{overlayarea}{\textwidth}{0.75\textheight}
+  \only<1>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p1.pdf}%
+    }
+  }
+  \only<2>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p2.pdf}%
+    }
+  }
+  \only<3>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p3.pdf}%
+    }
+  }
+  \end{overlayarea}
 \end{frame}
 
 \section{Current Status \& What is Next ?}
 
-\begin{frame}
-\frametitle{Current Status \& What is Next ?}
-a
+\begin{frame}{Current Status \& What is Next ?}
+\begin{columns}
+  \begin{column}{0.45\textwidth}
+  \begin{itemize}
+    \item Current status
+      \begin{itemize}
+        \item AC analysis supported 
+        \item Hierarchycal LUT-based exploration
+        \item Layout-aware exploration prototype
+        \item ShapeIC-Cellkit integration
+      \end{itemize}
+  \end{itemize}
+  \end{column}
+  \begin{column}{0.45\textwidth}
+  \begin{itemize}
+    \item Current status
+      \begin{itemize}
+        \item AC analysis supported 
+        \item Hierarchycal LUT-based exploration
+        \item Layout-aware exploration prototype
+        \item ShapeIC-Cellkit integration
+      \end{itemize}
+  \end{itemize}
+  \end{column}
+\end{columns}
+
 \end{frame}
 
 \end{document}
