@@ -58,7 +58,7 @@
 
 \section{Analog Sizing: Optimize or Explore ?}
 
-\begin{frame}{Analog Sizing: Optimize or Explore ?}
+\begin{frame}{Automatic Analog Sizing}
 \begin{columns}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
@@ -98,6 +98,39 @@
 
 \end{frame}
 
+\begin{frame}
+  \frametitle{Let's explore a 2 Stage Amplifier}
+\begin{columns}
+    \begin{column}{0.45\textwidth}
+      \center
+      \only<2>{
+        \includegraphics[width=\textwidth]{img/ota_2stage-params.pdf} 
+      }
+      \only<1>{
+        \includegraphics[width=\textwidth]{img/ota_2stage-pre.pdf} 
+      }
+      \only<3>{
+        \includegraphics[width=\textwidth]{img/ota_2stage-params-2.pdf} 
+      }
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item<1-> Simple 5 transistor topology
+        \item<2-> 1250000 design candidates
+          \begin{itemize}
+            \item Simulation: $\approx2h$ (with 8 cores)
+            \item Equation evaluations: $\approx2s$ (but you need to derive them)
+          \end{itemize}
+        \item<3-> 31250000 design candidates
+          \begin{itemize}
+            \item Simulation: $\approx1 month$ 
+            \item Equation evaluations: $\approx1min$ (but you need to recalculate equations)
+          \end{itemize}
+      \end{itemize}
+    \end{column}
+\end{columns}
+\end{frame}
+
 \section{ShapeIC: Building the Design Space}
 
 \begin{frame}
@@ -115,10 +148,31 @@
     \hspace*{-1.5cm}
     \makebox[\textwidth][c]{%
       \centering
-      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p2.pdf}%
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.1.pdf}%
     }
   }
   \only<3>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.2.pdf}%
+    }
+  }
+  \only<4>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.pdf}%
+    }
+  }
+  \only<5>{
+    \hspace*{-1.5cm}
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p2.pdf}%
+    }
+  }
+  \only<6>{
     \hspace*{-1.5cm}
     \makebox[\textwidth][c]{%
       \centering
@@ -128,9 +182,9 @@
   \end{overlayarea}
 \end{frame}
 
-\section{ShapeIC in Action: 2 Stage OTA}
+\section{ShapeIC in Action: 2 Stage Amplifier (OTA)}
 
-\begin{frame}{ShapeIC in Action: 2 Stage OTA}
+\begin{frame}{ShapeIC in Action: 2 Stage Amplifier (OTA)}
 \begin{columns}
     \begin{column}{0.45\textwidth}
       \center
@@ -156,35 +210,39 @@
 \only<2->{
   \begin{tikzpicture}[remember picture,overlay]
     \draw[->, ultra thick]
-      ([xshift=-0.5cm,yshift=0.2cm]current page.center)
+      ([xshift=-1cm,yshift=0.2cm]current page.center)
       --
-      ([xshift=0.5cm,yshift=0.2cm]current page.center);
+      ([xshift=1cm,yshift=0.2cm]current page.center);
   \end{tikzpicture}
 }
 \end{frame}
 
-\begin{frame}{ShapeIC in Action: 2 Stage OTA}
+\begin{frame}{ShapeIC in Action: 2 Stage Amplifier (OTA)}
 \begin{columns}
   \begin{column}{0.45\textwidth}
       \begin{enumerate}
-          \item Runtime
+          \item<1-> Hierarchical exploration
+            \begin{itemize}
+              \item<1-> TOP exploration: $500k \rightarrow 2021$
+                \begin{itemize}
+                  \item<1-> Derived constraint: $Gain \geq 28.89\,[dB]$
+                \end{itemize}
+              \item<2-> Sub-macro exploration: $1050 \rightarrow 446$
+                \begin{itemize}
+                  \item<2-> Return to parent 446 candidates
+                \end{itemize}
+              \item<3-> TOP refresh: $223k \rightarrow 224$
+            \end{itemize}
+          \item<5-> Runtime
             \begin{itemize}
                 \item Exploration only: $\approx 2.79s$
                 \item Full run incl. LUT load: $\approx 8.38s$
-            \end{itemize}
+          \end{itemize}
 
-          \item Hierarchical exploration
+          \item<6-> {\color{red!70!black} Simulation-based optimization}
             \begin{itemize}
-              \item Parent preview: $500k \rightarrow 2021$
-              \item Derived constraint: $Gain \geq 28.89\,[dB]$
-              \item Child exploration: $1050 \rightarrow 446$
-              \item Parent refresh: $223k \rightarrow 224$
-            \end{itemize}
-
-          \item<2-> {\color{red!70!black} Simulation-based optimization}
-            \begin{itemize}
-              \item<2-> {\color{red!70!black} Random initialization: no feasible solution found}
-              \item<2-> {\color{red!70!black} ShapeIC-seeded initialization: converged to a feasible solution ($\star$)}
+              \item<6-> {\color{red!70!black} Random initialization: no feasible solution found}
+              \item<6-> {\color{red!70!black} ShapeIC-seeded initialization: converged to a feasible solution ($\star$)}
             \end{itemize}
 
       \end{enumerate}
@@ -193,40 +251,26 @@
   \begin{column}{0.45\textwidth}
   \only<1>{
     \centering
-    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain.png} 
+    \includegraphics[width=\textwidth]{img/ota_2stage_exp_1.pdf} 
   }
   \only<2>{
+    \centering
+    \includegraphics[width=\textwidth]{img/ota_2stage_exp_2.pdf} 
+  }
+  \only<3>{
+    \centering
+    \includegraphics[width=\textwidth]{img/ota_2stage_exp_3.pdf} 
+  }
+  \only<4-5>{
+    \centering
+    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain.png} 
+  }
+  \only<6>{
     \centering
     \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain_with_pyopus.png} 
   }
   \end{column}
 \end{columns}
-\end{frame}
-
-\section{Layout-Aware Exploration}
-
-\begin{frame}{Layout-Aware Exploration}
-  \vspace{2.5cm}
-  \begin{overlayarea}{\textwidth}{0.75\textheight}
-  \only<1>{
-    \makebox[\textwidth][c]{%
-      \centering
-      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p1.pdf}%
-    }
-  }
-  \only<2>{
-    \makebox[\textwidth][c]{%
-      \centering
-      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p2.pdf}%
-    }
-  }
-  \only<3>{
-    \makebox[\textwidth][c]{%
-      \centering
-      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p3.pdf}%
-    }
-  }
-  \end{overlayarea}
 \end{frame}
 
 \section{Current Status \& What is Next ?}
