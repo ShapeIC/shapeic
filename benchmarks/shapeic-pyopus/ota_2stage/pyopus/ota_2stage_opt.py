@@ -36,7 +36,8 @@ def ota_2stage_opt():
     # calcula automaticamente en ota.inc para mantener w/ng < 10 um.
     xlo = np.array([0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6, 0.5e-6, 0.13e-6, 1e2, 1e-15])
     xhi = np.array([100e-6, 6.4e-6, 100e-6, 6.4e-6, 1000e-6, 6.4e-6, 1e5, 1e-11])
-    xinit = np.array([44.12e-6, 6.4e-6, 56.88e-6, 6.4e-6, 31.25e-6, 0.8e-6, 1e4, 0.46e-12])
+    #xinit = np.array([44.12e-6, 6.4e-6, 56.88e-6, 6.4e-6, 31.25e-6, 0.8e-6, 1e4, 0.46e-12])
+    xinit = np.array([5.0e-6, 0.5e-6, 5.0e-6, 0.5e-6, 5.0e-6, 0.5e-6, 1e4, 1e-12])
 
     # if I give it the start point as the better option from shapeic...
     #xinit = np.array([12.67e-6, 3.2e-6, 15e-6, 1.6e-6])
@@ -72,7 +73,7 @@ def ota_2stage_opt():
         cost,
         xlo=xlo,
         xhi=xhi,
-        maxiter=300,
+        maxiter=1000,
     )
     optimizer.reset(xinit)
     optimizer.installPlugin(cost.getReporter())
