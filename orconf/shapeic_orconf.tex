@@ -35,10 +35,10 @@
 %\usetheme[ccby]{hm}
 
 \author{Daniel Arevalos}
-\institute{AEMY Group}
+\institute{Munich University of Applied Sciences HM}
 \title{ShapeIC: Design-Space Exploration}
 %\title{Vorlesung I mit einem langen Titel über zwei Zeilen}
-\subtitle{Hierarchical LUT-based exploration from electrical models to layout-aware design}
+\subtitle{Hierarchical LUT-based design-space exploration for analog IC sizing}
 %\subtitle{Kapitel 1 -- Eine Einführung die über zwei Zeilen geht und trotzdem gut passt}
 
 
@@ -69,29 +69,29 @@
           \includegraphics[width=0.6\textwidth]{img/optimization-driven.pdf}
       } 
       \begin{itemize}
-        \item<2->[\checkmark] Targeted evaluations
+        \item<2->[\checkmark] Strategic evaluation of candidates
         \item<2->[\checkmark] Many algorithms available
       \end{itemize}
       \begin{itemize}
-        \item<2->[$\times$] Partial View of the design space
-        \item<2->[$\times$] May converge to local optima
+        \item<3->[$\times$] Partial View of the design space
+        \item<3->[$\times$] May converge to local optima
       \end{itemize}
     \end{column}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
-        \item<3-> Design-space exploration
+        \item<4-> Design-space exploration
       \end{itemize}
-      \uncover<3->{
+      \uncover<4->{
           \center
           \includegraphics[width=0.6\textwidth]{img/design-space-exploration.pdf}
       }
       \begin{itemize}
-        \item<3->[\checkmark] Design insight
-        \item<3->[\checkmark] Alternative solutions
+        \item<4->[\checkmark] Design insight
+        \item<4->[\checkmark] Alternative solutions
       \end{itemize}
       \begin{itemize}
-        \item<3->[$\times$] Expensive to build
-        \item<3->[$\times$] Scales poorly without abstraction
+        \item<5->[$\times$] Expensive to build
+        \item<5->[$\times$] Scales poorly without abstraction
       \end{itemize}
     \end{column}
 \end{columns}
@@ -104,13 +104,13 @@
     \begin{column}{0.45\textwidth}
       \center
       \only<2>{
-        \includegraphics[width=\textwidth]{img/ota_2stage-params.pdf} 
+        \includegraphics[width=1.1\textwidth]{img/ota_2stage-params.pdf} 
       }
       \only<1>{
-        \includegraphics[width=\textwidth]{img/ota_2stage-pre.pdf} 
+        \includegraphics[width=1.1\textwidth]{img/ota_2stage-pre.pdf} 
       }
       \only<3>{
-        \includegraphics[width=\textwidth]{img/ota_2stage-params-2.pdf} 
+        \includegraphics[width=1.1\textwidth]{img/ota_2stage-params-2.pdf} 
       }
     \end{column}
     \begin{column}{0.45\textwidth}
@@ -118,13 +118,13 @@
         \item<1-> Simple 5 transistor topology
         \item<2-> 1250000 design candidates
           \begin{itemize}
-            \item Simulation: $\approx2h$ (with 8 cores)
-            \item Equation evaluations: $\approx2s$ (but you need to derive them)
+            \item Simulation: $\approx2h$
+            \item Equation evaluations: $\approx2s$ (derived by hand)
           \end{itemize}
         \item<3-> 31250000 design candidates
           \begin{itemize}
             \item Simulation: $\approx1 month$ 
-            \item Equation evaluations: $\approx1min$ (but you need to recalculate equations)
+            \item Equation evaluations: $\approx1min$ (but you need to recalculate them)
           \end{itemize}
       \end{itemize}
     \end{column}
@@ -135,51 +135,30 @@
 
 \begin{frame}
   \frametitle{ShapeIC: Building the Design Space}
-  \vspace{3cm}
-  \begin{overlayarea}{\textwidth}{0.75\textheight}
-  \only<1>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+
+  \vspace{0.5cm}
+
+  \makebox[\textwidth][c]{%
+    \only<1>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.pdf}%
-    }
-  }
-  \only<2>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+    }%
+    \only<2>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.1.pdf}%
-    }
-  }
-  \only<3>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+    }%
+    \only<3>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.2.pdf}%
-    }
-  }
-  \only<4>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+    }%
+    \only<4>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p1.pdf}%
-    }
-  }
-  \only<5>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+    }%
+    \only<5>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p2.pdf}%
-    }
-  }
-  \only<6>{
-    \hspace*{-1.5cm}
-    \makebox[\textwidth][c]{%
-      \centering
+    }%
+    \only<6>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p3.pdf}%
-    }
+    }%
   }
-  \end{overlayarea}
+
 \end{frame}
 
 \section{ShapeIC in Action: 2 Stage Amplifier (OTA)}
@@ -188,7 +167,7 @@
 \begin{columns}
     \begin{column}{0.45\textwidth}
       \center
-      \only<2->{
+      \only<5->{
         \includegraphics[width=\textwidth]{img/ota_2stage.pdf} 
         \begin{itemize}
           \item Testbench: AC analysis
@@ -198,21 +177,49 @@
       \only<1>{
         \includegraphics[width=\textwidth]{img/ota_2stage-pre.pdf} 
       }
+      \only<2>{
+        \includegraphics[width=\textwidth]{img/ota_2stage_p1.pdf} 
+        \begin{itemize}
+          \item Testbench: AC analysis
+          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
+        \end{itemize}
+      }
+      \only<3>{
+        \includegraphics[width=\textwidth]{img/ota_2stage_p2.pdf} 
+        \begin{itemize}
+          \item Testbench: AC analysis
+          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
+        \end{itemize}
+      }
+      \only<4>{
+        \includegraphics[width=\textwidth]{img/ota_2stage_p3.pdf} 
+        \begin{itemize}
+          \item Testbench: AC analysis
+          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
+        \end{itemize}
+      }
     \end{column}
     \begin{column}{0.45\textwidth}
-      \uncover<2->{
+      \only<4->{
           \center
-          %\includegraphics[width=0.8\textwidth]{img/shapeic_exploration.png}
           \includegraphics[width=\textwidth]{img/ota_2stage_hier.pdf} 
+      }
+      \only<2>{
+          \center
+          \includegraphics[width=\textwidth]{img/ota_2stage_hier_p1.pdf} 
+      }
+      \only<3>{
+          \center
+          \includegraphics[width=\textwidth]{img/ota_2stage_hier_p2.pdf} 
       }
     \end{column}
 \end{columns}
 \only<2->{
   \begin{tikzpicture}[remember picture,overlay]
     \draw[->, ultra thick]
-      ([xshift=-1cm,yshift=0.2cm]current page.center)
+      ([xshift=-0.8cm,yshift=0.2cm]current page.center)
       --
-      ([xshift=1cm,yshift=0.2cm]current page.center);
+      ([xshift=0.8cm,yshift=0.2cm]current page.center);
   \end{tikzpicture}
 }
 \end{frame}
