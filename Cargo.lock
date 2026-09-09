@@ -658,6 +658,7 @@ dependencies = [
  "ndarray",
  "num-traits",
  "py_literal",
+ "zip",
 ]
 
 [[package]]
@@ -1073,13 +1074,16 @@ version = "0.1.0"
 dependencies = [
  "nalgebra",
  "ndarray",
+ "ndarray-npy",
  "num-complex",
+ "rayon",
  "serde",
  "serde_json",
  "shapeic-layout",
  "shapeic-lut",
  "shapeic-mna",
  "symbolica",
+ "zip",
 ]
 
 [[package]]

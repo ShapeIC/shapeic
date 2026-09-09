@@ -1,0 +1,229 @@
+timestamp 0
+version 8.3
+tech ihp-sg13g2
+style ngspice()
+scale 1000 1 0.5
+resistclasses 3000000 67000 110 88 88 88 88 18 11 7000 260000 1360000
+parameters sg13_lv_pmos l=l w=w a1=as p1=ps a2=ad p2=pd
+port "B" 4 0 681 0 681 m1
+port "DOUT" 1 -223 -147 -223 -147 m1
+port "DREF" 2 8683 -147 8683 -147 m1
+port "S" 3 0 381 0 381 m1
+node "B" 0 9.75226 0 681 m1 0 0 0 0 3136 224 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+node "DOUT" 27 414.199 -223 -147 m1 0 0 0 0 625840 25018 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+node "DREF" 53 7190.18 8683 -147 m1 0 0 0 0 1474240 53298 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+node "S" 209 9954.94 0 381 m1 0 0 0 0 5648424 207508 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+node "a_n78_603#" 0 0 -78 603 ndif 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+node "w_n17812_n215#" 0 0 -17812 -215 nw 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+substrate "sub!" 0 0 -1073741817 -1073741817 space 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+cap "B" "DREF" 0.0724919
+cap "S" "a_n78_603#" 4.76411
+cap "S" "w_n17812_n215#" 26725.3
+cap "DOUT" "DREF" 3353.19
+cap "B" "S" 6.93603
+cap "B" "a_n78_603#" 13.5907
+cap "B" "w_n17812_n215#" 23.5675
+cap "DREF" "S" 4606.69
+cap "DREF" "w_n17812_n215#" 12496.8
+cap "DOUT" "S" 2184.5
+cap "DOUT" "w_n17812_n215#" 1253.1
+device msubckt sg13_lv_pmos 21665 15 21666 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 21497 15 21498 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 21329 15 21330 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 21161 15 21162 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20993 15 20994 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20825 15 20826 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20657 15 20658 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20489 15 20490 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20321 15 20322 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 20153 15 20154 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19985 15 19986 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19817 15 19818 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19649 15 19650 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19481 15 19482 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19313 15 19314 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 19145 15 19146 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18977 15 18978 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18809 15 18810 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18641 15 18642 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18473 15 18474 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18305 15 18306 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 18137 15 18138 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17969 15 17970 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17801 15 17802 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17633 15 17634 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17465 15 17466 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17297 15 17298 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 17129 15 17130 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16961 15 16962 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16793 15 16794 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16625 15 16626 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16457 15 16458 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16289 15 16290 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 16121 15 16122 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15953 15 15954 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15785 15 15786 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15617 15 15618 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15449 15 15450 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15281 15 15282 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 15113 15 15114 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14945 15 14946 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14777 15 14778 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14609 15 14610 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14441 15 14442 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14273 15 14274 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 14105 15 14106 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 13937 15 13938 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 13769 15 13770 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 13601 15 13602 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos 13433 15 13434 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 4020,268
+device msubckt sg13_lv_pmos 12759 15 12760 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 4020,268
+device msubckt sg13_lv_pmos 12591 15 12592 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 12423 15 12424 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 12255 15 12256 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 12087 15 12088 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 11919 15 11920 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 11751 15 11752 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 11583 15 11584 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 11415 15 11416 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 11247 15 11248 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 11079 15 11080 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 10911 15 10912 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 10743 15 10744 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 10575 15 10576 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 10407 15 10408 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 10239 15 10240 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 10071 15 10072 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 9903 15 9904 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 9735 15 9736 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 9567 15 9568 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 9399 15 9400 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 9231 15 9232 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 9063 15 9064 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 8895 15 8896 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 8727 15 8728 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 8559 15 8560 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 8391 15 8392 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 8223 15 8224 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 8055 15 8056 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 7887 15 7888 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 7719 15 7720 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 7551 15 7552 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 7383 15 7384 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 7215 15 7216 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 7047 15 7048 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 6879 15 6880 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 6711 15 6712 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 6543 15 6544 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 6375 15 6376 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 6207 15 6208 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 6039 15 6040 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 5871 15 5872 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 5703 15 5704 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 5535 15 5536 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 5367 15 5368 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 5199 15 5200 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 5031 15 5032 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 4863 15 4864 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 4695 15 4696 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DREF" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 4527 15 4528 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 4020,268 "DREF" 30 2220,148
+device msubckt sg13_lv_pmos 3853 15 3854 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 4020,268
+device msubckt sg13_lv_pmos 3685 15 3686 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 3517 15 3518 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 3349 15 3350 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 3181 15 3182 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 3013 15 3014 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 2845 15 2846 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 2677 15 2678 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 2509 15 2510 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 2341 15 2342 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 2173 15 2174 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 2005 15 2006 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 1837 15 1838 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 1669 15 1670 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 1501 15 1502 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 1333 15 1334 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 1165 15 1166 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 997 15 998 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 829 15 830 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 661 15 662 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 493 15 494 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos 325 15 326 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos 157 15 158 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -11 15 -10 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -179 15 -178 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -347 15 -346 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -515 15 -514 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -683 15 -682 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -851 15 -850 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -1019 15 -1018 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -1187 15 -1186 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -1355 15 -1354 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -1523 15 -1522 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -1691 15 -1690 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -1859 15 -1858 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -2027 15 -2026 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -2195 15 -2194 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -2363 15 -2362 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -2531 15 -2530 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -2699 15 -2698 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -2867 15 -2866 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -3035 15 -3034 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -3203 15 -3202 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -3371 15 -3370 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -3539 15 -3538 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -3707 15 -3706 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -3875 15 -3874 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -4043 15 -4042 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 2220,148 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -4211 15 -4210 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "DOUT" 30 2220,148 "S" 30 2220,148
+device msubckt sg13_lv_pmos -4379 15 -4378 16 l=80 w=30 "w_n17812_n215#" "DREF" 160 0 "S" 30 4020,268 "DOUT" 30 2220,148
+device msubckt sg13_lv_pmos -5053 15 -5052 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -5221 15 -5220 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -5389 15 -5388 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -5557 15 -5556 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -5725 15 -5724 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -5893 15 -5892 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6061 15 -6060 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6229 15 -6228 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6397 15 -6396 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6565 15 -6564 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6733 15 -6732 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -6901 15 -6900 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7069 15 -7068 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7237 15 -7236 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7405 15 -7404 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7573 15 -7572 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7741 15 -7740 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -7909 15 -7908 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8077 15 -8076 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8245 15 -8244 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8413 15 -8412 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8581 15 -8580 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8749 15 -8748 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -8917 15 -8916 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9085 15 -9084 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9253 15 -9252 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9421 15 -9420 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9589 15 -9588 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9757 15 -9756 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -9925 15 -9924 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10093 15 -10092 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10261 15 -10260 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10429 15 -10428 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10597 15 -10596 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10765 15 -10764 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -10933 15 -10932 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11101 15 -11100 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11269 15 -11268 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11437 15 -11436 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11605 15 -11604 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11773 15 -11772 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -11941 15 -11940 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12109 15 -12108 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12277 15 -12276 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12445 15 -12444 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12613 15 -12612 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12781 15 -12780 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -12949 15 -12948 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -13117 15 -13116 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 2220,148
+device msubckt sg13_lv_pmos -13285 15 -13284 16 l=80 w=30 "w_n17812_n215#" "S" 160 0 "S" 0 0 "S" 60 4020,268

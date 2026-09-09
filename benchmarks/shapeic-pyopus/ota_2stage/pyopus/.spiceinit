@@ -1,0 +1,4 @@
+* Configuracion local de ngspice para IHP SG13G2.
+setcs sourcepath = ( $sourcepath ../../../../pdks/ihp-sg13g2/libs.tech/ngspice/models )
+osdi '../../../../pdks/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi'
+osdi '../../../../pdks/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi'

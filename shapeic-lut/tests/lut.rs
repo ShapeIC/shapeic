@@ -1,9 +1,10 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 
 use shapeic_lut::{
     Axis, DType, Expr, LookupTable, LutError, LutPoint, MosExpression, OperatingPoint,
 };
+use zip::write::SimpleFileOptions;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sstadex_combined.npz")
@@ -16,6 +17,46 @@ fn fixture() -> LookupTable {
 fn five_dimensional_fixture() -> LookupTable {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shapeic_v2_5d.npz");
     LookupTable::open(path).expect("five-dimensional fixture should load")
+}
+
+fn five_dimensional_fixture_with_pdk_metadata() -> LookupTable {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shapeic_v2_5d.npz");
+    let source = std::fs::File::open(path).expect("fixture should open");
+    let mut source = zip::ZipArchive::new(source).expect("fixture should be a ZIP archive");
+    let destination = Cursor::new(Vec::new());
+    let mut destination = zip::ZipWriter::new(destination);
+
+    for index in 0..source.len() {
+        let mut member = source.by_index(index).expect("fixture member should open");
+        let name = member.name().to_owned();
+        let options = SimpleFileOptions::default().compression_method(member.compression());
+        let mut bytes = Vec::new();
+        member
+            .read_to_end(&mut bytes)
+            .expect("fixture member should read");
+        if name == "manifest.json" {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("manifest should parse");
+            let object = manifest
+                .as_object_mut()
+                .expect("manifest should be an object");
+            object.insert("pdk".to_owned(), "sky130A".into());
+            object.insert("pdk_revision".to_owned(), "v0.1.0".into());
+            object.insert("corner".to_owned(), "tt".into());
+            object.insert("nominal_voltage".to_owned(), 1.8.into());
+            bytes = serde_json::to_vec(&manifest).expect("manifest should serialize");
+        }
+        destination
+            .start_file(name, options)
+            .expect("destination member should start");
+        destination
+            .write_all(&bytes)
+            .expect("destination member should write");
+    }
+
+    let mut archive = destination.finish().expect("destination ZIP should finish");
+    archive.set_position(0);
+    LookupTable::from_reader(archive).expect("metadata fixture should load")
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -31,6 +72,11 @@ fn loads_sstadex_metadata_models_and_typed_arrays() {
     let table = fixture();
     assert_eq!(table.description(), Some("shapeic-lut test fixture"));
     assert_eq!(table.simulator(), Some("FixtureSimulator"));
+    assert_eq!(table.pdk(), None);
+    assert_eq!(table.pdk_revision(), None);
+    assert_eq!(table.corner(), None);
+    assert_eq!(table.temperature_c(), None);
+    assert_eq!(table.nominal_voltage(), None);
     assert_eq!(
         table.model_names().collect::<Vec<_>>(),
         vec!["fixture_nmos", "fixture_pmos"]
@@ -92,7 +138,7 @@ fn evaluates_expressions_on_corners_before_interpolation() {
     let model = table.model("fixture_nmos").expect("nmos");
     let point = OperatingPoint::new(2.0, 0.0, 1.0, 2.0);
     let gmid = model
-        .standard_expression(MosExpression::GmOverId)
+        .standard_expression(MosExpression::Gmid)
         .expect("gmid expression");
     let expected = (1..=16).map(|id| 16.0 / f64::from(id)).sum::<f64>() / 16.0;
     let actual = model.query_expression(&point, &gmid).expect("gmid query");
@@ -141,6 +187,41 @@ fn evaluates_standard_mos_expressions() {
             .expect("inverse Early query"),
         expected_inverse_early,
     );
+}
+
+#[test]
+fn standard_mos_expressions_expose_canonical_parameter_names() {
+    let table = fixture();
+    let model = table.model("fixture_nmos").expect("nmos");
+    let cases = [
+        (MosExpression::Vsg, "vsg"),
+        (MosExpression::Vsb, "vsb"),
+        (MosExpression::Vsd, "vsd"),
+        (MosExpression::Gmid, "gmid"),
+        (MosExpression::Vov, "vov"),
+        (MosExpression::Vstar, "vstar"),
+        (MosExpression::CurrentDensity, "jd"),
+        (MosExpression::IntrinsicGain, "av"),
+        (MosExpression::TransitFrequency, "ft"),
+        (MosExpression::EarlyVoltage, "va"),
+        (MosExpression::InverseEarlyVoltage, "gdsid"),
+        (MosExpression::Rds, "rds"),
+        (MosExpression::Vdsat, "vdsat"),
+    ];
+
+    for (kind, expected_name) in cases {
+        assert_eq!(kind.parameter_name(), expected_name);
+        assert_eq!(
+            model
+                .standard_expression(kind)
+                .expect("standard expression")
+                .parameter_name(),
+            Some(expected_name),
+        );
+    }
+
+    let manual_gmid = Expr::parameter("gm") / Expr::parameter("id");
+    assert_eq!(manual_gmid.parameter_name(), None);
 }
 
 #[test]
@@ -217,6 +298,11 @@ fn loads_shapeic_v2_metadata_and_five_dimensional_arrays() {
     let table = five_dimensional_fixture();
     assert_eq!(table.description(), Some("IHP SG13G2 LV NMOS smoke LUT"));
     assert_eq!(table.simulator(), Some("ngspice"));
+    assert_eq!(table.pdk(), None);
+    assert_eq!(table.pdk_revision(), None);
+    assert_eq!(table.corner(), None);
+    assert_eq!(table.temperature_c(), Some(27.0));
+    assert_eq!(table.nominal_voltage(), None);
     assert_eq!(table.model_names().collect::<Vec<_>>(), ["sg13_lv_nmos"]);
 
     let model = table.model("sg13_lv_nmos").expect("nmos");
@@ -226,6 +312,16 @@ fn loads_shapeic_v2_metadata_and_five_dimensional_arrays() {
     assert_eq!(model.array("id").expect("id").dtype(), DType::F32);
     assert_eq!(model.array("id").expect("id").shape(), [2, 2, 2, 2, 2]);
     assert_eq!(model.device_parameter("nf").expect("nf"), 1.0);
+}
+
+#[test]
+fn loads_optional_pdk_metadata_from_shapeic_v2() {
+    let table = five_dimensional_fixture_with_pdk_metadata();
+    assert_eq!(table.pdk(), Some("sky130A"));
+    assert_eq!(table.pdk_revision(), Some("v0.1.0"));
+    assert_eq!(table.corner(), Some("tt"));
+    assert_eq!(table.temperature_c(), Some(27.0));
+    assert_eq!(table.nominal_voltage(), Some(1.8));
 }
 
 #[test]
@@ -255,7 +351,7 @@ fn interpolates_five_dimensions_and_expressions_on_corners() {
         id_sum / 32.0,
     );
     let gmid = model
-        .standard_expression(MosExpression::GmOverId)
+        .standard_expression(MosExpression::Gmid)
         .expect("gmid");
     assert_close(
         model
@@ -333,12 +429,15 @@ fn sizes_for_current_and_returns_per_finger_expressions() {
         .expect("maximum-width current");
     let requested_current = (minimum_current + maximum_current) / 2.0;
     let gm = Expr::parameter("gm");
+    let gmid = model
+        .standard_expression(MosExpression::Gmid)
+        .expect("gmid expression");
 
     let result = model
         .size_for_current(
             &operating_point,
             requested_current,
-            std::slice::from_ref(&gm),
+            &[gm.clone(), gmid.clone()],
         )
         .expect("inverse current sizing");
 
@@ -352,5 +451,12 @@ fn sizes_for_current_and_returns_per_finger_expressions() {
         model
             .query_expression_at(&result.point, &gm)
             .expect("per-finger gm"),
+    );
+    assert_eq!(gmid.parameter_name(), Some("gmid"));
+    assert_close(
+        result.values[1],
+        model
+            .query_expression_at(&result.point, &gmid)
+            .expect("per-finger gmid"),
     );
 }

@@ -1,0 +1,3 @@
+Error while reading cell "$$$CONTEXT_INFO$$$" (byte position 128): Unknown layer/datatype in boundary, layer=0 type=0
+freeMagic called with NULL argument.
+Total of 2 warnings.

@@ -1,0 +1,40 @@
+* SKY130A four-transistor OTA pre-layout verification.
+.lib '{{model_library}}' tt
+
+VDD VDD 0 DC={{vdd_dc}}
+VINP VINP 0 DC={{vin_dc}} AC=1
+VINN VINN 0 DC={{vin_dc}} AC=0
+ITAIL IBIAS 0 DC={{tail_current}}
+
+VOUT_BIAS VOUT_BIAS 0 DC={{vout_dc}} AC=0
+LBIAS VOUT_BIAS VOUT {{output_bias_inductance}}
+
+XDP1 VOUT VINP IBIAS IBIAS sky130_fd_pr__nfet_01v8 l={{dp_length}} w={{dp_width}} nf={{dp_nf}}
+XDP2 N1 VINN IBIAS IBIAS sky130_fd_pr__nfet_01v8 l={{dp_length}} w={{dp_width}} nf={{dp_nf}}
+XCM1 VOUT N1 VDD VDD sky130_fd_pr__pfet_01v8 l={{cm_length}} w={{cm_width}} nf={{cm_nf}}
+XCM2 N1 N1 VDD VDD sky130_fd_pr__pfet_01v8 l={{cm_length}} w={{cm_width}} nf={{cm_nf}}
+
+.options temp={{temperature_c}} tnom={{temperature_c}}
+.control
+op
+print v(VOUT) v(IBIAS) v(N1)
+
+ac dec {{ac_points_per_decade}} {{ac_min_hz}} {{ac_max_hz}}
+let loop_response = -v(VOUT)
+let gain_db = vdb(loop_response)
+let phase_deg = 180 / pi * cph(loop_response)
+meas ac dc_gain_db find gain_db at={{ac_min_hz}}
+let gain_3db = dc_gain_db - 3
+meas ac bandwidth_3db_hz when gain_db=gain_3db fall=1
+meas ac unity_gain_hz when gain_db=0 fall=1
+meas ac phase_at_unity find phase_deg at=unity_gain_hz
+let phase_margin_deg = 180 + phase_at_unity
+
+option numdgt=15
+set wr_vecnames
+set wr_singlescale
+compose result_index values 0
+setscale result_index
+wrdata {{results_path}} dc_gain_db bandwidth_3db_hz unity_gain_hz phase_margin_deg
+.endc
+.end

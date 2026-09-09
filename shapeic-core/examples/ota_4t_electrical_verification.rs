@@ -19,8 +19,8 @@ use shapeic_lut::verification::{VerificationEngine, VerificationInput};
 use shapeic_lut::{LookupTable, OperatingPoint};
 
 const DIFF_LENGTH: f64 = 0.8e-6;
-const MIRROR_LENGTH: f64 = 0.4e-6;
-const SOURCE_VOLTAGE: f64 = 0.65;
+const MIRROR_LENGTH: f64 = 1.6e-6;
+const SOURCE_VOLTAGE: f64 = 0.7122;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (nmos_path, pmos_path) = lut_paths()?;
@@ -138,7 +138,7 @@ fn comparison_metrics(metrics: AcMetrics) -> Result<ComparisonMetrics, io::Error
         ));
     }
     Ok(ComparisonMetrics {
-        dc_gain_db: metrics.dc_gain_db,
+        dc_gain_db: metrics.dc_gain_db.ok_or_else(|| missing("DC gain"))?,
         bandwidth_3db_hz: metrics
             .bandwidth_3db_hz
             .ok_or_else(|| missing("the -3 dB bandwidth"))?,
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn accepts_optional_unity_gain_metrics_as_a_pair() {
         let complete = AcMetrics {
-            dc_gain_db: 20.0,
+            dc_gain_db: Some(20.0),
             bandwidth_3db_hz: Some(1.0e6),
             unity_gain_hz: Some(10.0e6),
             phase_margin_deg: Some(60.0),
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(complete.loop_metrics(), Some((10.0e6, 60.0)));
 
         let without_crossing = AcMetrics {
-            dc_gain_db: 20.0,
+            dc_gain_db: Some(20.0),
             bandwidth_3db_hz: Some(1.0e6),
             unity_gain_hz: None,
             phase_margin_deg: None,

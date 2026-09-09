@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Keep GF180MCU in a PDK-specific environment so its globally activated PDK
+# cannot conflict with IHP or SKY130 during one Python process.
+gdsfactory==9.40.1
+gf180mcu==1.0.0

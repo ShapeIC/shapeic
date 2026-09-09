@@ -14,7 +14,7 @@ def primitive_matrices(
     c_scale = 8.0e-16 * nf * (finger_width_m / 1.0e-6) * (
         1.0 + length_m / 1.0e-6
     )
-    primitive_scale = 1.0 if primitive == "simplediffpair" else 0.75
+    primitive_scale = 0.75 + 0.05 * (sum(primitive.encode("utf-8")) % 6)
     # A one-port-per-net extrinsic model has no path for series metal R and
     # should not invent dielectric DC leakage between independent nets.
     conductance = np.zeros((port_count, port_count), dtype=np.float64)

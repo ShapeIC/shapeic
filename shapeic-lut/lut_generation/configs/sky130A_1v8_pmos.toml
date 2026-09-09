@@ -1,0 +1,82 @@
+[pdk]
+name = "sky130A"
+revision = "026824c7969ce6f4fc9678e6ca04b0a06a596c4b"
+corner = "tt"
+nominal_voltage = 1.8
+
+[output]
+path = "../generated/sky130A_1v8_pmos_5d.npz"
+description = "SKY130A 1.8 V PMOS five-dimensional LUT"
+
+[simulator]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 4
+parameters = ["weff", "id", "vth", "vdsat", "gm", "gds", "cgg", "cgd", "cgs", "cdg", "cdd", "cds", "csg", "csd", "css", "cgsol", "cgdol", "cjs", "cjd"]
+
+[spice]
+
+[[spice.directives]]
+kind = "library"
+path = "libs.tech/combined/sky130.lib.spice"
+section = "tt"
+
+[device]
+name = "sky130_fd_pr__pfet_01v8"
+instance = "XM1"
+instance_kind = "subcircuit"
+terminals = ["d", "g", "s", "b"]
+length_parameter = "l"
+width_parameter = "w"
+finger_parameter = "nf"
+width_convention = "total"
+geometry_unit_m = 1.0e-6
+hierarchy = "m.xm1.msky130_fd_pr__pfet_01v8"
+nf = 1
+capacitance_nf_mode = "linear"
+capacitance_convention = "signed_nodal"
+capacitance_nf_samples = [1, 2, 3, 4]
+
+[device.parameter_map]
+weff = "weff"
+vth = "vth"
+vdsat = "vdsat"
+gm = "gm"
+gds = "gds"
+cgg = "cgg"
+cgd = "cgd"
+cgs = "cgs"
+cdg = "cdg"
+cdd = "cdd"
+cds = "cds"
+csg = "csg"
+csd = "csd"
+css = "css"
+cgsol = "cgso"
+cgdol = "cgdo"
+cjs = "capbs"
+cjd = "capbd"
+
+[sweep]
+length = [0.4e-6, 0.8e-6, 1.6e-6, 3.2e-6, 6.4e-6]
+
+[sweep.vgs]
+start = -0.1
+stop = -1.8
+step = -0.05
+
+[sweep.vds]
+start = -0.1
+stop = -1.8
+step = -0.05
+
+[sweep.vbs]
+start = 0.0
+stop = 1.6
+step = 0.1
+
+[sweep.finger_width]
+start = 0.42e-6
+stop = 10.0e-6
+step = 0.5e-6
+stop_inclusive = false

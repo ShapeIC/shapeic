@@ -1,0 +1,33 @@
+
+Magic 8.3 revision 623 - Compiled on Tue Mar 17 08:19:38 UTC 2026.
+Starting magic under Tcl interpreter
+Using the terminal as the console.
+Using NULL graphics device.
+Processing system .magicrc file
+Switching to WIRING tool.
+Switching to NETLIST tool.
+Switching to PICK tool.
+Switching to BOX tool.
+Sourcing design .magicrc for technology ihp-sg13g2 ...
+2 Magic internal units = 1 Lambda
+Input style sg13g2(): scaleFactor=2, multiplier=2
+The following types are not handled by extraction and will be treated as non-electrical types:
+    pblock sealcont difffill nemitter hvnemitter hvisodiffres sealvia1 sealvia2 sealvia3 sealvia4 sealvia5 sealvia6 pillar solder seal glass thruvia inductor 
+Scaled tech values by 2 / 1 to match internal grid scaling
+Loading ihp-sg13g2 Device Generator Menu ...
+Loading "/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/simplediffpair_l0_w0_n0/simplediffpair_l0p400_wf0p150_nf1.tcl" from command line.
+Warning: Calma reading is not undoable!  I hope that's OK.
+Library written using GDS-II Release 6.0
+Library name: LIB
+Reading "$$$CONTEXT_INFO$$$".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p28__2625054a".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p16__fbf0290e".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p98__52493dee".
+Reading "rectangle_gdsfactorypcomponentspshapesprectangle_S0p78__3b728210".
+Reading "Unnamed_1".
+Reading "ptap1_W0p78_L0p78_R1_C1_LAActivdrawing_LPpSDdrawing_LCC_4fcb2fed".
+Reading "nmos_bussed_l0p400_wf0p150_nf1".
+Reading "simplediffpair_l0p400_wf0p150_nf1".
+Extracting simplediffpair_l0p400_wf0p150_nf1_flat into simplediffpair_l0p400_wf0p150_nf1_flat.ext:
+simplediffpair_l0p400_wf0p150_nf1_flat: 2 warnings
+exttospice finished.

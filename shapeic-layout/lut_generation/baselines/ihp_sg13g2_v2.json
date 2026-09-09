@@ -1,0 +1,100 @@
+{
+  "format": "shapeic-physical-baseline",
+  "version": 1,
+  "pdk": "ihp-sg13g2",
+  "layout_policy": "symmetric-adjacent-with-edge-dummies-v3",
+  "source_artifacts": {
+    "magic_smoke_lut_sha256": "5350fc035216ecd8c3b3917ec6029125026b4eb86ca01b68da4d12f03693318f",
+    "full_lut_v2_sha256": "ec5e651696cdf48544d5027af4d5926f9c11187a6259cc54fec8ab3e2222aa24",
+    "ota_gds_sha256": "3f35748e3c7a393ebab98423414d39c1257c83a5326cc7030050417dc9ba8b8d",
+    "ota_pex_sha256": "7a112094ebf4047b7c19b73a3ef07ed648bd544c2f80de2346515233b18408fd",
+    "device_correction_matrices_sha256": "6dcf87f46786a078fa284680586ed4da5ccd80baa839fe621f7bd20b03e727da",
+    "ota_routing_matrices_sha256": "c37bd4aee08a431b0fb0b728ca2edb98259c91b6b2f9e269fe4e84a26c75f39a"
+  },
+  "primitive_smoke": {
+    "geometry": {
+      "length_m": 4e-7,
+      "finger_width_m": 1.5e-7,
+      "nf": 1
+    },
+    "simplediffpair": {
+      "port_order": ["DP", "DN", "GP", "GN", "S", "B"],
+      "conductance_max_abs_s": 0.0,
+      "device_correction_bias_v": {"vbs": -0.65, "vgs": 0.25, "vds": 0.35},
+      "device_capacitance_correction_f": [
+        [4.425970651039471e-17, 0.0, 0.0, 0.0, 0.0, -4.425970651039471e-17],
+        [0.0, 4.425970651039471e-17, 0.0, 0.0, 0.0, -4.425970651039471e-17],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 7.629584929317724e-15, -7.629584929317726e-15],
+        [-4.425970651039471e-17, -4.425970651039471e-17, 0.0, 0.0, -7.629584929317726e-15, 7.718104342338513e-15]
+      ],
+      "interconnect_capacitance_f": [
+        [1.0338035844161905e-16, -8.659641558380946e-18, -1.2001515287052776e-17, -5.345414662035758e-18, -7.658534418718617e-17, -7.884427469633975e-19],
+        [-8.659641558380946e-18, 1.0363035844161905e-16, -5.321515287052775e-18, -1.2025414662035759e-17, -7.683534418718618e-17, -7.884427469633975e-19],
+        [-1.2001515287052776e-17, -5.321515287052775e-18, 3.237194613263429e-16, -2.4588880725595358e-17, -2.788931369864612e-16, -2.914413040180777e-18],
+        [-5.345414662035758e-18, -1.2025414662035759e-17, -2.4588880725595358e-17, 3.213423804708436e-16, -2.764551685056765e-16, -2.9275019155001887e-18],
+        [-7.658534418718617e-17, -7.683534418718618e-17, -2.788931369864612e-16, -2.764551685056765e-16, 7.447036435301812e-16, -3.593464966367114e-17],
+        [-7.884427469633975e-19, -7.884427469633975e-19, -2.914413040180777e-18, -2.9275019155001887e-18, -3.593464966367114e-17, 4.33534501132789e-17]
+      ]
+    },
+    "currentmirror": {
+      "port_order": ["DOUT", "DREF", "S", "B"],
+      "conductance_max_abs_s": 0.0,
+      "device_correction_bias_v": {"vbs": 0.0, "vgs": -0.5, "vds": -0.5},
+      "device_capacitance_correction_f": [
+        [4.6919656613187364e-17, 0.0, 0.0, -4.6919656613187364e-17],
+        [0.0, 4.6919656613187364e-17, 0.0, -4.6919656613187364e-17],
+        [0.0, 0.0, 9.782971021337547e-15, -9.782971021337542e-15],
+        [-4.6919656613187364e-17, -4.6919656613187315e-17, -9.782971021337542e-15, 9.876810334563918e-15]
+      ],
+      "interconnect_capacitance_f": [
+        [1.4053053745904536e-16, -7.716985285325789e-17, -6.28228358606303e-17, -5.378487451571694e-19],
+        [-7.716985285325789e-17, 9.421392421180086e-16, -8.538136722140736e-16, -1.1155717050677191e-17],
+        [-6.28228358606303e-17, -8.538136722140736e-16, 9.484129396276464e-16, -3.177643155294253e-17],
+        [-5.378487451571694e-19, -1.1155717050677191e-17, -3.177643155294253e-17, 4.346999734877689e-17]
+      ]
+    }
+  },
+  "device_correction_diagnostic": {
+    "primitive": "simplediffpair",
+    "geometry": {
+      "length_m": 8e-7,
+      "finger_width_m": 8.21985e-6,
+      "nf": 2
+    },
+    "bias_v": {
+      "vbs": 0.0,
+      "vgs": 0.25,
+      "vds": 0.35
+    },
+    "matrix_relative_error": 0.000867987609708901,
+    "maximum_absolute_error_f": 9.064016207238276e-17,
+    "frequency_consistency": 1.306452858832204e-11,
+    "interpolated_charge_residual": 1.5980926770855038e-16,
+    "exact_charge_residual": 2.774258681553323e-16
+  },
+  "ota_pex": {
+    "geometry": {
+      "diffpair": {"length_m": 8e-7, "finger_width_m": 8.21985e-6, "nf": 2},
+      "currentmirror": {"length_m": 4e-7, "finger_width_m": 4.798845e-6, "nf": 1}
+    },
+    "port_order": ["VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"],
+    "transistor_count": 12,
+    "resistor_count": 0,
+    "capacitor_count": 32,
+    "routing_diagnostic": {
+      "local_capacitance_interpolation_error": {
+        "simplediffpair": 0.0004237170594519883,
+        "currentmirror": 0.0006746737861100506
+      },
+      "local_bulk_binding_delta": {
+        "simplediffpair": 0.8643270691838989,
+        "currentmirror": 0.8508998154278056
+      },
+      "lut_local_vs_full_error": 0.3877862506591322,
+      "exact_local_vs_full_error": 0.2872905523142399,
+      "routing_maximum_absolute_capacitance_f": 2.372440000000001e-15
+    }
+  }
+}

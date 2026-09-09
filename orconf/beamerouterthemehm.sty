@@ -1,0 +1,36 @@
+\mode<presentation>
+
+\defbeamertemplate*{frametitle}{hm}{
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=west,text width=29cm] at ([xshift=2.5cm,yshift=16cm]current page.south west) {\fontsize{28}{36}\selectfont \textbf{\insertframetitle}};
+  \end{tikzpicture}
+}
+
+\setbeamertemplate{footline}{
+  \ifnum \insertpagenumber>1
+  \begin{tikzpicture}[remember picture,overlay]
+
+    \node[anchor=south west] at ([xshift=2cm,yshift=1cm]current page.south west) {\includegraphics[width=2.659cm]{HM_Logo_rot_RGB}};
+
+    \node[anchor=west] at ([xshift=6cm,yshift=1.9cm]current page.south west) {
+      \parbox{22cm}{
+        \fontsize{12}{12}\selectfont \textbf{\inserttitle~--~\insertsubtitle}
+      }
+    };
+    \node[anchor=south west] at ([xshift=6cm,yshift=1cm]current page.south west) {\fontsize{10}{10}\selectfont \insertauthor~--~\insertinstitute};
+
+    \if@framenum
+        \node[anchor=south west] at ([xshift=30cm,yshift=1cm]current page.south west) {\fontsize{10}{10}\selectfont \insertframenumber};
+    \fi
+
+    \if@ccby
+    \node[anchor=west] at ([xshift=-2.7cm,yshift=1cm]current page.south east) {\large \ccCopy\hspace{0.1cm}\ccAttribution};
+    \fi
+    \if@ccbysa
+    \node[anchor=west] at ([xshift=-2.7cm,yshift=1cm]current page.south east) {\large \ccCopy\hspace{0.1cm}\ccAttribution\hspace{0.1cm}\ccShareAlike};
+    \fi
+    \end{tikzpicture}
+\fi
+}
+
+\mode<all>

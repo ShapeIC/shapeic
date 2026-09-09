@@ -35,6 +35,9 @@ impl VerificationEngine {
         for key in DYNAMIC_TEMPLATE_KEYS {
             validation_values.insert(key.to_owned(), "0".to_owned());
         }
+        for key in &config.dynamic_template_variables {
+            validation_values.insert(key.clone(), "0".to_owned());
+        }
         template::render(&template_source, &validation_values)?;
 
         Ok(Self {
@@ -251,6 +254,28 @@ fn validate_config(config: &VerificationConfig) -> Result<(), VerificationError>
             )));
         }
     }
+    for key in &config.dynamic_template_variables {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(VerificationError::InvalidConfig(
+                "dynamic template variable names must contain only ASCII letters, digits, and underscores"
+                    .to_owned(),
+            ));
+        }
+        if DYNAMIC_TEMPLATE_KEYS.contains(&key.as_str()) {
+            return Err(VerificationError::InvalidConfig(format!(
+                "dynamic template variable '{key}' is reserved"
+            )));
+        }
+        if config.template_variables.contains_key(key) {
+            return Err(VerificationError::InvalidConfig(format!(
+                "template variable '{key}' cannot be both static and dynamic"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -264,6 +289,25 @@ fn validate_inputs(
         ));
     }
     for (index, input) in inputs.iter().enumerate() {
+        let actual_variables = input
+            .dynamic_template_variables
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual_variables != config.dynamic_template_variables {
+            let missing = config
+                .dynamic_template_variables
+                .difference(&actual_variables)
+                .cloned()
+                .collect::<Vec<_>>();
+            let unexpected = actual_variables
+                .difference(&config.dynamic_template_variables)
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(VerificationError::InvalidConfig(format!(
+                "input {index} dynamic template variables do not match the configuration (missing: {missing:?}; unexpected: {unexpected:?})"
+            )));
+        }
         let point = input.operating_point;
         if !input.width.is_finite() || input.width <= 0.0 {
             return Err(VerificationError::InvalidConfig(format!(
@@ -351,6 +395,7 @@ fn render_context(
 ) -> BTreeMap<String, String> {
     let point = input.operating_point;
     let mut context = config.template_variables.clone();
+    context.extend(input.dynamic_template_variables.clone());
     context.insert("width".to_owned(), format_float(input.width));
     context.insert("nf".to_owned(), input.nf.to_string());
     context.insert("length".to_owned(), format_float(point.length));

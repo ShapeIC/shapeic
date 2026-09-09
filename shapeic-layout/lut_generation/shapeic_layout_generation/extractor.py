@@ -5,10 +5,10 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
-from .ota_pex import validate_primitive_pex
 from .reducer import reduce_first_order
 
 
@@ -28,6 +28,45 @@ class MagicPexResult:
     subcircuit_name: str
 
 
+@dataclass(frozen=True)
+class PrimitiveExtraction:
+    conductance: np.ndarray
+    capacitance: np.ndarray
+    pex: MagicPexResult
+
+
+def canonicalize_subcircuit_ports(text: str, ports: tuple[str, ...]) -> str:
+    """Rewrite one flat subcircuit header to the manifest's canonical order."""
+
+    lines = text.splitlines()
+    headers = [
+        index
+        for index, raw in enumerate(lines)
+        if raw.strip().casefold().startswith(".subckt ")
+    ]
+    if len(headers) != 1:
+        raise ValueError("PEX must contain exactly one flattened subcircuit")
+    index = headers[0]
+    fields = lines[index].split()
+    continuation_end = index + 1
+    while (
+        continuation_end < len(lines)
+        and lines[continuation_end].lstrip().startswith("+")
+    ):
+        fields.extend(lines[continuation_end].lstrip()[1:].split())
+        continuation_end += 1
+    found = tuple(fields[2:])
+    expected_keys = tuple(port.casefold() for port in ports)
+    found_keys = tuple(port.casefold() for port in found)
+    if len(found) != len(ports) or set(found_keys) != set(expected_keys):
+        raise ValueError(f"PEX ports must be {ports}, found {found}")
+    if len(set(found_keys)) != len(found_keys):
+        raise ValueError(f"PEX exposes duplicate ports: {found}")
+    lines[index:continuation_end] = [" ".join((fields[0], fields[1], *ports))]
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(lines) + suffix
+
+
 def run_magic(
     gds_path: Path,
     cell_name: str,
@@ -37,22 +76,55 @@ def run_magic(
     magic_rcfile: Path,
     work_directory: Path,
     primitive: str | None = None,
+    magic_startup_commands: tuple[str, ...] = (),
+    pex_normalizer: Callable[[str, str], str] | None = None,
+    pex_validator: Callable[[str, str], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    extraction = extract_primitive(
+        gds_path,
+        cell_name,
+        ports,
+        magic_binary=magic_binary,
+        magic_rcfile=magic_rcfile,
+        work_directory=work_directory,
+        primitive=primitive,
+        magic_startup_commands=magic_startup_commands,
+        pex_normalizer=pex_normalizer,
+        pex_validator=pex_validator,
+    )
+    return extraction.conductance, extraction.capacitance
+
+
+def extract_primitive(
+    gds_path: Path,
+    cell_name: str,
+    ports: tuple[str, ...],
+    *,
+    magic_binary: str,
+    magic_rcfile: Path,
+    work_directory: Path,
+    primitive: str | None = None,
+    magic_startup_commands: tuple[str, ...] = (),
+    pex_normalizer: Callable[[str, str], str] | None = None,
+    pex_validator: Callable[[str, str], None] | None = None,
+) -> PrimitiveExtraction:
     result = write_magic_pex(
         gds_path,
         cell_name,
         magic_binary=magic_binary,
         magic_rcfile=magic_rcfile,
         work_directory=work_directory,
+        magic_startup_commands=magic_startup_commands,
     )
     extracted_text = result.spice_path.read_text(encoding="utf-8")
-    if primitive is not None:
+    if pex_normalizer is not None:
+        if primitive is None:
+            raise ValueError("PEX normalization requires a primitive name")
+        extracted_text = pex_normalizer(extracted_text, primitive)
+    extracted_text = canonicalize_subcircuit_ports(extracted_text, ports)
+    if pex_validator is not None:
         try:
-            validate_primitive_pex(
-                extracted_text,
-                primitive,
-                expected_subcircuit=result.subcircuit_name,
-            )
+            pex_validator(extracted_text, result.subcircuit_name)
         except ValueError as error:
             raise ValueError(
                 f"{error}; preserved GDS: {gds_path.resolve()}; "
@@ -68,7 +140,7 @@ def run_magic(
             raise ValueError(
                 f"extracted port '{port}' is disconnected; check primitive routing and labels"
             )
-    return conductance, capacitance
+    return PrimitiveExtraction(conductance, capacitance, result)
 
 
 def write_magic_pex(
@@ -78,6 +150,7 @@ def write_magic_pex(
     magic_binary: str,
     magic_rcfile: Path,
     work_directory: Path,
+    magic_startup_commands: tuple[str, ...] = (),
 ) -> MagicPexResult:
     """Run Magic and preserve the flattened transistor-level PEX artifacts."""
     work_directory.mkdir(parents=True, exist_ok=True)
@@ -91,6 +164,7 @@ def write_magic_pex(
         "\n".join(
             (
                 "drc off",
+                *magic_startup_commands,
                 f"gds read {gds_path}",
                 f"load {cell_name}",
                 "select top cell",

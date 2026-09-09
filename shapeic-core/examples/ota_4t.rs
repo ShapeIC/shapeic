@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 
 use ndarray::Array2;
 use num_complex::Complex64;
+#[cfg(test)]
+use shapeic_core::analysis::AcMetrics;
 use shapeic_core::analysis::{
-    AcCompletion, AcMetrics, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
-    AnalysisTargets, TargetAssessment, TargetFailure, TargetMetric, analyze_adaptive_ac,
+    AcMetric, AcMetricSet, AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, AnalysisMode,
+    AnalysisTargets, TargetAssessment, TargetFailure, analyze_adaptive_ac,
 };
-use shapeic_layout::{LayoutError, PhysicalLookupTable, PhysicalPoint, PortAdmittance};
+use shapeic_layout::{LayoutAwareAdmittance, LayoutAwarePoint, LayoutError, PhysicalLookupTable};
 use shapeic_lut::{
     Axis, DeviceLut, Expr, LookupTable, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
     OperatingPoint,
@@ -30,7 +32,7 @@ const VDD_DC: f64 = 1.5;
 const VG_DC: f64 = 0.9;
 const SOURCE_VOLTAGE_START: f64 = 0.65;
 const SOURCE_VOLTAGE_STOP: f64 = 0.8;
-const SOURCE_VOLTAGE_POINTS: usize = 100;
+const SOURCE_VOLTAGE_POINTS: usize = 10;
 const NMOS_MODEL: &str = "sg13_lv_nmos";
 const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
@@ -210,7 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let vds = drain_source_voltages[index];
             let block = simple_diff_pair(
                 nmos,
-                &OperatingPoint::new(length, -source_voltage, vgs, vds),
+                &OperatingPoint::new(length, 0.0, vgs, vds),
                 branch_current,
             )?;
             diff_pairs.push(DiffSweepPoint {
@@ -258,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     })?;
             let gain = evaluate_ota_gain(&electrical_system)?;
             numeric_mna += stage_start.elapsed();
-            let dc_targets = ANALYSIS_TARGETS.assess_dc_gain(gain_db(gain));
+            let dc_targets = ANALYSIS_TARGETS.assess_dc_gain(Some(gain_db(gain)));
 
             let electrical_ac = if ANALYSIS_MODE.should_continue(&dc_targets) {
                 let stage_start = Instant::now();
@@ -312,7 +314,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &base_system,
                         table,
                         &diff_point.block,
+                        OperatingPoint::new(diff_point.length, 0.0, diff_point.vgs, diff_point.vds),
                         current_mirror,
+                        OperatingPoint::new(
+                            *mirror_length,
+                            0.0,
+                            VOUT_DC - VDD_DC,
+                            VOUT_DC - VDD_DC,
+                        ),
                     );
                     if let Some(duration) = physical_evaluation.as_mut() {
                         *duration += stage_start.elapsed();
@@ -489,6 +498,12 @@ fn validate_intrinsic_capacitance_parameters(model: &DeviceLut) -> Result<(), io
 }
 
 fn validate_physical_layout_policy(table: &PhysicalLookupTable) -> Result<(), io::Error> {
+    if table.metadata().format_version != 2 {
+        return Err(io::Error::other(format!(
+            "OTA layout-aware analysis requires physical LUT format v2, found v{}",
+            table.metadata().format_version
+        )));
+    }
     let found = &table.metadata().layout_policy;
     if found == PHYSICAL_LAYOUT_POLICY {
         return Ok(());
@@ -585,10 +600,13 @@ fn evaluate_layout_aware(
     base_system: &MnaResult,
     table: &PhysicalLookupTable,
     diff_pair: &SizedBlock,
+    diff_point: OperatingPoint,
     current_mirror: &SizedBlock,
+    mirror_point: OperatingPoint,
 ) -> Result<AdaptiveAcOutcome, LayoutAwareError> {
-    let diff_physical = query_physical(table, "simplediffpair", diff_pair.sizing)?;
-    let mirror_physical = query_physical(table, "currentmirror", current_mirror.sizing)?;
+    let diff_physical = query_physical(table, "simplediffpair", diff_pair.sizing, diff_point)?;
+    let mirror_physical =
+        query_physical(table, "currentmirror", current_mirror.sizing, mirror_point)?;
 
     let mut matrix = base_system.a.clone();
     stamp_physical(
@@ -603,7 +621,7 @@ fn evaluate_layout_aware(
         &mut matrix,
         base_system,
         &mirror_physical,
-        [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")],
+        current_mirror_physical_connections(),
         1.0,
     )
     .map_err(|error| LayoutAwareError::Fatal(Box::new(error)))?;
@@ -644,11 +662,12 @@ fn adaptive_policy(include_dc_target: bool) -> AdaptiveAcPolicy {
     AdaptiveAcPolicy {
         mode: ANALYSIS_MODE,
         targets,
+        metrics: AcMetricSet::ALL,
     }
 }
 
 fn diff_pair_mos_connections<'a>(gate: &'a str, drain: &'a str) -> [(&'static str, &'a str); 4] {
-    [("G", gate), ("D", drain), ("S", "IBIAS"), ("B", "VSS")]
+    [("G", gate), ("D", drain), ("S", "IBIAS"), ("B", "IBIAS")]
 }
 
 fn diff_pair_physical_connections() -> [(&'static str, &'static str); 6] {
@@ -658,8 +677,12 @@ fn diff_pair_physical_connections() -> [(&'static str, &'static str); 6] {
         ("GP", "VINP"),
         ("GN", "VINN"),
         ("S", "IBIAS"),
-        ("B", "VSS"),
+        ("B", "IBIAS"),
     ]
+}
+
+fn current_mirror_physical_connections() -> [(&'static str, &'static str); 4] {
+    [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")]
 }
 
 fn stamp_compact_model_devices(
@@ -738,14 +761,18 @@ fn query_physical(
     table: &PhysicalLookupTable,
     primitive: &str,
     sizing: SizingSummary,
-) -> Result<PortAdmittance, LayoutAwareError> {
+    point: OperatingPoint,
+) -> Result<LayoutAwareAdmittance, LayoutAwareError> {
     let model = table
         .primitive(primitive)
         .map_err(|error| LayoutAwareError::Fatal(Box::new(error)))?;
-    match model.query(PhysicalPoint::new(
+    match model.query_layout_aware(LayoutAwarePoint::new(
         sizing.length,
         sizing.finger_width,
         sizing.nf,
+        point.vbs,
+        point.vgs,
+        point.vds,
     )) {
         Ok(value) => Ok(value),
         Err(LayoutError::OutOfPhysicalRange { axis, value, .. }) => Err(
@@ -762,7 +789,7 @@ fn query_physical(
 fn stamp_physical<const N: usize>(
     matrix: &mut Matrix<AtomField>,
     system: &MnaResult,
-    admittance: &PortAdmittance,
+    admittance: &LayoutAwareAdmittance,
     connections: [(&str, &str); N],
     capacitance_scale: f64,
 ) -> Result<(), io::Error> {
@@ -771,14 +798,14 @@ fn stamp_physical<const N: usize>(
         .map(|(port, node)| (port.to_owned(), node.to_owned()))
         .collect::<BTreeMap<_, _>>();
     let normalized_capacitance = admittance
-        .capacitance
+        .total_capacitance()
         .mapv(|value| value * capacitance_scale);
     stamp_port_admittance(
         matrix,
         &system.nodes,
         &admittance.ports,
         &connections,
-        admittance.conductance.view(),
+        admittance.interconnect_conductance.view(),
         normalized_capacitance.view(),
     )
     .map_err(|error| io::Error::other(format!("could not stamp physical primitive: {error:?}")))
@@ -992,7 +1019,7 @@ fn ac_metrics_from_responses(
         (None, None)
     };
     AcMetrics {
-        dc_gain_db,
+        dc_gain_db: Some(dc_gain_db),
         bandwidth_3db_hz,
         unity_gain_hz,
         phase_margin_deg,
@@ -1316,7 +1343,7 @@ fn print_electrical_ac_table(results: &[SweepResult]) {
 
 fn print_physical_table(results: &[SweepResult]) {
     print_ac_table_header(
-        "Layout-aware AC (intrinsic + compact-model extrinsic + physical parasitics)",
+        "Layout-aware AC (electrical capacitance + interconnect + device correction)",
     );
     for result in results {
         let Some(physical) = &result.physical else {
@@ -1351,12 +1378,7 @@ fn print_ac_table_header(title: &str) {
 fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<AdaptiveAcOutcome>) {
     match evaluation {
         StageEvaluation::Evaluated { value, targets } => {
-            print_ac_metrics_row(
-                result,
-                value.metrics,
-                value.completion,
-                &format_target_assessment(targets),
-            );
+            print_ac_metrics_row(result, value, &format_target_assessment(targets));
         }
         StageEvaluation::Skipped { reason } => {
             print_empty_ac_row(result, &format!("skipped: {}", reason.label()));
@@ -1367,14 +1389,10 @@ fn print_ac_evaluation_row(result: &SweepResult, evaluation: &StageEvaluation<Ad
     }
 }
 
-fn print_ac_metrics_row(
-    result: &SweepResult,
-    metrics: AcMetrics,
-    completion: AcCompletion,
-    status: &str,
-) {
+fn print_ac_metrics_row(result: &SweepResult, outcome: &AdaptiveAcOutcome, status: &str) {
+    let metrics = outcome.metrics;
     println!(
-        "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11.3} | {:>11} | {:>11} | {:>9} | {status}",
+        "{:>9.3} | {:>9.3} | {:>7.3} | {:>9.3} | {:>5} | {:>9.3} | {:>5} | {:>11} | {:>11} | {:>11} | {:>9} | {status}",
         result.diff_length * 1.0e6,
         result.mirror_length * 1.0e6,
         result.source_voltage,
@@ -1382,23 +1400,28 @@ fn print_ac_metrics_row(
         result.diff_pair.nf,
         result.current_mirror.finger_width * 1.0e6,
         result.current_mirror.nf,
-        metrics.dc_gain_db,
+        format_adaptive_metric(
+            metrics.dc_gain_db,
+            outcome,
+            AcMetric::DcGainDb,
+            format_optional,
+        ),
         format_adaptive_metric(
             metrics.bandwidth_3db_hz,
-            completion,
-            TargetMetric::Bandwidth3DbHz,
+            outcome,
+            AcMetric::Bandwidth3DbHz,
             format_frequency,
         ),
         format_adaptive_metric(
             metrics.unity_gain_hz,
-            completion,
-            TargetMetric::UnityGainHz,
+            outcome,
+            AcMetric::UnityGainHz,
             format_frequency,
         ),
         format_adaptive_metric(
             metrics.phase_margin_deg,
-            completion,
-            TargetMetric::PhaseMarginDeg,
+            outcome,
+            AcMetric::PhaseMarginDeg,
             format_optional,
         ),
     );
@@ -1457,7 +1480,8 @@ fn print_ac_delta_table(results: &[SweepResult]) {
             ) => (
                 format!(
                     "{:.3}",
-                    physical.metrics.dc_gain_db - electrical.metrics.dc_gain_db
+                    option_difference(electrical.metrics.dc_gain_db, physical.metrics.dc_gain_db)
+                        .expect("complete AC analyses must include DC gain")
                 ),
                 format_optional(relative_change_percent(
                     electrical.metrics.bandwidth_3db_hz,
@@ -1544,10 +1568,10 @@ fn format_target_failure(failure: &TargetFailure) -> String {
     )
 }
 
-fn format_metric_value(metric: TargetMetric, value: f64) -> String {
+fn format_metric_value(metric: AcMetric, value: f64) -> String {
     match metric {
-        TargetMetric::Bandwidth3DbHz | TargetMetric::UnityGainHz => format!("{value:.3e}"),
-        TargetMetric::DcGainDb | TargetMetric::PhaseMarginDeg => format!("{value:.3}"),
+        AcMetric::Bandwidth3DbHz | AcMetric::UnityGainHz => format!("{value:.3e}"),
+        AcMetric::DcGainDb | AcMetric::PhaseMarginDeg => format!("{value:.3}"),
     }
 }
 
@@ -1573,11 +1597,11 @@ fn format_optional(value: Option<f64>) -> String {
 
 fn format_adaptive_metric(
     value: Option<f64>,
-    completion: AcCompletion,
-    metric: TargetMetric,
+    outcome: &AdaptiveAcOutcome,
+    metric: AcMetric,
     formatter: fn(Option<f64>) -> String,
 ) -> String {
-    if completion.metric_evaluated(metric) {
+    if outcome.metric_evaluated(metric) {
         formatter(value)
     } else {
         "not eval".to_owned()
@@ -1658,7 +1682,8 @@ mod tests {
         AC_MAX_HZ, AC_MIN_HZ, AC_POINTS_PER_DECADE, ANALYSIS_TARGETS, AcMetrics,
         SOURCE_VOLTAGE_POINTS, SOURCE_VOLTAGE_START, SOURCE_VOLTAGE_STOP, SkipReason, StageCounts,
         StageEvaluation, VG_DC, VOUT_DC, ac_frequencies, ac_metrics_from_responses,
-        combined_capacitance_matrix, count_stage, crossing_frequency, diff_pair_mos_connections,
+        combined_capacitance_matrix, count_stage, crossing_frequency,
+        current_mirror_physical_connections, diff_pair_mos_connections,
         diff_pair_physical_connections, format_target_assessment, gain_db, linspace,
         missing_intrinsic_capacitance_parameters, normalize_voltage, option_difference,
         relative_change_percent, select_dc_response,
@@ -1711,17 +1736,24 @@ mod tests {
     }
 
     #[test]
-    fn compact_model_diff_pair_bulk_is_connected_to_vss() {
+    fn compact_model_diff_pair_bulk_is_connected_to_source() {
         let connections = diff_pair_mos_connections("VINP", "VOUT");
         assert_eq!(connections[2], ("S", "IBIAS"));
-        assert_eq!(connections[3], ("B", "VSS"));
+        assert_eq!(connections[3], ("B", "IBIAS"));
     }
 
     #[test]
-    fn physical_diff_pair_bulk_is_connected_to_vss() {
+    fn physical_diff_pair_bulk_is_connected_to_source() {
         let connections = diff_pair_physical_connections();
         assert_eq!(connections[4], ("S", "IBIAS"));
-        assert_eq!(connections[5], ("B", "VSS"));
+        assert_eq!(connections[5], ("B", "IBIAS"));
+    }
+
+    #[test]
+    fn physical_current_mirror_source_and_bulk_are_connected_to_vdd() {
+        let connections = current_mirror_physical_connections();
+        assert_eq!(connections[2], ("S", "VDD"));
+        assert_eq!(connections[3], ("B", "VDD"));
     }
 
     #[test]
@@ -1835,7 +1867,7 @@ mod tests {
             .collect::<Vec<_>>();
         let metrics = ac_metrics_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
 
-        assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
+        assert!((metrics.dc_gain_db.unwrap() - 20.0).abs() < 1.0e-12);
         let bandwidth = metrics.bandwidth_3db_hz.unwrap();
         assert!((bandwidth / pole_hz - 1.0).abs() < 0.01);
         assert!(metrics.unity_gain_hz.is_some());
@@ -1848,11 +1880,11 @@ mod tests {
         let evaluations = [
             StageEvaluation::Evaluated {
                 value: (),
-                targets: AnalysisTargets::NONE.assess_dc_gain(0.0),
+                targets: AnalysisTargets::NONE.assess_dc_gain(Some(0.0)),
             },
             StageEvaluation::Evaluated {
                 value: (),
-                targets: ANALYSIS_TARGETS.assess_dc_gain(10.0),
+                targets: ANALYSIS_TARGETS.assess_dc_gain(Some(10.0)),
             },
             StageEvaluation::Skipped {
                 reason: SkipReason::DcTargets,
@@ -1880,12 +1912,12 @@ mod tests {
             .min_dc_gain_db
             .expect("example configures a DC gain target");
         assert_eq!(
-            format_target_assessment(&ANALYSIS_TARGETS.assess_dc_gain(19.0)),
+            format_target_assessment(&ANALYSIS_TARGETS.assess_dc_gain(Some(19.0))),
             format!("fail: GainDC=19.000<{gain_target:.3}")
         );
 
         let metrics = AcMetrics {
-            dc_gain_db: 20.0,
+            dc_gain_db: Some(20.0),
             bandwidth_3db_hz: Some(100.0e6),
             unity_gain_hz: None,
             phase_margin_deg: Some(45.0),

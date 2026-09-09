@@ -10,7 +10,7 @@
 //! let table = LookupTable::open("nmos.npz")?;
 //! let model = table.model("sg13_lv_nmos")?;
 //! let point = OperatingPoint::new(0.4e-6, 0.0, 0.6, 0.6);
-//! let gmid = model.standard_expression(MosExpression::GmOverId)?;
+//! let gmid = model.standard_expression(MosExpression::Gmid)?;
 //! let value = model.query_expression(&point, &gmid)?;
 //! # let _ = value;
 //! # Ok::<(), shapeic_lut::LutError>(())
@@ -35,7 +35,7 @@
 //! [`DeviceLut::size_for_current`] selects a per-finger width and integer finger count for a
 //! requested total current. Any expressions passed to it are returned as per-finger values.
 
-#![warn(missing_docs)]
+//#![warn(missing_docs)]
 
 mod array;
 mod error;

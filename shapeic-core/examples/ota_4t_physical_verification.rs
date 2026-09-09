@@ -4,7 +4,7 @@ mod analysis;
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,13 +31,50 @@ const PMOS_MODEL: &str = "sg13_lv_pmos";
 const PHYSICAL_LAYOUT_POLICY: &str = "symmetric-adjacent-with-edge-dummies-v3";
 const PEX_PORTS: [&str; 6] = ["VOUT", "VINP", "VINN", "IBIAS", "VDD", "VSS"];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum VerificationReference {
+    #[default]
+    SourceTiedBulk,
+    HistoricalVssBulk,
+}
+
+impl VerificationReference {
+    const fn diff_vbs(self) -> f64 {
+        match self {
+            Self::SourceTiedBulk => 0.0,
+            Self::HistoricalVssBulk => -SOURCE_VOLTAGE,
+        }
+    }
+
+    const fn mna_bulk_node(self) -> &'static str {
+        match self {
+            Self::SourceTiedBulk => "IBIAS",
+            Self::HistoricalVssBulk => "VSS",
+        }
+    }
+
+    const fn pex_bulk_node(self) -> &'static str {
+        match self {
+            Self::SourceTiedBulk => "IBIAS",
+            Self::HistoricalVssBulk => "0",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SourceTiedBulk => "source-tied NMOS bulk (VBS=0)",
+            Self::HistoricalVssBulk => "historical VSS-tied NMOS bulk",
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let (nmos_path, pmos_path, physical_path, physical_config) = input_paths()?;
+    let (nmos_path, pmos_path, physical_path, physical_config, reference) = input_paths()?;
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let output_root = unique_output_root(manifest)?;
     let diff_point = OperatingPoint::new(
         DIFF_LENGTH,
-        -SOURCE_VOLTAGE,
+        reference.diff_vbs(),
         VG_DC - SOURCE_VOLTAGE,
         VOUT_DC - SOURCE_VOLTAGE,
     );
@@ -54,6 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         diff_point,
         mirror_point,
         TAIL_CURRENT / 2.0,
+        reference.mna_bulk_node(),
         &manifest.join("examples/ota_4t"),
         &output_root.join("mna"),
     )?;
@@ -68,6 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         physical.current_mirror,
     )?;
 
+    println!("Verification reference: {}", reference.label());
     print_sizing(&physical, diff_point, mirror_point);
     print_pex(&pex);
     let mut input = VerificationInput::new(
@@ -91,6 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         manifest,
         &output_root,
         &pex,
+        reference,
         references.has_loop_metrics(),
     ))?;
     let report = engine.verify_one(&input)?;
@@ -161,7 +201,7 @@ fn comparison_metrics(metrics: AcMetrics) -> Result<ComparisonMetrics, io::Error
         ));
     }
     Ok(ComparisonMetrics {
-        dc_gain_db: metrics.dc_gain_db,
+        dc_gain_db: metrics.dc_gain_db.ok_or_else(|| missing("DC gain"))?,
         bandwidth_3db_hz: metrics
             .bandwidth_3db_hz
             .ok_or_else(|| missing("the -3 dB bandwidth"))?,
@@ -327,6 +367,7 @@ fn verification_config(
     manifest: &Path,
     output_root: &Path,
     pex: &PexManifest,
+    reference: VerificationReference,
     include_loop_metrics: bool,
 ) -> VerificationConfig {
     let sstadex_root = manifest.join("../../SSTADEX-prev");
@@ -354,6 +395,7 @@ fn verification_config(
     )
     .template_variable("pex_path", pex.pex_path.display().to_string())
     .template_variable("pex_subcircuit", pex.subcircuit_name.clone())
+    .template_variable("diff_bulk_node", reference.pex_bulk_node())
     .template_variable("tail_current", format_float(TAIL_CURRENT))
     .template_variable("vdd_dc", format_float(VDD_DC))
     .template_variable("vg_dc", format_float(VG_DC))
@@ -403,6 +445,12 @@ fn validate_finger_width(primitive: &str, sizing: SizingSummary) -> Result<(), i
 }
 
 fn validate_physical_layout_policy(table: &PhysicalLookupTable) -> Result<(), io::Error> {
+    if table.metadata().format_version != 2 {
+        return Err(io::Error::other(format!(
+            "OTA physical verification requires physical LUT format v2, found v{}",
+            table.metadata().format_version
+        )));
+    }
     let found = &table.metadata().layout_policy;
     if found == PHYSICAL_LAYOUT_POLICY {
         return Ok(());
@@ -461,7 +509,7 @@ fn print_pex(pex: &PexManifest) {
     );
 }
 
-fn input_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), io::Error> {
+fn input_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, VerificationReference), io::Error> {
     let mut arguments = env::args_os();
     let executable = arguments
         .next()
@@ -470,7 +518,8 @@ fn input_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), io::Error> {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "usage: {} <nmos-5d.npz> <pmos-5d.npz> <physical.npz> <physical-config.toml>",
+                "usage: {} <nmos-5d.npz> <pmos-5d.npz> <physical.npz> \
+                 <physical-config.toml> [--historical-reference]",
                 Path::new(&executable).display()
             ),
         )
@@ -479,10 +528,23 @@ fn input_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), io::Error> {
     let pmos = arguments.next().ok_or_else(&usage)?;
     let physical = arguments.next().ok_or_else(&usage)?;
     let config = arguments.next().ok_or_else(&usage)?;
+    let reference = match arguments.next() {
+        None => VerificationReference::SourceTiedBulk,
+        Some(flag) if flag == OsStr::new("--historical-reference") => {
+            VerificationReference::HistoricalVssBulk
+        }
+        Some(_) => return Err(usage()),
+    };
     if arguments.next().is_some() {
         return Err(usage());
     }
-    Ok((nmos.into(), pmos.into(), physical.into(), config.into()))
+    Ok((
+        nmos.into(),
+        pmos.into(),
+        physical.into(),
+        config.into(),
+        reference,
+    ))
 }
 
 fn unique_output_root(manifest: &Path) -> Result<PathBuf, std::time::SystemTimeError> {
@@ -501,14 +563,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_diff_pair_uses_vss_bulk() {
+    fn verification_references_define_consistent_bulk_nodes() {
+        let current = VerificationReference::SourceTiedBulk;
+        assert_eq!(current.diff_vbs(), 0.0);
+        assert_eq!(current.mna_bulk_node(), "IBIAS");
+        assert_eq!(current.pex_bulk_node(), "IBIAS");
+
+        let historical = VerificationReference::HistoricalVssBulk;
+        assert_eq!(historical.diff_vbs(), -SOURCE_VOLTAGE);
+        assert_eq!(historical.mna_bulk_node(), "VSS");
+        assert_eq!(historical.pex_bulk_node(), "0");
+
         let point = OperatingPoint::new(
             DIFF_LENGTH,
-            -SOURCE_VOLTAGE,
+            current.diff_vbs(),
             VG_DC - SOURCE_VOLTAGE,
             VOUT_DC - SOURCE_VOLTAGE,
         );
-        assert!((point.vbs + 0.65).abs() < 1.0e-12);
+        assert_eq!(point.vbs, 0.0);
         assert!((point.vgs - 0.25).abs() < 1.0e-12);
         assert!((point.vds - 0.35).abs() < 1.0e-12);
     }
@@ -566,13 +638,29 @@ mod tests {
             manifest.join("examples/ota_4t_physical_verification/ihp_sg13g2_pex.spice"),
         )
         .expect("physical verification template");
+        assert!(
+            template
+                .contains("XOTA VOUT VINP VINN IBIAS VDD {{diff_bulk_node}} {{pex_subcircuit}}")
+        );
         assert!(template.contains("let loop_response = -v(VOUT)"));
         assert!(template.contains("let phase_deg = 180 / pi * cph(loop_response)"));
         assert!(optional_ac_measurements(true).contains("180 + phase_at_unity"));
 
-        let config = verification_config(manifest, Path::new("unused-output"), &pex, false);
+        let config = verification_config(
+            manifest,
+            Path::new("unused-output"),
+            &pex,
+            VerificationReference::SourceTiedBulk,
+            false,
+        );
         VerificationEngine::new(config).expect("valid physical verification template");
-        let config = verification_config(manifest, Path::new("unused-output"), &pex, true);
+        let config = verification_config(
+            manifest,
+            Path::new("unused-output"),
+            &pex,
+            VerificationReference::HistoricalVssBulk,
+            true,
+        );
         VerificationEngine::new(config)
             .expect("valid physical verification template with loop metrics");
     }

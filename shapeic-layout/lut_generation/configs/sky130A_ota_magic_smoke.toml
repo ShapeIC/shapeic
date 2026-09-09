@@ -1,0 +1,45 @@
+primitives = ["simplediffpair", "currentmirror"]
+
+[cellkit]
+root = "../../../shapeic-cellkit"
+
+[pdk]
+root = "${PDK_ROOT}"
+name = "${PDK}"
+
+[electrical_models]
+nmos = "../../../shapeic-lut/lut_generation/configs/sky130A_1v8_nmos.toml"
+pmos = "../../../shapeic-lut/lut_generation/configs/sky130A_1v8_pmos.toml"
+
+[output]
+path = "../generated/sky130A_ota_physical_cellkit_v2_magic_smoke.npz"
+
+[sweep]
+length = [0.4]
+finger_width = [0.42]
+nf = [1, 2]
+
+[physical]
+backend = "magic"
+magic_binary = "magic"
+work_directory = "../work-cellkit-sky130-v2-magic-smoke"
+keep_work = true
+
+[device_capacitance_correction]
+backend = "ngspice"
+nf = [1, 2]
+binary = "ngspice"
+temperature_c = 27.0
+workers = 4
+frequencies_hz = [1.0e6, 1.0e7]
+frequency_consistency = 0.01
+
+[device_capacitance_correction.simplediffpair]
+vbs = [0.0]
+vgs = [0.8]
+vds = [0.7]
+
+[device_capacitance_correction.currentmirror]
+vbs = [0.0]
+vgs = [-0.8]
+vds = [-0.8]

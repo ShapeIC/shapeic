@@ -11,7 +11,7 @@ pub use shapeic_core::analysis::AcMetrics;
 use shapeic_core::analysis::{
     AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, analyze_adaptive_ac,
 };
-use shapeic_layout::{PhysicalLookupTable, PhysicalPoint, PortAdmittance};
+use shapeic_layout::{LayoutAwareAdmittance, LayoutAwarePoint, PhysicalLookupTable};
 use shapeic_lut::{
     CurrentSizingResult, DeviceLut, Expr, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
     OperatingPoint,
@@ -120,6 +120,57 @@ pub struct PhysicalAnalysis {
     pub ac_sweep: AcSweep,
 }
 
+#[derive(Clone, Debug)]
+pub struct OtaInterconnectMatrices {
+    exact_bound_conductance: Array2<f64>,
+    exact_bound_capacitance: Array2<f64>,
+    full_ota_conductance: Array2<f64>,
+    full_ota_capacitance: Array2<f64>,
+}
+
+impl OtaInterconnectMatrices {
+    pub fn new(
+        exact_bound_conductance: Array2<f64>,
+        exact_bound_capacitance: Array2<f64>,
+        full_ota_conductance: Array2<f64>,
+        full_ota_capacitance: Array2<f64>,
+    ) -> Result<Self, io::Error> {
+        for (name, matrix) in [
+            ("exact bound conductance", &exact_bound_conductance),
+            ("exact bound capacitance", &exact_bound_capacitance),
+            ("full OTA conductance", &full_ota_conductance),
+            ("full OTA capacitance", &full_ota_capacitance),
+        ] {
+            if matrix.shape() != [OTA_INTERCONNECT_NODES.len(), OTA_INTERCONNECT_NODES.len()]
+                || !matrix.iter().all(|value| value.is_finite())
+            {
+                return Err(io::Error::other(format!(
+                    "{name} must be a finite {}x{} matrix",
+                    OTA_INTERCONNECT_NODES.len(),
+                    OTA_INTERCONNECT_NODES.len(),
+                )));
+            }
+        }
+        Ok(Self {
+            exact_bound_conductance,
+            exact_bound_capacitance,
+            full_ota_conductance,
+            full_ota_capacitance,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PhysicalMnaDiagnostic {
+    pub diff_pair: SizingSummary,
+    pub current_mirror: SizingSummary,
+    pub lut_current: AcMetrics,
+    pub exact_bound_local: AcMetrics,
+    pub full_ota_interconnect: AcMetrics,
+}
+
+pub const OTA_INTERCONNECT_NODES: [&str; 6] = ["VOUT", "N1", "VINP", "VINN", "IBIAS", "VDD"];
+
 struct EvaluatedAc {
     metrics: AcMetrics,
     sweep: AcSweep,
@@ -190,6 +241,7 @@ pub fn analyze_physical(
     diff_point: OperatingPoint,
     mirror_point: OperatingPoint,
     branch_current: f64,
+    diff_bulk_node: &str,
     spice_dir: &Path,
     mna_output_dir: &Path,
 ) -> Result<PhysicalAnalysis, Box<dyn Error>> {
@@ -198,8 +250,13 @@ pub fn analyze_physical(
 
     let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
     let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
-    let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing)?;
-    let mirror_physical = query_physical(physical, "currentmirror", current_mirror.sizing)?;
+    let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing, diff_point)?;
+    let mirror_physical = query_physical(
+        physical,
+        "currentmirror",
+        current_mirror.sizing,
+        mirror_point,
+    )?;
     let system = mna(spice_dir, mna_output_dir, "ota_4t")
         .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
     let ac = evaluate_physical_ac(
@@ -208,6 +265,7 @@ pub fn analyze_physical(
         &current_mirror,
         &diff_physical,
         &mirror_physical,
+        diff_bulk_node,
     )?;
 
     Ok(PhysicalAnalysis {
@@ -215,6 +273,75 @@ pub fn analyze_physical(
         current_mirror: current_mirror.sizing,
         metrics: ac.metrics,
         ac_sweep: ac.sweep,
+    })
+}
+
+pub fn analyze_physical_mna_diagnostic(
+    nmos: &DeviceLut,
+    pmos: &DeviceLut,
+    physical: &PhysicalLookupTable,
+    diff_point: OperatingPoint,
+    mirror_point: OperatingPoint,
+    branch_current: f64,
+    diff_bulk_node: &str,
+    interconnect: &OtaInterconnectMatrices,
+    spice_dir: &Path,
+    mna_output_dir: &Path,
+) -> Result<PhysicalMnaDiagnostic, Box<dyn Error>> {
+    validate_capacitance_parameters(nmos)?;
+    validate_capacitance_parameters(pmos)?;
+
+    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
+    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing, diff_point)?;
+    let mirror_physical = query_physical(
+        physical,
+        "currentmirror",
+        current_mirror.sizing,
+        mirror_point,
+    )?;
+    let system = mna(spice_dir, mna_output_dir, "ota_4t")
+        .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
+    let lut_current = evaluate_numeric_physical_ac(
+        &system,
+        &diff_pair,
+        &current_mirror,
+        &diff_physical,
+        &mirror_physical,
+        diff_bulk_node,
+        None,
+    )?;
+    let exact_bound_local = evaluate_numeric_physical_ac(
+        &system,
+        &diff_pair,
+        &current_mirror,
+        &diff_physical,
+        &mirror_physical,
+        diff_bulk_node,
+        Some((
+            &interconnect.exact_bound_conductance,
+            &interconnect.exact_bound_capacitance,
+        )),
+    )?;
+    let full_ota_interconnect = evaluate_numeric_physical_ac(
+        &system,
+        &diff_pair,
+        &current_mirror,
+        &diff_physical,
+        &mirror_physical,
+        diff_bulk_node,
+        Some((
+            &interconnect.full_ota_conductance,
+            &interconnect.full_ota_capacitance,
+        )),
+    )?;
+
+    Ok(PhysicalMnaDiagnostic {
+        diff_pair: diff_pair.sizing,
+        current_mirror: current_mirror.sizing,
+        lut_current: lut_current.metrics,
+        exact_bound_local: exact_bound_local.metrics,
+        full_ota_interconnect: full_ota_interconnect.metrics,
     })
 }
 
@@ -325,29 +452,29 @@ fn evaluate_physical_ac(
     system: &MnaResult,
     diff_pair: &SizedBlock,
     current_mirror: &SizedBlock,
-    diff_physical: &PortAdmittance,
-    mirror_physical: &PortAdmittance,
+    diff_physical: &LayoutAwareAdmittance,
+    mirror_physical: &LayoutAwareAdmittance,
+    diff_bulk_node: &str,
 ) -> Result<EvaluatedAc, io::Error> {
     let mut matrix = system.a.clone();
-    stamp_device_capacitances(&mut matrix, system, diff_pair, current_mirror, "VSS")?;
+    stamp_device_capacitances(
+        &mut matrix,
+        system,
+        diff_pair,
+        current_mirror,
+        diff_bulk_node,
+    )?;
     stamp_physical_admittance(
         &mut matrix,
         system,
         diff_physical,
-        [
-            ("DP", "VOUT"),
-            ("DN", "N1"),
-            ("GP", "VINP"),
-            ("GN", "VINN"),
-            ("S", "IBIAS"),
-            ("B", "VSS"),
-        ],
+        diff_pair_physical_connections(diff_bulk_node),
     )?;
     stamp_physical_admittance(
         &mut matrix,
         system,
         mirror_physical,
-        [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")],
+        current_mirror_physical_connections(),
     )?;
     let parameters = diff_pair
         .parameters
@@ -356,6 +483,50 @@ fn evaluate_physical_ac(
         .cloned()
         .collect::<Vec<_>>();
     evaluate_numeric_ac(&matrix, system, &parameters)
+}
+
+fn evaluate_numeric_physical_ac(
+    system: &MnaResult,
+    diff_pair: &SizedBlock,
+    current_mirror: &SizedBlock,
+    diff_physical: &LayoutAwareAdmittance,
+    mirror_physical: &LayoutAwareAdmittance,
+    diff_bulk_node: &str,
+    interconnect_override: Option<(&Array2<f64>, &Array2<f64>)>,
+) -> Result<EvaluatedAc, io::Error> {
+    let mut numeric = electrical_numeric_mna(system, diff_pair, current_mirror, diff_bulk_node)?;
+    match interconnect_override {
+        None => {
+            stamp_numeric_physical_admittance(
+                &mut numeric,
+                diff_physical,
+                diff_pair_physical_connections(diff_bulk_node),
+                true,
+            )?;
+            stamp_numeric_physical_admittance(
+                &mut numeric,
+                mirror_physical,
+                current_mirror_physical_connections(),
+                true,
+            )?;
+        }
+        Some((conductance, capacitance)) => {
+            stamp_numeric_physical_admittance(
+                &mut numeric,
+                diff_physical,
+                diff_pair_physical_connections(diff_bulk_node),
+                false,
+            )?;
+            stamp_numeric_physical_admittance(
+                &mut numeric,
+                mirror_physical,
+                current_mirror_physical_connections(),
+                false,
+            )?;
+            stamp_numeric_ota_interconnect(&mut numeric, conductance, capacitance)?;
+        }
+    }
+    evaluate_dense_numeric_ac(&numeric)
 }
 
 fn ota_parameter_values(
@@ -381,12 +552,33 @@ fn query_physical(
     table: &PhysicalLookupTable,
     primitive: &str,
     sizing: SizingSummary,
-) -> Result<PortAdmittance, Box<dyn Error>> {
-    Ok(table.primitive(primitive)?.query(PhysicalPoint::new(
-        sizing.length,
-        sizing.finger_width,
-        sizing.nf,
-    ))?)
+    point: OperatingPoint,
+) -> Result<LayoutAwareAdmittance, Box<dyn Error>> {
+    Ok(table
+        .primitive(primitive)?
+        .query_layout_aware(LayoutAwarePoint::new(
+            sizing.length,
+            sizing.finger_width,
+            sizing.nf,
+            point.vbs,
+            point.vgs,
+            point.vds,
+        ))?)
+}
+
+fn diff_pair_physical_connections<'a>(bulk: &'a str) -> [(&'static str, &'a str); 6] {
+    [
+        ("DP", "VOUT"),
+        ("DN", "N1"),
+        ("GP", "VINP"),
+        ("GN", "VINN"),
+        ("S", "IBIAS"),
+        ("B", bulk),
+    ]
+}
+
+fn current_mirror_physical_connections() -> [(&'static str, &'static str); 4] {
+    [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD")]
 }
 
 fn diff_pair_connections<'a>(
@@ -469,7 +661,7 @@ fn stamp_numeric_device_capacitances(
 fn stamp_physical_admittance<const N: usize>(
     matrix: &mut Matrix<symbolica::domains::atom::AtomField>,
     system: &MnaResult,
-    admittance: &PortAdmittance,
+    admittance: &LayoutAwareAdmittance,
     connections: [(&str, &str); N],
 ) -> Result<(), io::Error> {
     let connections = connections
@@ -477,14 +669,14 @@ fn stamp_physical_admittance<const N: usize>(
         .map(|(port, node)| (port.to_owned(), node.to_owned()))
         .collect::<BTreeMap<_, _>>();
     let capacitance = admittance
-        .capacitance
+        .total_capacitance()
         .mapv(|value| value * AC_S_NORMALIZATION);
     stamp_port_admittance(
         matrix,
         &system.nodes,
         &admittance.ports,
         &connections,
-        admittance.conductance.view(),
+        admittance.interconnect_conductance.view(),
         capacitance.view(),
     )
     .map_err(|error| {
@@ -492,6 +684,59 @@ fn stamp_physical_admittance<const N: usize>(
             "could not stamp physical primitive admittance: {error:?}"
         ))
     })
+}
+
+fn stamp_numeric_physical_admittance<const N: usize>(
+    system: &mut NumericMnaSystem,
+    admittance: &LayoutAwareAdmittance,
+    connections: [(&str, &str); N],
+    include_interconnect: bool,
+) -> Result<(), io::Error> {
+    let connections = connections
+        .into_iter()
+        .map(|(port, node)| (port.to_owned(), node.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let conductance = if include_interconnect {
+        admittance.interconnect_conductance.clone()
+    } else {
+        Array2::zeros(admittance.interconnect_conductance.raw_dim())
+    };
+    let capacitance = if include_interconnect {
+        admittance.total_capacitance()
+    } else {
+        admittance.device_capacitance_correction.clone()
+    };
+    system
+        .stamp_port_admittance(
+            &admittance.ports,
+            &connections,
+            conductance.view(),
+            capacitance.view(),
+        )
+        .map_err(|error| {
+            io::Error::other(format!(
+                "could not stamp numerical physical primitive admittance: {error}"
+            ))
+        })
+}
+
+fn stamp_numeric_ota_interconnect(
+    system: &mut NumericMnaSystem,
+    conductance: &Array2<f64>,
+    capacitance: &Array2<f64>,
+) -> Result<(), io::Error> {
+    let ports = OTA_INTERCONNECT_NODES.map(str::to_owned).to_vec();
+    let connections = ports
+        .iter()
+        .map(|node| (node.clone(), node.clone()))
+        .collect::<BTreeMap<_, _>>();
+    system
+        .stamp_port_admittance(&ports, &connections, conductance.view(), capacitance.view())
+        .map_err(|error| {
+            io::Error::other(format!(
+                "could not stamp numerical OTA interconnect: {error}"
+            ))
+        })
 }
 
 fn stamp_device_capacitance<const N: usize>(
@@ -829,7 +1074,7 @@ fn solve_numeric_mna(
 fn ota_output_row(system: &MnaResult) -> Result<usize, io::Error> {
     let node = system
         .nodes
-        .nodes
+        .nodes()
         .get("VOUT")
         .copied()
         .ok_or_else(|| io::Error::other("OTA MNA has no VOUT node"))?;
@@ -896,7 +1141,7 @@ fn ac_from_responses(
 
     EvaluatedAc {
         metrics: AcMetrics {
-            dc_gain_db,
+            dc_gain_db: Some(dc_gain_db),
             bandwidth_3db_hz,
             unity_gain_hz,
             phase_margin_deg,
@@ -982,10 +1227,29 @@ mod tests {
     }
 
     #[test]
-    fn physical_diff_pair_bulk_is_connected_to_vss() {
-        let connections = diff_pair_connections("VINP", "VOUT", "VSS");
+    fn physical_diff_pair_bulk_is_connected_to_source() {
+        let connections = diff_pair_connections("VINP", "VOUT", "IBIAS");
         assert_eq!(connections[2], ("S", "IBIAS"));
-        assert_eq!(connections[3], ("B", "VSS"));
+        assert_eq!(connections[3], ("B", "IBIAS"));
+    }
+
+    #[test]
+    fn physical_primitive_ports_match_the_validated_ota_connections() {
+        assert_eq!(
+            diff_pair_physical_connections("IBIAS"),
+            [
+                ("DP", "VOUT"),
+                ("DN", "N1"),
+                ("GP", "VINP"),
+                ("GN", "VINN"),
+                ("S", "IBIAS"),
+                ("B", "IBIAS"),
+            ]
+        );
+        assert_eq!(
+            current_mirror_physical_connections(),
+            [("DOUT", "VOUT"), ("DREF", "N1"), ("S", "VDD"), ("B", "VDD"),]
+        );
     }
 
     #[test]
@@ -1051,7 +1315,7 @@ mod tests {
         let ac = ac_from_responses(&frequencies, &responses, Complex::new(-10.0, 0.0));
         let metrics = ac.metrics;
 
-        assert!((metrics.dc_gain_db - 20.0).abs() < 1.0e-12);
+        assert!((metrics.dc_gain_db.unwrap() - 20.0).abs() < 1.0e-12);
         assert!((metrics.bandwidth_3db_hz.unwrap() / pole_hz - 1.0).abs() < 0.01);
         assert!(metrics.unity_gain_hz.is_some());
         let phase_margin = metrics.phase_margin_deg.unwrap();

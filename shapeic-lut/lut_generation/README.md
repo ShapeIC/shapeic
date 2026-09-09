@@ -10,11 +10,12 @@ python3 -m venv .venv
 .venv/bin/pip install -r shapeic-lut/lut_generation/requirements.txt
 ```
 
-Set `PDK_ROOT` to the directory containing the `ihp-sg13g2` PDK directory, then
-run one of the checked configurations:
+Set `PDK_ROOT` to the directory containing the installed PDKs and select one
+with `PDK`, then run one of the checked configurations:
 
 ```text
-export PDK_ROOT=/path/to/IHP-Open-PDK
+export PDK_ROOT=/path/to/pdks
+export PDK=ihp-sg13g2
 .venv/bin/python shapeic-lut/lut_generation/generate.py \
   shapeic-lut/lut_generation/configs/ihp_sg13g2_lv_nmos.toml
 ```
@@ -37,6 +38,11 @@ inverse-sizing query. Rust reconstructs the seven bulk-related coefficients
 from charge conservation, applies ngspice's mutual-term sign convention, and
 validates the resulting complete 4x4 nodal matrix.
 
+The typed `capacitance_convention` setting normalizes native simulator outputs
+before they are written. IHP uses `compact_mutual`; SKY130 and GF180 use
+`signed_nodal`, whose six mutual derivatives are sign-converted into ShapeIC's
+canonical compact-mutual representation. Existing LUT files remain readable.
+
 The four extrinsic capacitances `cgsol`, `cgdol`, `cjs`, and `cjd` are sampled
 at `nf = [1, 2, 3, 4]`. For each sample, the netlist uses `w = finger_width * nf`
 and `ng = nf`, so the five-dimensional width coordinate remains the width of one
@@ -48,3 +54,54 @@ At query time, Rust uses the `nf=1,3` samples for the odd-finger affine branch
 and `nf=2,4` for the even-finger branch. This follows the IHP wrapper's separate
 source/drain geometry formulas for odd and even finger counts. The setting
 `capacitance_nf_samples` is currently restricted to exactly `[1, 2, 3, 4]`.
+
+Validate one configured operating point independently with:
+
+```text
+.venv/bin/python shapeic-lut/lut_generation/probe.py CONFIG \
+  --length 8e-7 --finger-width 2.15e-6 \
+  --vbs 0 --vgs 0.65 --vds 0.65
+```
+
+The probe automatically evaluates `nf=1,2,3,4`. It compares the reconstructed
+OP capacitance matrix against individual G/D/S/B AC excitations at 1 MHz and
+10 MHz, checks charge conservation and `Id/gm/gds` scaling, and exits with
+failure when a 1% matrix/scaling gate is exceeded. Netlists, logs, raw files,
+parameter bindings, matrices, and `report.json` remain under
+`target/shapeic-electrical-probe/<timestamp>` on both success and failure.
+
+Add `--reference-output PATH` to write the deterministic portable subset of a
+passing probe. Existing references are protected unless `--force-reference` is
+also supplied. The committed SKY130 or GF180 smoke references can be reproduced
+by selecting the corresponding PDK:
+
+```text
+export PDK=sky130A # or gf180mcuD
+export SHAPEIC_RUN_EDA_TESTS=1
+cd shapeic-lut/lut_generation
+python -m unittest discover -s tests -p 'test_pdk_smoke_eda.py' -v
+```
+
+The SKY130 and GF180 smoke LUTs under `shapeic-lut/tests/fixtures` are portable
+functional fixtures. Their exact reference corners are checked against
+NGSpice, while their midpoint checks only validate multilinear interpolation.
+The GF180 references use the minimum configured length and finger width. A
+two-point smoke grid is not intended to certify interpolation accuracy between
+simulated points; that requires a separately validated production grid.
+
+## Full electrical LUT artifacts
+
+The checked non-smoke configurations are the source of truth for the full
+pre-layout electrical LUTs. Generation writes these external artifacts under
+`shapeic-lut/lut_generation/generated`:
+
+| PDK | Corner | Temperature | Device | Artifact |
+| --- | --- | ---: | --- | --- |
+| SKY130A | `tt` | 27 C | `sky130_fd_pr__nfet_01v8` | `sky130A_1v8_nmos_5d.npz` |
+| SKY130A | `tt` | 27 C | `sky130_fd_pr__pfet_01v8` | `sky130A_1v8_pmos_5d.npz` |
+| GF180MCU D | `typical` | 25 C | `nfet_03v3` | `gf180mcuD_3v3_nmos_5d.npz` |
+| GF180MCU D | `typical` | 25 C | `pfet_03v3` | `gf180mcuD_3v3_pmos_5d.npz` |
+
+These full LUTs are intentionally excluded from Git. Commit their TOML
+configurations, but distribute or regenerate the NPZ files separately. The
+smoke fixtures remain the small, portable regression artifacts.

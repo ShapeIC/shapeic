@@ -1,0 +1,77 @@
+\mode<presentation>
+
+\RequirePackage[utf8]{inputenc}
+
+\RequirePackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usetikzlibrary{positioning,calc}
+\usetikzlibrary{shapes.misc,shapes.multipart,shapes.arrows,shapes.callouts}
+
+\RequirePackage{pgfplots}
+
+\tikzset{
+  invisible/.style={opacity=0},
+  visible on/.style={alt={#1{}{invisible}}},
+  alt/.code args={<#1>#2#3}{%
+    \alt<#1>{\pgfkeysalso{#2}}{\pgfkeysalso{#3}} % \pgfkeysalso doesn't change the path
+  },
+}
+
+\newif\if@decotitle
+\@decotitletrue
+\DeclareOption{nodecotitle}{\@decotitlefalse}
+
+\newif\if@deco
+\@decotrue
+\DeclareOption{nodeco}{\@decofalse}
+
+\newif\if@logotop
+\@logotopfalse
+\DeclareOption{logotop}{\@logotoptrue}
+
+\newif\if@framenum
+\@framenumtrue
+\DeclareOption{noframenum}{\@framenumfalse}
+
+\newif\if@ccby
+\@ccbyfalse
+\DeclareOption{ccby}{\@ccbytrue}
+
+\newif\if@ccbysa
+\@ccbysafalse
+\DeclareOption{ccbysa}{\@ccbysatrue}
+
+\newif\if@cifont
+\@cifontfalse
+\DeclareOption{cifont}{\@cifonttrue}
+
+\newif\if@leftonly
+\@leftonlyfalse
+\DeclareOption{leftonly}{\@leftonlytrue}
+\ProcessOptions
+
+\usepackage[light]{roboto}
+
+\if@ccby
+\RequirePackage{ccicons}
+\fi
+\if@ccbysa
+\RequirePackage{ccicons}
+\fi
+
+
+\useinnertheme{hm}
+\useoutertheme{hm}
+\usecolortheme{hm}
+
+\geometry{paperwidth=33.867cm,paperheight=19.05cm}
+\if@leftonly
+\setbeamersize{text margin left=4cm,text margin right=12cm}
+\else
+\setbeamersize{text margin left=4cm,text margin right=2cm}
+\fi
+
+\setlength{\parskip}{5mm}
+
+
+\mode<all>

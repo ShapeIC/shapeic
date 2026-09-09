@@ -11,6 +11,13 @@ pub enum Expr {
     FingerWidth,
     Parameter(String),
     DeviceParameter(String),
+    /// A standard MOS expression carrying its canonical output name.
+    Mos {
+        /// Semantic identity used to name the expression result.
+        kind: MosExpression,
+        /// Arithmetic expression evaluated against the LUT.
+        expression: Box<Expr>,
+    },
     Neg(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
@@ -33,6 +40,15 @@ impl Expr {
 
     pub fn parameter(name: impl Into<String>) -> Self {
         Self::Parameter(name.into())
+    }
+
+    /// Returns the output name of a direct LUT parameter or standard MOS expression.
+    pub fn parameter_name(&self) -> Option<&str> {
+        match self {
+            Self::Parameter(name) => Some(name),
+            Self::Mos { kind, .. } => Some(kind.parameter_name()),
+            _ => None,
+        }
     }
 
     pub fn device_parameter(name: impl Into<String>) -> Self {
@@ -59,6 +75,7 @@ impl Expr {
                 }
             }
             Self::DeviceParameter(name) => model.device_parameter(name)?,
+            Self::Mos { expression, .. } => expression.evaluate_at(model, index)?,
             Self::Neg(expression) => -expression.evaluate_at(model, index)?,
             Self::Add(left, right) => {
                 left.evaluate_at(model, index)? + right.evaluate_at(model, index)?
@@ -93,6 +110,7 @@ impl fmt::Display for Expr {
             Self::FingerWidth => formatter.write_str("finger_width"),
             Self::Parameter(name) => formatter.write_str(name),
             Self::DeviceParameter(name) => write!(formatter, "device.{name}"),
+            Self::Mos { expression, .. } => expression.fmt(formatter),
             Self::Neg(expression) => write!(formatter, "(-{expression})"),
             Self::Add(left, right) => write!(formatter, "({left} + {right})"),
             Self::Sub(left, right) => write!(formatter, "({left} - {right})"),
@@ -149,7 +167,7 @@ pub enum MosExpression {
     Vsg,
     Vsb,
     Vsd,
-    GmOverId,
+    Gmid,
     Vov,
     Vstar,
     CurrentDensity,
@@ -161,39 +179,64 @@ pub enum MosExpression {
     Vdsat,
 }
 
+impl MosExpression {
+    /// Returns the canonical analog-design name for this expression.
+    pub const fn parameter_name(self) -> &'static str {
+        match self {
+            Self::Vsg => "vsg",
+            Self::Vsb => "vsb",
+            Self::Vsd => "vsd",
+            Self::Gmid => "gmid",
+            Self::Vov => "vov",
+            Self::Vstar => "vstar",
+            Self::CurrentDensity => "jd",
+            Self::IntrinsicGain => "av",
+            Self::TransitFrequency => "ft",
+            Self::EarlyVoltage => "va",
+            Self::InverseEarlyVoltage => "gdsid",
+            Self::Rds => "rds",
+            Self::Vdsat => "vdsat",
+        }
+    }
+}
+
 pub(crate) fn standard_expression(
     model: &DeviceLut,
     expression: MosExpression,
 ) -> Result<Expr, LutError> {
     let parameter = |name| model.parameter_expression(name);
 
-    match expression {
-        MosExpression::Vsg => Ok(-Expr::axis(Axis::Vgs)),
-        MosExpression::Vsb => Ok(-Expr::axis(Axis::Vbs)),
-        MosExpression::Vsd => Ok(-Expr::axis(Axis::Vds)),
-        MosExpression::GmOverId => Ok(parameter("gm")? / parameter("id")?),
-        MosExpression::Vov => Ok(Expr::axis(Axis::Vgs) - parameter("vth")?),
-        MosExpression::Vstar => Ok(2.0 * parameter("id")? / parameter("gm")?),
-        MosExpression::CurrentDensity => Ok(parameter("id")? / width_expression(model)?),
-        MosExpression::IntrinsicGain => Ok(parameter("gm")? / parameter("gds")?),
+    let inner = match expression {
+        MosExpression::Vsg => -Expr::axis(Axis::Vgs),
+        MosExpression::Vsb => -Expr::axis(Axis::Vbs),
+        MosExpression::Vsd => -Expr::axis(Axis::Vds),
+        MosExpression::Gmid => parameter("gm")? / parameter("id")?,
+        MosExpression::Vov => Expr::axis(Axis::Vgs) - parameter("vth")?,
+        MosExpression::Vstar => 2.0 * parameter("id")? / parameter("gm")?,
+        MosExpression::CurrentDensity => parameter("id")? / width_expression(model)?,
+        MosExpression::IntrinsicGain => parameter("gm")? / parameter("gds")?,
         MosExpression::TransitFrequency => {
-            Ok(parameter("gm")? / (2.0 * std::f64::consts::PI * parameter("cgg")?))
+            parameter("gm")? / (2.0 * std::f64::consts::PI * parameter("cgg")?)
         }
-        MosExpression::EarlyVoltage => Ok(parameter("id")? / parameter("gds")?),
-        MosExpression::InverseEarlyVoltage => Ok(parameter("gds")? / parameter("id")?),
-        MosExpression::Rds => Ok(1.0 / parameter("gds")?),
+        MosExpression::EarlyVoltage => parameter("id")? / parameter("gds")?,
+        MosExpression::InverseEarlyVoltage => parameter("gds")? / parameter("id")?,
+        MosExpression::Rds => 1.0 / parameter("gds")?,
         MosExpression::Vdsat => {
-            for name in ["vdssat", "vdsat", "vsat"] {
-                if model.parameters.contains_key(name) {
-                    return parameter(name);
-                }
-            }
-            Err(LutError::UnknownParameter {
-                model: model.name().to_owned(),
-                parameter: "vdssat/vdsat/vsat".to_owned(),
-            })
+            let name = ["vdssat", "vdsat", "vsat"]
+                .into_iter()
+                .find(|name| model.parameters.contains_key(*name))
+                .ok_or_else(|| LutError::UnknownParameter {
+                    model: model.name().to_owned(),
+                    parameter: "vdssat/vdsat/vsat".to_owned(),
+                })?;
+            parameter(name)?
         }
-    }
+    };
+
+    Ok(Expr::Mos {
+        kind: expression,
+        expression: Box::new(inner),
+    })
 }
 
 fn width_expression(model: &DeviceLut) -> Result<Expr, LutError> {

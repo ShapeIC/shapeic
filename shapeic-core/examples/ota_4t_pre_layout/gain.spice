@@ -1,0 +1,7 @@
+* Four-transistor OTA electrical AC testbench.
+* The DUT is generated from the typed macro circuit.
+I_tail IBIAS VSS 0
+V_dd VDD VSS 0
+V_n VINN VSS 0
+V_p VINP VSS 1
+.end

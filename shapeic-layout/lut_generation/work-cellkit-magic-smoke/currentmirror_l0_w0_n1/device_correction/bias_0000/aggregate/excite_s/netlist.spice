@@ -1,0 +1,18 @@
+* Shapeic primitive multiport admittance extraction
+.lib '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib' mos_tt
+.include '/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/currentmirror_l0_w0_n1/device_correction/primitive.aggregate.spice'
+VPORT_DOUT DOUT 0 DC=-5.00000000000000000e-01 AC=0
+VPORT_DREF DREF 0 DC=-5.00000000000000000e-01 AC=0
+VPORT_S S 0 DC=0.00000000000000000e+00 AC=1
+VPORT_B B 0 DC=0.00000000000000000e+00 AC=0
+XPRIMITIVE DOUT DREF S B aggregate_currentmirror
+.options temp=27 tnom=27
+.control
+pre_osdi '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi'
+pre_osdi '/home/daniel/shapeic/pdks/ciel/ihp-sg13g2/versions/22f2a25f1734796de3debbbf29cf697cbbc54081/ihp-sg13g2/libs.tech/ngspice/osdi/psp103_nqs.osdi'
+save i(VPORT_DOUT) i(VPORT_DREF) i(VPORT_S) i(VPORT_B)
+op
+ac dec 1 1.00000000000000000e+06 1.00000000000000000e+07
+write '/home/daniel/shapeic/shapeic-layout/lut_generation/work-cellkit-magic-smoke/currentmirror_l0_w0_n1/device_correction/bias_0000/aggregate/excite_s/admittance.raw' frequency i(VPORT_DOUT) i(VPORT_DREF) i(VPORT_S) i(VPORT_B)
+.endc
+.end

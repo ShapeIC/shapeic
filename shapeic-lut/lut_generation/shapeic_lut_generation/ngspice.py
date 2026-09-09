@@ -7,8 +7,13 @@ from pathlib import Path
 import numpy as np
 
 from .config import (
+    CapacitanceConvention,
+    CapacitanceNfMode,
     EXTRINSIC_CAPACITANCE_PARAMETERS,
     GenerationConfig,
+    MosTerminal,
+    MUTUAL_CAPACITANCE_PARAMETERS,
+    SpiceDirectiveKind,
     sampled_parameter_name,
 )
 
@@ -33,15 +38,21 @@ def simulate_block(
         for nf in config.device.capacitance_nf_samples:
             if nf == config.device.nf:
                 continue
-            sampled = _simulate_nf_block(
-                config,
-                length,
-                vbs,
-                finger_width,
-                nf,
-                EXTRINSIC_CAPACITANCE_PARAMETERS,
-                root,
-            )
+            if config.device.capacitance_nf_mode is CapacitanceNfMode.LINEAR:
+                sampled = {
+                    parameter: outputs[parameter] * np.float32(nf)
+                    for parameter in EXTRINSIC_CAPACITANCE_PARAMETERS
+                }
+            else:
+                sampled = _simulate_nf_block(
+                    config,
+                    length,
+                    vbs,
+                    finger_width,
+                    nf,
+                    EXTRINSIC_CAPACITANCE_PARAMETERS,
+                    root,
+                )
             outputs.update(
                 (sampled_parameter_name(parameter, nf), values)
                 for parameter, values in sampled.items()
@@ -99,7 +110,19 @@ def _simulate_nf_block(
         if not np.isfinite(values).all():
             raise RuntimeError(f"parameter '{parameter}' contains non-finite values")
         outputs[parameter] = values
-    return outputs
+    return normalize_capacitance_parameters(outputs, config.device.capacitance_convention)
+
+
+def normalize_capacitance_parameters(
+    outputs: dict[str, np.ndarray], convention: CapacitanceConvention
+) -> dict[str, np.ndarray]:
+    """Convert simulator capacitance outputs to ShapeIC's compact-mutual convention."""
+    normalized = dict(outputs)
+    if convention is CapacitanceConvention.SIGNED_NODAL:
+        for parameter in MUTUAL_CAPACITANCE_PARAMETERS:
+            if parameter in normalized:
+                normalized[parameter] = -normalized[parameter]
+    return normalized
 
 
 def _raw_column(parameter: str) -> str:
@@ -124,7 +147,15 @@ def _netlist(
     device = config.device
     vgs = config.sweep.vgs
     vds = config.sweep.vds
-    osdi = "\n".join(f"pre_osdi '{path}'" for path in simulator.osdi_paths)
+    deck_directives: list[str] = []
+    osdi_directives: list[str] = []
+    for directive in config.spice.directives:
+        if directive.kind is SpiceDirectiveKind.INCLUDE:
+            deck_directives.append(f".include '{directive.path}'")
+        elif directive.kind is SpiceDirectiveKind.LIBRARY:
+            deck_directives.append(f".lib '{directive.path}' {directive.section}")
+        else:
+            osdi_directives.append(f"pre_osdi '{directive.path}'")
     saved: list[str] = []
     expressions: list[str] = []
     output_names: list[str] = []
@@ -135,27 +166,37 @@ def _netlist(
     for parameter in parameters:
         if parameter == "id":
             continue
-        reference = f"@{device.hierarchy}[{parameter}]"
+        native_parameter = device.native_parameter(parameter)
+        reference = f"@{device.hierarchy}[{native_parameter}]"
         saved.append(f"save {reference}")
         expressions.append(f"let shapeic_{parameter} = {reference}")
         output_names.append(f"shapeic_{parameter}")
 
-    total_width = finger_width * nf
+    nodes = {
+        MosTerminal.DRAIN: "ND",
+        MosTerminal.GATE: "NG",
+        MosTerminal.SOURCE: "0",
+        MosTerminal.BULK: "NB",
+    }
+    instance_nodes = " ".join(nodes[terminal] for terminal in device.terminals)
+    spice_length = device.spice_length(length)
+    spice_width = device.spice_width(finger_width, nf)
     lines = [
         "* Shapeic five-dimensional LUT generation",
-        f".lib '{simulator.model_library}' {simulator.library_section}",
+        *deck_directives,
         "VGS NG 0 DC=0",
         f"VBS NB 0 DC={vbs:.17g}",
         "VDS ND 0 DC=0",
         (
-            f"{device.instance} ND NG 0 NB {device.name} "
-            f"l={length:.17g} w={total_width:.17g} ng={nf}"
+            f"{device.instance} {instance_nodes} {device.name} "
+            f"{device.length_parameter}={spice_length:.17g} "
+            f"{device.width_parameter}={spice_width:.17g} "
+            f"{device.finger_parameter}={nf}"
         ),
         f".options temp={simulator.temperature_c:.17g} tnom={simulator.temperature_c:.17g}",
         ".control",
     ]
-    if osdi:
-        lines.append(osdi)
+    lines.extend(osdi_directives)
     lines.extend(saved)
     lines.append(
         f"dc VDS {vds.start:.17g} {vds.stop:.17g} {vds.step:.17g} "

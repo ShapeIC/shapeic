@@ -1,0 +1,7 @@
+* Hierarchical four-transistor OTA AC testbench.
+* The DUT is generated from the typed macro circuit.
+I_load VOUT VSS 1
+V_dd VDD VSS 0
+V_n VINN VSS 0
+V_p VINP VSS 0
+.end

@@ -1,0 +1,27 @@
+* NGSPICE file created from simplediffpair_l0p400_wf0p150_nf1_flat.ext - technology: ihp-sg13g2
+
+.subckt simplediffpair_l0p400_wf0p150_nf1_flat DP DN GP GN S B
+X0 DN GN S sub sg13_lv_nmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+X1 S S S sub sg13_lv_nmos ad=0.1005p pd=1.34u as=7.4716p ps=53.64u w=0.15u l=0.4u
+X2 S S S sub sg13_lv_nmos ad=0.1005p pd=1.34u as=0 ps=0 w=0.15u l=0.4u
+X3 DP GP S sub sg13_lv_nmos ad=0.1005p pd=1.34u as=0.1005p ps=1.34u w=0.15u l=0.4u
+C0 a_n78_n755# S 0.00476f
+C1 DP S 0.03008f
+C2 a_n78_n755# B 0.01359f
+C3 DN S 0.03033f
+C4 GN DP 0
+C5 GN DN 0.00668f
+C6 GP S 0.10699f
+C7 GP GN 0.00483f
+C8 DP DN 0.00722f
+C9 B S 0.00694f
+C10 GN S 0.10378f
+C11 GP DP 0.00668f
+C12 B sub 0.03332f
+C13 DN sub 0.06084f
+C14 GN sub 0.2259f
+C15 DP sub 0.06084f
+C16 GP sub 0.22489f
+C17 S sub 1.96534f
+.ends
+
