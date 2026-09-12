@@ -61,8 +61,9 @@
 \begin{frame}{Automatic Analog Sizing}
 \begin{columns}
     \begin{column}{0.45\textwidth}
+      \vspace{1cm}
       \begin{itemize}
-        \item<2-> Optimization-driven 
+        \item<2-> \textbf{Optimization-driven} 
       \end{itemize}
       \uncover<2->{
           \center
@@ -73,18 +74,22 @@
         \item<2->[\checkmark] Many algorithms available
       \end{itemize}
       \begin{itemize}
-        \item<3->[$\times$] Partial View of the design space
-        \item<3->[$\times$] May converge to local optima
+        \item<3->[$\times$] Partial view of the design space
+        \item<3->[$\times$] May be sensitive to local optima
       \end{itemize}
     \end{column}
     \begin{column}{0.45\textwidth}
+      \vspace{1cm}
       \begin{itemize}
-        \item<4-> Design-space exploration
+        \item<4-> \textbf{Design-space exploration}
       \end{itemize}
       \uncover<4->{
           \center
+          \vspace{-0.5cm}
           \includegraphics[width=0.6\textwidth]{img/design-space-exploration.pdf}
       }
+
+      \vspace{-0.5cm}
       \begin{itemize}
         \item<4->[\checkmark] Design insight
         \item<4->[\checkmark] Alternative solutions
@@ -99,7 +104,7 @@
 \end{frame}
 
 \begin{frame}
-  \frametitle{Let's explore a 2 Stage Amplifier}
+  \frametitle{Let's explore a 2-Stage Amplifier}
 \begin{columns}
     \begin{column}{0.45\textwidth}
       \center
@@ -115,16 +120,16 @@
     \end{column}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
-        \item<1-> Simple 5 transistor topology
+        \item<1-> Start with a simple 5-transistor topology
         \item<2-> 1250000 design candidates
           \begin{itemize}
-            \item Simulation: $\approx2h$
-            \item Equation evaluations: $\approx2s$ (derived by hand)
+            \item Simulation: $\approx2$ h
+            \item Equation evaluations: $\approx2$ s (excluding manual equation derivation)
           \end{itemize}
         \item<3-> 31250000 design candidates
           \begin{itemize}
-            \item Simulation: $\approx1 month$ 
-            \item Equation evaluations: $\approx1min$ (but you need to recalculate them)
+            \item Simulation: $\approx3$ days 
+            \item Equation evaluations: $\approx1$ min (new model/equations required)
           \end{itemize}
       \end{itemize}
     \end{column}
@@ -157,6 +162,12 @@
     \only<6>{%
       \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p3.pdf}%
     }%
+    \only<7>{%
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p4.pdf}%
+    }%
+    \only<8>{%
+      \includegraphics[width=1.15\textwidth]{img/shapeic-flow-p5.pdf}%
+    }%
   }
 
 \end{frame}
@@ -169,33 +180,23 @@
       \center
       \only<5->{
         \includegraphics[width=\textwidth]{img/ota_2stage.pdf} 
-        \begin{itemize}
-          \item Testbench: AC analysis
-          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
-        \end{itemize}
       }
       \only<1>{
         \includegraphics[width=\textwidth]{img/ota_2stage-pre.pdf} 
       }
       \only<2>{
         \includegraphics[width=\textwidth]{img/ota_2stage_p1.pdf} 
-        \begin{itemize}
-          \item Testbench: AC analysis
-          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
-        \end{itemize}
       }
       \only<3>{
         \includegraphics[width=\textwidth]{img/ota_2stage_p2.pdf} 
-        \begin{itemize}
-          \item Testbench: AC analysis
-          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
-        \end{itemize}
       }
       \only<4>{
         \includegraphics[width=\textwidth]{img/ota_2stage_p3.pdf} 
+      }
+      \only<5->{
         \begin{itemize}
           \item Testbench: AC analysis
-          \item Specs: $Gain\geq70, BW\geq10kHz, PM\geq60$
+          \item Specs: $Gain\geq70 dB, BW\geq10kHz, PM\geq60^\circ$
         \end{itemize}
       }
     \end{column}
@@ -230,28 +231,21 @@
       \begin{enumerate}
           \item<1-> Hierarchical exploration
             \begin{itemize}
-              \item<1-> TOP exploration: $500k \rightarrow 2021$
+              \item<1-> TOP-level preview: $500k \rightarrow 2021$
                 \begin{itemize}
-                  \item<1-> Derived constraint: $Gain \geq 28.89\,[dB]$
+                  \item<1-> Derived: 1stage $Gain \geq 28.89\,[dB]$
                 \end{itemize}
-              \item<2-> Sub-macro exploration: $1050 \rightarrow 446$
+              \item<2-> 1stage OTA exploration: $1050 \rightarrow 446$
                 \begin{itemize}
-                  \item<2-> Return to parent 446 candidates
+                  \item<2-> 446 feasible candidates returned
                 \end{itemize}
-              \item<3-> TOP refresh: $223k \rightarrow 224$
+              \item<3-> TOP-level refresh: $223k \rightarrow 224$
             \end{itemize}
           \item<5-> Runtime
             \begin{itemize}
-                \item Exploration only: $\approx 2.79s$
-                \item Full run incl. LUT load: $\approx 8.38s$
+                \item Exploration only: $2.79$ s
+                \item Full run incl. LUT load: $8.38$ s
           \end{itemize}
-
-          \item<6-> {\color{red!70!black} Simulation-based optimization}
-            \begin{itemize}
-              \item<6-> {\color{red!70!black} Random initialization: no feasible solution found}
-              \item<6-> {\color{red!70!black} ShapeIC-seeded initialization: converged to a feasible solution ($\star$)}
-            \end{itemize}
-
       \end{enumerate}
   \end{column}
 
@@ -269,45 +263,81 @@
     \includegraphics[width=\textwidth]{img/ota_2stage_exp_3.pdf} 
   }
   \only<4-5>{
+    \vspace{-2cm}
+    \hspace{-1cm}
     \centering
-    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain.png} 
-  }
-  \only<6>{
-    \centering
-    \includegraphics[width=\textwidth]{img/shapeic_exploration_onlygain_with_pyopus.png} 
+    \includegraphics[width=1.2\textwidth]{img/shapeic_exploration_onlygain.png} 
   }
   \end{column}
 \end{columns}
 \end{frame}
 
-\section{Current Status \& What is Next ?}
+\section{What is Next for ShapeIC?}
 
-\begin{frame}{Current Status \& What is Next ?}
+\begin{frame}
+\frametitle{What is Next for ShapeIC?}
 \begin{columns}
   \begin{column}{0.45\textwidth}
   \begin{itemize}
-    \item Current status
+    \item Analysis
       \begin{itemize}
-        \item AC analysis supported 
-        \item Hierarchycal LUT-based exploration
-        \item Layout-aware exploration prototype
-        \item ShapeIC-Cellkit integration
+        \item DC Analysis
+        \item Transient analysis
+      \end{itemize}
+    \item Design \& Exploration
+      \begin{itemize}
+        \item Interactive GUI
+        \item Layout-aware exploration
+      \end{itemize}
+    \item ShapeIC-Cellkit
+      \begin{itemize}
+        \item More primitives
+        \item More macros
       \end{itemize}
   \end{itemize}
   \end{column}
   \begin{column}{0.45\textwidth}
-  \begin{itemize}
-    \item Current status
-      \begin{itemize}
-        \item AC analysis supported 
-        \item Hierarchycal LUT-based exploration
-        \item Layout-aware exploration prototype
-        \item ShapeIC-Cellkit integration
-      \end{itemize}
-  \end{itemize}
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/qr.png} 
+    \vspace{-1cm}
+    \par
+    \url{github.com/ShapeIC/shapeic}
+    \par
+    \vspace{1.5cm}
+    \includegraphics[width=0.5\textwidth]{img/ocdcpro.png} 
+    \par
+    Supported by OCDCPro
+    \par
   \end{column}
 \end{columns}
 
+\end{frame}
+
+\section{Layout-Aware Exploration}
+
+\begin{frame}
+\frametitle{Layout-Aware Exploration}
+  \vspace{2.5cm}
+  \begin{overlayarea}{\textwidth}{0.75\textheight}
+  \only<1>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p1.pdf}%
+    }
+  }
+  \only<2>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p2.pdf}%
+    }
+  }
+  \only<3>{
+    \makebox[\textwidth][c]{%
+      \centering
+      \includegraphics[width=0.95\textwidth]{img/layout-aware-flow-p3.pdf}%
+    }
+  }
+  \end{overlayarea}
 \end{frame}
 
 \end{document}
