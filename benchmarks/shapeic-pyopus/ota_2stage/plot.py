@@ -65,7 +65,7 @@ plt.close(fig)
 
 
 sns.scatterplot(data=df_shapeic, x = "area", y = "dc_gain_db", hue="gain_1stage")
-plt.xlabel("Area [µm²]")
+plt.xlabel("Area [m²]")
 plt.ylabel("DC Gain [dB]")
 plt.savefig("shapeic_exploration_onlygain.png", dpi=300, bbox_inches="tight")
 plt.close()
