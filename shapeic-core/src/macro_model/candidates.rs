@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use shapeic_lut::CurrentSizingLimits;
 use shapeic_lut::DeviceLut;
 
 use crate::catalog::primitive_catalog::PrimitiveCatalog;
@@ -13,7 +14,7 @@ use crate::exploration::filter::{
     CandidateFilterError, CandidateFilterReport, retain_candidate_set,
     retain_candidate_set_with_indices,
 };
-use crate::primitive::build::{PrimitiveBuildError, build_candidate_set_for_primitive};
+use crate::primitive::build::{PrimitiveBuildError, build_candidate_set_for_primitive_with_limits};
 use crate::primitive::manifest::PrimitiveManifest;
 
 use super::input::{
@@ -22,8 +23,8 @@ use super::input::{
 };
 use super::prebuild::apply_prebuild_conditions;
 use super::{
-    CandidateBuildExecution, Macro, MacroExplorationDefinitionError, MacroExplorationInput,
-    MacroExplorationInputValidationError, MacroExplorationInstanceKind,
+    CandidateBuildExecution, Macro, MacroAnalysisDomain, MacroExplorationDefinitionError,
+    MacroExplorationInput, MacroExplorationInputValidationError, MacroExplorationInstanceKind,
     validate_macro_exploration_definition, validate_macro_exploration_input,
 };
 
@@ -154,6 +155,11 @@ impl MacroCandidateSets {
 /// Errors produced while constructing and filtering macro candidate sets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroCandidateBuildError {
+    MissingCellKitSource,
+    GeometryLimits {
+        primitive: String,
+        reason: String,
+    },
     InvalidDefinition {
         errors: Vec<MacroExplorationDefinitionError>,
     },
@@ -179,6 +185,12 @@ pub enum MacroCandidateBuildError {
 impl fmt::Display for MacroCandidateBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingCellKitSource => formatter
+                .write_str("layout-aware exploration requires a CellKit-backed primitive catalog"),
+            Self::GeometryLimits { primitive, reason } => write!(
+                formatter,
+                "invalid geometry limits for primitive '{primitive}': {reason}"
+            ),
             Self::InvalidDefinition { errors } => {
                 write!(
                     formatter,
@@ -228,6 +240,7 @@ impl fmt::Display for MacroCandidateBuildError {
 impl Error for MacroCandidateBuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::MissingCellKitSource | Self::GeometryLimits { .. } => None,
             Self::CandidateFilter { error, .. } => Some(error),
             Self::InvalidDefinition { .. }
             | Self::InvalidInput { .. }
@@ -278,6 +291,19 @@ pub fn build_macro_candidate_sets_with_execution(
     }
     input.resolve_primitive_defaults(macro_);
 
+    let layout_aware = macro_
+        .exploration()
+        .testbenches()
+        .iter()
+        .any(|testbench| testbench.domain() == MacroAnalysisDomain::LayoutAware);
+    if layout_aware && !primitive_catalog.has_cellkit_source() {
+        return Err(MacroCandidateBuildError::MissingCellKitSource);
+    }
+    let pdk = input
+        .physical_lut
+        .as_ref()
+        .map(|lut| lut.metadata().pdk.as_str());
+
     let mut tasks = Vec::new();
     for (circuit_index, instance) in macro_.circuit().instances().iter().enumerate() {
         let task = match instance.block() {
@@ -298,6 +324,19 @@ pub fn build_macro_candidate_sets_with_execution(
                     .primitive_instances
                     .remove(instance.name())
                     .expect("macro exploration input validation resolved the primitive input");
+                let limits = if layout_aware {
+                    primitive_catalog
+                        .geometry_limits(
+                            primitive_name,
+                            pdk.expect("layout-aware input has a physical LUT"),
+                        )
+                        .map_err(|reason| MacroCandidateBuildError::GeometryLimits {
+                            primitive: primitive_name.clone(),
+                            reason,
+                        })?
+                } else {
+                    None
+                };
                 CandidateBuildTask::Primitive {
                     circuit_index,
                     instance_path: instance.name().to_owned(),
@@ -305,6 +344,7 @@ pub fn build_macro_candidate_sets_with_execution(
                     model,
                     primitive: primitive.clone(),
                     input: primitive_input,
+                    limits,
                 }
             }
             BlockRef::Macro(_) => {
@@ -366,6 +406,7 @@ enum CandidateBuildTask<'lut> {
         model: &'lut DeviceLut,
         primitive: PrimitiveManifest,
         input: PrimitiveInstanceExplorationInput,
+        limits: Option<CurrentSizingLimits>,
     },
     CompactMacro {
         circuit_index: usize,
@@ -401,6 +442,7 @@ fn build_candidate_task(
             model,
             primitive,
             mut input,
+            limits,
         } => {
             if let Some(build_spec) = &primitive.build {
                 apply_prebuild_conditions(
@@ -409,11 +451,12 @@ fn build_candidate_task(
                     &input.prebuild_conditions,
                 );
             }
-            let candidates = build_candidate_set_for_primitive(
+            let candidates = build_candidate_set_for_primitive_with_limits(
                 model,
                 &primitive,
                 &instance_path,
                 input.build_input,
+                limits,
             )
             .map_err(|error| MacroCandidateBuildError::PrimitiveBuild {
                 macro_name: macro_name.to_owned(),

@@ -24,6 +24,13 @@ pub struct CurrentSizingResult {
     pub extrinsic_capacitances: Option<MosExtrinsicCapacitances>,
 }
 
+/// Optional PCell limits used when sizing layout-aware candidates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurrentSizingLimits {
+    pub required_nf: Option<u32>,
+    pub max_finger_width_m: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CurrentCandidate {
     nf: u32,
@@ -42,6 +49,34 @@ impl DeviceLut {
         requested_current: f64,
         expressions: &[Expr],
     ) -> Result<CurrentSizingResult, LutError> {
+        Ok(self
+            .size_for_current_inner(operating_point, requested_current, expressions, None)?
+            .expect("unrestricted sizing always returns a boundary candidate"))
+    }
+
+    /// Size within PCell limits; return `None` when the current is unattainable.
+    pub fn size_for_current_with_limits(
+        &self,
+        operating_point: &OperatingPoint,
+        requested_current: f64,
+        expressions: &[Expr],
+        limits: CurrentSizingLimits,
+    ) -> Result<Option<CurrentSizingResult>, LutError> {
+        self.size_for_current_inner(
+            operating_point,
+            requested_current,
+            expressions,
+            Some(limits),
+        )
+    }
+
+    fn size_for_current_inner(
+        &self,
+        operating_point: &OperatingPoint,
+        requested_current: f64,
+        expressions: &[Expr],
+        limits: Option<CurrentSizingLimits>,
+    ) -> Result<Option<CurrentSizingResult>, LutError> {
         if !requested_current.is_finite() || requested_current <= 0.0 {
             return Err(LutError::InvalidCurrentTarget {
                 model: self.name().to_owned(),
@@ -72,7 +107,48 @@ impl DeviceLut {
         }
         validate_current_curve(self, &curve)?;
 
-        let candidate = select_candidate(self, &curve, requested_current)?;
+        let candidate = if let Some(limits) = limits {
+            if let Some(max_width) = limits.max_finger_width_m {
+                if max_width < curve[0].0 {
+                    return Ok(None);
+                }
+                if max_width < curve.last().expect("non-empty curve").0 {
+                    let upper = curve.partition_point(|(width, _)| *width < max_width);
+                    if curve[upper].0 != max_width {
+                        let (lower_width, lower_current) = curve[upper - 1];
+                        let (upper_width, upper_current) = curve[upper];
+                        let weight = (max_width - lower_width) / (upper_width - lower_width);
+                        let current = lower_current + weight * (upper_current - lower_current);
+                        curve.truncate(upper);
+                        curve.push((max_width, current));
+                    } else {
+                        curve.truncate(upper + 1);
+                    }
+                }
+            }
+            let candidate = if let Some(nf) = limits.required_nf {
+                let target = requested_current / f64::from(nf);
+                if target < curve[0].1 || target > curve.last().expect("non-empty curve").1 {
+                    return Ok(None);
+                }
+                CurrentCandidate {
+                    nf,
+                    finger_width: invert_current_curve(&curve, target),
+                }
+            } else {
+                select_candidate(self, &curve, requested_current)?
+            };
+            let predicted = self.query_parameter_at(
+                &LutPoint::new(*operating_point, candidate.finger_width),
+                "id",
+            )? * f64::from(candidate.nf);
+            if (predicted - requested_current).abs() > requested_current.abs() * 1e-9 {
+                return Ok(None);
+            }
+            candidate
+        } else {
+            select_candidate(self, &curve, requested_current)?
+        };
         let point = LutPoint::new(*operating_point, candidate.finger_width);
         let width_bracket = self.bracket_finger_width(widths, candidate.finger_width)?;
         let final_brackets = with_width_bracket(operating_brackets, width_bracket);
@@ -93,7 +169,7 @@ impl DeviceLut {
             .map(|_| MosExtrinsicCapacitances::from_nf_samples(candidate.nf, &sampled_values))
             .transpose()?;
 
-        Ok(CurrentSizingResult {
+        Ok(Some(CurrentSizingResult {
             point,
             nf: candidate.nf,
             total_width: candidate.finger_width * nf,
@@ -103,7 +179,7 @@ impl DeviceLut {
             current_error: predicted_current - requested_current,
             values: interpolated,
             extrinsic_capacitances,
-        })
+        }))
     }
 }
 
@@ -318,6 +394,38 @@ mod tests {
         assert_eq!(closer_upper.point.finger_width, 1.0);
         assert_eq!(closer_upper.predicted_current, 18.0);
         assert_eq!(closer_upper.current_error, 3.0);
+    }
+
+    #[test]
+    fn constrained_sizing_uses_fixed_nf_and_drops_unreachable_currents() {
+        let model = model(Some(vec![1.0, 2.0, 3.0]), vec![10.0, 20.0, 30.0]);
+        let limits = CurrentSizingLimits {
+            required_nf: Some(4),
+            max_finger_width_m: Some(2.5),
+        };
+        assert_eq!(model.size_for_current(&point(), 80.0, &[]).unwrap().nf, 3);
+        let sized = model
+            .size_for_current_with_limits(&point(), 80.0, &[], limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!((sized.nf, sized.point.finger_width), (4, 2.0));
+        let boundary = model
+            .size_for_current_with_limits(&point(), 100.0, &[], limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!(boundary.point.finger_width, 2.5);
+        assert!(
+            model
+                .size_for_current_with_limits(&point(), 101.0, &[], limits)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            model
+                .size_for_current_with_limits(&point(), 39.0, &[], limits)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

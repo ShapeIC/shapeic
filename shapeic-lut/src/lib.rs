@@ -53,4 +53,4 @@ pub use model::{
     Axis, DeviceLut, LookupTable, LutMetadata, LutPoint, MosCapacitanceMatrix,
     MosExtrinsicCapacitances, OperatingPoint,
 };
-pub use sizing::CurrentSizingResult;
+pub use sizing::{CurrentSizingLimits, CurrentSizingResult};

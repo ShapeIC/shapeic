@@ -3,13 +3,16 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::primitive::manifest::PrimitiveManifest;
-use shapeic_lut::{
-    CurrentSizingResult, DeviceLut, Expr, MosCapacitanceMatrix, MosExpression, OperatingPoint,
+use crate::exploration::candidate::{
+    CandidateSet, CandidateSetBuildError, candidate_column_name, candidate_set_from_columns,
 };
-use crate::exploration::candidate::{CandidateSet, CandidateSetBuildError, candidate_set_from_columns, candidate_column_name};
 use crate::exploration::table::ExplorationColumn;
 use crate::netlist::names::small_signal_param_name;
+use crate::primitive::manifest::PrimitiveManifest;
+use shapeic_lut::{
+    CurrentSizingLimits, CurrentSizingResult, DeviceLut, Expr, MosCapacitanceMatrix, MosExpression,
+    OperatingPoint,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimitiveBuildSpec {
@@ -224,30 +227,44 @@ pub fn build_candidate_set_for_primitive(
     model: &DeviceLut,
     primitive: &PrimitiveManifest,
     instance_name: &str,
-    input: PrimitiveBuildInput
+    input: PrimitiveBuildInput,
 ) -> Result<CandidateSet, PrimitiveBuildError> {
-    let build_spec = primitive.build.as_ref()
-        .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
-            primitive: primitive.name.clone(),
-        })?;
+    build_candidate_set_for_primitive_with_limits(model, primitive, instance_name, input, None)
+}
+
+pub(crate) fn build_candidate_set_for_primitive_with_limits(
+    model: &DeviceLut,
+    primitive: &PrimitiveManifest,
+    instance_name: &str,
+    input: PrimitiveBuildInput,
+    limits: Option<CurrentSizingLimits>,
+) -> Result<CandidateSet, PrimitiveBuildError> {
+    let build_spec =
+        primitive
+            .build
+            .as_ref()
+            .ok_or_else(|| PrimitiveBuildError::MissingBuildSpec {
+                primitive: primitive.name.clone(),
+            })?;
 
     let mut input = input;
     if input.lut_config.is_none() {
         input.lut_config = primitive.lut_config.clone();
     }
-    build(model, build_spec, &input)?
+    build_with_limits(model, build_spec, &input, limits)?
         .into_candidate_set(instance_name)
         .map_err(PrimitiveBuildError::CandidateSet)
 }
 
-fn build(
+fn build_with_limits(
     model: &DeviceLut,
     build_spec: &PrimitiveBuildSpec,
     input: &PrimitiveBuildInput,
-) -> Result<PrimitiveBuildOutput, PrimitiveBuildError>{
+    limits: Option<CurrentSizingLimits>,
+) -> Result<PrimitiveBuildOutput, PrimitiveBuildError> {
     let mut rows = expand_inputs(build_spec, input)?;
     evaluate_expressions(&mut rows, &build_spec.derived)?;
-    lut_query(model, build_spec, &mut rows, input)?;
+    lut_query(model, build_spec, &mut rows, input, limits)?;
     evaluate_expressions(&mut rows, &build_spec.columns)?;
 
     let columns = build_spec
@@ -255,22 +272,22 @@ fn build(
         .iter()
         .map(|column| {
             let values = rows
-            .iter()
-            .map(|row| {
-                row.get(&column.name).copied().ok_or_else(|| {
-                    PrimitiveBuildError::MissingSymbol {
-                        symbol: column.name.clone(),
-                    }
+                .iter()
+                .map(|row| {
+                    row.get(&column.name).copied().ok_or_else(|| {
+                        PrimitiveBuildError::MissingSymbol {
+                            symbol: column.name.clone(),
+                        }
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(ExplorationColumn {
-            name: column.name.clone(),
-            values,
+            Ok(ExplorationColumn {
+                name: column.name.clone(),
+                values,
+            })
         })
-    })
-    .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     let mut columns = columns;
     columns.extend(exposed_lut_provenance_columns(build_spec, &rows)?);
     columns.extend(exposed_input_columns(build_spec, &rows)?);
@@ -360,15 +377,16 @@ pub struct LutQuery {
     pub dof: HashMap<String, f64>,
     pub length: f64,
     pub op: OperatingPoint,
-    pub current: f64
+    pub current: f64,
 }
 
 fn lut_query(
     model: &DeviceLut,
     spec: &PrimitiveBuildSpec,
     rows: &mut Vec<HashMap<String, f64>>,
-    input: &PrimitiveBuildInput
-) -> Result<(), PrimitiveBuildError>{
+    input: &PrimitiveBuildInput,
+    limits: Option<CurrentSizingLimits>,
+) -> Result<(), PrimitiveBuildError> {
     for lut in &spec.lut {
         let lengths = resolve_lut_lengths(lut, input)?;
         let mut query_rows = Vec::with_capacity(rows.len() * lengths.len());
@@ -417,9 +435,34 @@ fn lut_query(
             }
         }
         let expressions = lut_expressions(model, lut)?;
-        let lut_results = many_size_for_current(model, &queries, &expressions)?;
+        let lut_results = if let Some(limits) = limits {
+            queries
+                .iter()
+                .map(|query| {
+                    model
+                        .size_for_current_with_limits(
+                            &query.op,
+                            query.current,
+                            &expressions,
+                            limits,
+                        )
+                        .map_err(|error| PrimitiveBuildError::LutSizing {
+                            lut: query.lut_name.clone(),
+                            reason: error.to_string(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            many_size_for_current(model, &queries, &expressions)?
+                .into_iter()
+                .map(Some)
+                .collect()
+        };
         let mut next_rows = Vec::with_capacity(query_rows.len());
         for (row, lut_values) in query_rows.into_iter().zip(lut_results) {
+            let Some(lut_values) = lut_values else {
+                continue;
+            };
             let mut next_row = row;
             insert_lut_result(&mut next_row, lut, &expressions, lut_values)?;
             next_rows.push(next_row);
@@ -471,28 +514,13 @@ fn insert_lut_result(
         sizing.point.operating_point.length,
     );
     row.insert(format!("{prefix}.nf"), f64::from(sizing.nf));
-    row.insert(
-        format!("{prefix}.finger_width"),
-        sizing.point.finger_width,
-    );
+    row.insert(format!("{prefix}.finger_width"), sizing.point.finger_width);
     row.insert(format!("{prefix}.total_width"), sizing.total_width);
-    row.insert(
-        format!("{prefix}.vbs"),
-        sizing.point.operating_point.vbs,
-    );
-    row.insert(
-        format!("{prefix}.vgs"),
-        sizing.point.operating_point.vgs,
-    );
-    row.insert(
-        format!("{prefix}.vds"),
-        sizing.point.operating_point.vds,
-    );
+    row.insert(format!("{prefix}.vbs"), sizing.point.operating_point.vbs);
+    row.insert(format!("{prefix}.vgs"), sizing.point.operating_point.vgs);
+    row.insert(format!("{prefix}.vds"), sizing.point.operating_point.vds);
     for (key, value) in expressions.iter().zip(sizing.values) {
-        row.insert(
-            format!("{prefix}.{}", key.parameter_name().unwrap()),
-            value,
-        );
+        row.insert(format!("{prefix}.{}", key.parameter_name().unwrap()), value);
     }
     row.insert(format!("{prefix}.cgsol_total"), extrinsic.cgsol);
     row.insert(format!("{prefix}.cgdol_total"), extrinsic.cgdol);
@@ -569,8 +597,8 @@ fn resolve_lut_lengths(
 
 fn expand_inputs(
     spec: &PrimitiveBuildSpec,
-    input: &PrimitiveBuildInput
-) -> Result<Vec<HashMap<String, f64>>, PrimitiveBuildError>{
+    input: &PrimitiveBuildInput,
+) -> Result<Vec<HashMap<String, f64>>, PrimitiveBuildError> {
     let active_inputs = spec
         .inputs
         .iter()
@@ -652,13 +680,13 @@ fn evaluate_expressions(
 ) -> Result<(), PrimitiveBuildError> {
     for expression in expressions {
         for row in rows.iter_mut() {
-            let value = ExpressionParser::new(&expression.expr, row).parse().map_err(|reason| {
-                PrimitiveBuildError::Expression {
+            let value = ExpressionParser::new(&expression.expr, row)
+                .parse()
+                .map_err(|reason| PrimitiveBuildError::Expression {
                     name: expression.name.clone(),
                     expression: expression.expr.clone(),
                     reason,
-                }
-            })?;
+                })?;
             row.insert(expression.name.clone(), value);
         }
     }
@@ -863,8 +891,8 @@ mod tests {
             predicted_current: 30.0e-6,
             current_error: 0.0,
             values: vec![
-                12.0, 20.0, 0.02, 1.0e-15, 2.0e-15, 3.0e-15, 4.0e-15, 5.0e-15,
-                6.0e-15, 7.0e-15, 8.0e-15, 9.0e-15,
+                12.0, 20.0, 0.02, 1.0e-15, 2.0e-15, 3.0e-15, 4.0e-15, 5.0e-15, 6.0e-15, 7.0e-15,
+                8.0e-15, 9.0e-15,
             ],
             extrinsic_capacitances,
         }
@@ -882,8 +910,8 @@ mod tests {
         )
         .expect("derived current should evaluate");
 
-        let current = evaluate_lut_current(&lut_spec("id_m1"), &rows[0])
-            .expect("LUT current should resolve");
+        let current =
+            evaluate_lut_current(&lut_spec("id_m1"), &rows[0]).expect("LUT current should resolve");
 
         assert_eq!(current, 10.0e-6);
     }
@@ -900,8 +928,8 @@ mod tests {
         )
         .expect("derived current should evaluate");
 
-        let current = evaluate_lut_current(&lut_spec("id_m1"), &rows[0])
-            .expect("LUT current should resolve");
+        let current =
+            evaluate_lut_current(&lut_spec("id_m1"), &rows[0]).expect("LUT current should resolve");
 
         assert_eq!(current, 20.0e-6);
     }
@@ -944,6 +972,45 @@ mod tests {
             PrimitiveBuildError::LutSizing { lut, reason }
                 if lut == "m1" && reason.contains("finite and positive")
         ));
+    }
+
+    #[test]
+    fn constrained_build_omits_unrealizable_rows() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../shapeic-lut/tests/fixtures/shapeic_v2_5d.npz");
+        let table = LookupTable::open(fixture).unwrap();
+        let model = table.model("sg13_lv_nmos").unwrap();
+        let minimum_width = model.finger_widths().unwrap().iter().copied()
+            .reduce(f64::min).unwrap();
+        let spec = PrimitiveBuildSpec {
+            inputs: Vec::new(),
+            sweep_mode: SweepMode::Aligned,
+            derived: Vec::new(),
+            lut: vec![LutBuildSpec {
+                name: "m1".to_owned(),
+                device: "nmos".to_owned(),
+                current: "current".to_owned(),
+                dof: HashMap::from([
+                    ("vgs".to_owned(), "vgs".to_owned()),
+                    ("vds".to_owned(), "vds".to_owned()),
+                ]),
+                lengths: Some(LutLengths::Values(vec![0.4e-6])),
+            }],
+            columns: vec![BuildExpression {
+                name: "nf".to_owned(), expr: "lut.m1.nf".to_owned(),
+            }],
+        };
+        let input = PrimitiveBuildInput::default();
+        let mut rows = vec![HashMap::from([
+            ("current".to_owned(), 1.0e-6),
+            ("vgs".to_owned(), 0.4),
+            ("vds".to_owned(), 0.4),
+        ])];
+        lut_query(model, &spec, &mut rows, &input, Some(CurrentSizingLimits {
+            required_nf: Some(4),
+            max_finger_width_m: Some(minimum_width / 2.0),
+        })).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]

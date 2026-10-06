@@ -6,8 +6,8 @@ use std::path::Path;
 use super::primitive_catalog::PrimitiveCatalog;
 
 use crate::primitive::build::PrimitiveBuildSpec;
-use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
 use crate::primitive::manifest::PrimitivePhysicalModel;
+use crate::primitive::manifest::{Pin, PinRole, PrimitiveFiles, PrimitiveManifest};
 use crate::primitive::small_signal::SmallSignalModel;
 
 #[derive(Debug)]
@@ -59,7 +59,7 @@ pub fn load_primitive_manifest(path: &Path) -> Result<PrimitiveManifest, Primiti
 pub fn load_primitive_catalog(
     primitives_dir: &Path,
 ) -> Result<PrimitiveCatalog, PrimitiveLoadError> {
-    let mut catalog = PrimitiveCatalog::new();
+    let mut catalog = PrimitiveCatalog::from_directory(primitives_dir);
 
     for entry in fs::read_dir(primitives_dir)? {
         let entry = entry?;
