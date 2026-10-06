@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -11,10 +12,11 @@ pub use shapeic_core::analysis::AcMetrics;
 use shapeic_core::analysis::{
     AdaptiveAcConfig, AdaptiveAcOutcome, AdaptiveAcPolicy, analyze_adaptive_ac,
 };
+use shapeic_core::catalog::primitive_loader::load_primitive_catalog;
 use shapeic_layout::{LayoutAwareAdmittance, LayoutAwarePoint, PhysicalLookupTable};
 use shapeic_lut::{
-    CurrentSizingResult, DeviceLut, Expr, LutError, MosCapacitanceMatrix, MosExtrinsicCapacitances,
-    OperatingPoint,
+    CurrentSizingLimits, CurrentSizingResult, DeviceLut, Expr, LutError, MosCapacitanceMatrix,
+    MosExtrinsicCapacitances, OperatingPoint,
 };
 use shapeic_mna::mna::{MnaResult, mna, stamp_port_admittance};
 use shapeic_mna::numeric::{NumericMnaSystem, PreparedNumericMna};
@@ -188,8 +190,22 @@ pub fn analyze(
     validate_capacitance_parameters(nmos)?;
     validate_capacitance_parameters(pmos)?;
 
-    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
-    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let diff_pair = size_block(
+        nmos,
+        &diff_point,
+        branch_current,
+        "g_gm_xdp",
+        "r_gds_xdp",
+        None,
+    )?;
+    let current_mirror = size_block(
+        pmos,
+        &mirror_point,
+        branch_current,
+        "g_gm_xcm",
+        "r_gds_xcm",
+        None,
+    )?;
     let system = mna(spice_dir, mna_output_dir, "ota_4t")
         .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
     let ac = evaluate_electrical_ac(&system, &diff_pair, &current_mirror, "IBIAS")?;
@@ -214,8 +230,22 @@ pub fn analyze_adaptive_comparison(
     validate_capacitance_parameters(nmos)?;
     validate_capacitance_parameters(pmos)?;
 
-    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
-    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let diff_pair = size_block(
+        nmos,
+        &diff_point,
+        branch_current,
+        "g_gm_xdp",
+        "r_gds_xdp",
+        None,
+    )?;
+    let current_mirror = size_block(
+        pmos,
+        &mirror_point,
+        branch_current,
+        "g_gm_xcm",
+        "r_gds_xcm",
+        None,
+    )?;
     let system = mna(spice_dir, mna_output_dir, "ota_4t")
         .map_err(|error| io::Error::other(format!("could not build OTA MNA: {error:?}")))?;
     let numeric = electrical_numeric_mna(&system, &diff_pair, &current_mirror, "IBIAS")?;
@@ -248,8 +278,23 @@ pub fn analyze_physical(
     validate_capacitance_parameters(nmos)?;
     validate_capacitance_parameters(pmos)?;
 
-    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
-    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let limits = physical_diff_pair_limits(physical)?;
+    let diff_pair = size_block(
+        nmos,
+        &diff_point,
+        branch_current,
+        "g_gm_xdp",
+        "r_gds_xdp",
+        limits,
+    )?;
+    let current_mirror = size_block(
+        pmos,
+        &mirror_point,
+        branch_current,
+        "g_gm_xcm",
+        "r_gds_xcm",
+        None,
+    )?;
     let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing, diff_point)?;
     let mirror_physical = query_physical(
         physical,
@@ -291,8 +336,23 @@ pub fn analyze_physical_mna_diagnostic(
     validate_capacitance_parameters(nmos)?;
     validate_capacitance_parameters(pmos)?;
 
-    let diff_pair = size_block(nmos, &diff_point, branch_current, "g_gm_xdp", "r_gds_xdp")?;
-    let current_mirror = size_block(pmos, &mirror_point, branch_current, "g_gm_xcm", "r_gds_xcm")?;
+    let limits = physical_diff_pair_limits(physical)?;
+    let diff_pair = size_block(
+        nmos,
+        &diff_point,
+        branch_current,
+        "g_gm_xdp",
+        "r_gds_xdp",
+        limits,
+    )?;
+    let current_mirror = size_block(
+        pmos,
+        &mirror_point,
+        branch_current,
+        "g_gm_xcm",
+        "r_gds_xcm",
+        None,
+    )?;
     let diff_physical = query_physical(physical, "simplediffpair", diff_pair.sizing, diff_point)?;
     let mirror_physical = query_physical(
         physical,
@@ -351,8 +411,15 @@ fn size_block(
     branch_current: f64,
     gm_parameter: &str,
     gds_resistance_parameter: &str,
-) -> Result<SizedBlock, LutError> {
-    let sizing = model.size_for_current(point, branch_current, &sizing_expressions())?;
+    limits: Option<CurrentSizingLimits>,
+) -> Result<SizedBlock, Box<dyn Error>> {
+    let expressions = sizing_expressions();
+    let sizing = match limits {
+        Some(limits) => model
+            .size_for_current_with_limits(point, branch_current, &expressions, limits)?
+            .ok_or_else(|| io::Error::other("simplediffpair cannot reach the requested current within its PCell geometry limits"))?,
+        None => model.size_for_current(point, branch_current, &expressions)?,
+    };
     let nf = f64::from(sizing.nf);
     let gm = sizing.values[0] * nf;
     let gds = sizing.values[1] * nf;
@@ -372,6 +439,18 @@ fn size_block(
         intrinsic_capacitance,
         extrinsic_capacitance,
     })
+}
+
+fn physical_diff_pair_limits(
+    physical: &PhysicalLookupTable,
+) -> Result<Option<CurrentSizingLimits>, Box<dyn Error>> {
+    let primitives_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../shapeic-cellkit/primitives");
+    let catalog = load_primitive_catalog(&primitives_dir)
+        .map_err(|error| io::Error::other(format!("could not load CellKit catalog: {error:?}")))?;
+    catalog
+        .geometry_limits("simplediffpair", &physical.metadata().pdk)
+        .map_err(|message| io::Error::other(message).into())
 }
 
 fn sizing_expressions() -> Vec<Expr> {
