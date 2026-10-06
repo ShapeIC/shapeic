@@ -5,6 +5,13 @@ This directory generates the separate physical LUT consumed by the
 a reduced port conductance matrix and capacitance matrix. Values in TOML are in
 micrometers; the NPZ axes use meters, siemens, and farads.
 
+The axes in `[sweep]` are defaults. A primitive can override any subset of
+them through `[sweep.primitives.<lut-name>]`; omitted axes inherit the defaults.
+Device-correction `nf` values can likewise be overridden in the existing
+`[device_capacitance_correction.<lut-name>]` table. For example, the IHP
+`simplediffpair` uses `nf = [4]`, while `currentmirror` retains the complete
+global range.
+
 The IHP reference configuration contains:
 
 - `simplediffpair`: `DP, DN, GP, GN, S, B`
@@ -52,8 +59,8 @@ Magic are combined before the reduced nodal matrix is validated.
 Networks containing only capacitors are reduced directly in `C`; mixed RC
 networks retain the first-order reduction around `s=0`.
 
-Before the complete 880-extraction run (440 points for each primitive),
-validate the real backend at `nf=1` and `nf=50` for each primitive:
+Before the complete run, validate the real backend at `nf=4` for the IHP
+differential pair and at `nf=1` and `nf=50` for the current mirror:
 
 ```sh
 python3 generate.py configs/ihp_sg13g2_ota_magic_smoke.toml --force
