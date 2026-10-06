@@ -24,10 +24,11 @@ def correction_shape(
     port_count: int,
 ) -> tuple[int, ...]:
     bias = correction.biases[primitive]
+    finger_counts = correction.finger_counts_for(primitive)
     return (
         lengths.size,
         finger_widths.size,
-        correction.finger_counts.size,
+        finger_counts.size,
         bias.vbs.size,
         bias.vgs.size,
         bias.vds.size,
@@ -65,12 +66,13 @@ def synthetic_device_correction(
         dtype=np.float64,
     )
     bias = correction.biases[primitive]
+    finger_counts = correction.finger_counts_for(primitive)
     base = np.full((port_count, port_count), -1.0)
     np.fill_diagonal(base, port_count - 1.0)
     for indices in itertools.product(
         range(lengths.size),
         range(finger_widths.size),
-        range(correction.finger_counts.size),
+        range(finger_counts.size),
         range(bias.vbs.size),
         range(bias.vgs.size),
         range(bias.vds.size),
@@ -79,7 +81,7 @@ def synthetic_device_correction(
             1.0
             + lengths[indices[0]] * 1.0e6
             + finger_widths[indices[1]] * 1.0e6
-            + correction.finger_counts[indices[2]]
+            + finger_counts[indices[2]]
             + abs(bias.vbs[indices[3]])
             + abs(bias.vgs[indices[4]])
             + abs(bias.vds[indices[5]])

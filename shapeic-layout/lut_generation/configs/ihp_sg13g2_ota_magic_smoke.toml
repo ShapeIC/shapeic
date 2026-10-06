@@ -20,6 +20,9 @@ length = [0.4]
 finger_width = [0.15]
 nf = [1, 50]
 
+[sweep.primitives.simplediffpair]
+nf = [4]
+
 [physical]
 backend = "magic"
 magic_binary = "magic"
@@ -36,6 +39,7 @@ frequencies_hz = [1.0e6, 1.0e7]
 frequency_consistency = 0.01
 
 [device_capacitance_correction.simplediffpair]
+nf = [4]
 vbs = [-0.65]
 vgs = [0.25]
 vds = [0.35]

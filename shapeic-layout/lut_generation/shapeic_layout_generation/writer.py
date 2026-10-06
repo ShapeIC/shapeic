@@ -104,21 +104,22 @@ def write_archive(
         ) as archive:
             for index, primitive in enumerate(config.primitives):
                 ports = config.port_order(primitive)
+                sweep = config.sweep_for(primitive)
                 root = f"primitives/{index}"
                 axis_paths = []
                 for name, values in (
-                    ("length", config.lengths),
-                    ("finger_width", config.finger_widths),
-                    ("nf", config.finger_counts),
+                    ("length", sweep.lengths),
+                    ("finger_width", sweep.finger_widths),
+                    ("nf", sweep.finger_counts),
                 ):
                     member = f"{root}/axes/{name}.npy"
                     _write_npy(archive, member, values.astype(np.float64))
                     axis_paths.append({"name": name, "path": member})
                 conductance, capacitance = matrices[primitive]
                 expected = (
-                    config.lengths.size,
-                    config.finger_widths.size,
-                    config.finger_counts.size,
+                    sweep.lengths.size,
+                    sweep.finger_widths.size,
+                    sweep.finger_counts.size,
                     len(ports),
                     len(ports),
                 )
@@ -152,9 +153,9 @@ def write_archive(
                         )
                     bias = correction_config.biases[primitive]
                     correction_axes = (
-                        config.lengths,
-                        config.finger_widths,
-                        correction_config.finger_counts,
+                        sweep.lengths,
+                        sweep.finger_widths,
+                        correction_config.finger_counts_for(primitive),
                         bias.vbs,
                         bias.vgs,
                         bias.vds,

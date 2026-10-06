@@ -66,6 +66,21 @@ class DeviceCorrectionConfig:
     frequencies_hz: tuple[float, float]
     workers: int
     frequency_consistency: float
+    primitive_finger_counts: dict[str, np.ndarray] | None = None
+
+    def finger_counts_for(self, primitive: str) -> np.ndarray:
+        if self.primitive_finger_counts is not None:
+            override = self.primitive_finger_counts.get(primitive)
+            if override is not None:
+                return override
+        return self.finger_counts
+
+
+@dataclass(frozen=True)
+class PrimitiveSweep:
+    lengths: np.ndarray
+    finger_widths: np.ndarray
+    finger_counts: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,18 @@ class GenerationConfig:
     port_orders: dict[str, tuple[str, ...]] | None = None
     primitive_catalog_names: dict[str, str] | None = None
     primitive_layouts: dict[str, Any] | None = None
+    primitive_sweeps: dict[str, PrimitiveSweep] | None = None
+
+    def sweep_for(self, primitive: str) -> PrimitiveSweep:
+        if self.primitive_sweeps is not None:
+            override = self.primitive_sweeps.get(primitive)
+            if override is not None:
+                return override
+        return PrimitiveSweep(
+            lengths=self.lengths,
+            finger_widths=self.finger_widths,
+            finger_counts=self.finger_counts,
+        )
 
     def port_order(self, primitive: str) -> tuple[str, ...]:
         if self.port_orders is not None:
@@ -139,6 +166,11 @@ def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
     if unknown:
         raise ValueError(f"unsupported primitives: {', '.join(unknown)}")
 
+    lengths = np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6
+    finger_widths = (
+        np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6
+    )
+    finger_counts = np.asarray(sweep["nf"], dtype=np.float64)
     config = GenerationConfig(
         source_path=source,
         output_path=_path(str(output["path"]), source.parent),
@@ -146,9 +178,9 @@ def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
         layout_policy=str(
             raw.get("layout_policy", "synthetic-test-fixture")
         ),
-        lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
-        finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,
-        finger_counts=np.asarray(sweep["nf"], dtype=np.float64),
+        lengths=lengths,
+        finger_widths=finger_widths,
+        finger_counts=finger_counts,
         primitives=primitives,
         extractor=ExtractorConfig(
             backend=backend,
@@ -167,6 +199,13 @@ def _load_legacy_config(source: Path, raw: dict[str, Any]) -> GenerationConfig:
             raw.get("device_capacitance_correction"),
             source.parent,
             primitives,
+        ),
+        primitive_sweeps=_primitive_sweeps(
+            sweep,
+            primitives,
+            lengths,
+            finger_widths,
+            finger_counts,
         ),
     )
     _validate(config)
@@ -247,15 +286,20 @@ def _load_cellkit_config(
     if len(revisions) > 1:
         raise ValueError("NMOS and PMOS electrical models declare different PDK revisions")
     inferred_revision = next(iter(revisions), technology.revision)
+    lengths = np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6
+    finger_widths = (
+        np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6
+    )
+    finger_counts = np.asarray(sweep["nf"], dtype=np.float64)
     config = GenerationConfig(
         source_path=source,
         output_path=_path(str(output["path"]), source.parent),
         pdk=pdk_name,
         pdk_revision=str(pdk_raw.get("revision", inferred_revision)),
         layout_policy=provider_policy,
-        lengths=np.asarray(sweep["length"], dtype=np.float64) * 1.0e-6,
-        finger_widths=np.asarray(sweep["finger_width"], dtype=np.float64) * 1.0e-6,
-        finger_counts=np.asarray(sweep["nf"], dtype=np.float64),
+        lengths=lengths,
+        finger_widths=finger_widths,
+        finger_counts=finger_counts,
         primitives=primitive_names,
         extractor=ExtractorConfig(
             backend=backend,
@@ -277,6 +321,13 @@ def _load_cellkit_config(
         port_orders=port_orders,
         primitive_catalog_names=catalog_names,
         primitive_layouts=primitive_layouts,
+        primitive_sweeps=_primitive_sweeps(
+            sweep,
+            primitive_names,
+            lengths,
+            finger_widths,
+            finger_counts,
+        ),
     )
     _validate(config)
     return config
@@ -319,6 +370,57 @@ def _path(value: str, base: Path) -> Path:
     return (base / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def _primitive_sweeps(
+    raw: dict[str, Any],
+    primitives: tuple[str, ...],
+    lengths: np.ndarray,
+    finger_widths: np.ndarray,
+    finger_counts: np.ndarray,
+) -> dict[str, PrimitiveSweep]:
+    overrides = raw.get("primitives", {})
+    if not isinstance(overrides, dict):
+        raise ValueError("sweep.primitives must be a table")
+    unknown_primitives = sorted(set(overrides) - set(primitives))
+    if unknown_primitives:
+        raise ValueError(
+            "sweep overrides reference unconfigured primitives: "
+            + ", ".join(unknown_primitives)
+        )
+    resolved = {}
+    allowed = {"length", "finger_width", "nf"}
+    for primitive, value in overrides.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"sweep.primitives.{primitive} must be a table")
+        unknown_fields = sorted(set(value) - allowed)
+        if unknown_fields:
+            raise ValueError(
+                f"sweep.primitives.{primitive} contains unsupported fields: "
+                + ", ".join(unknown_fields)
+            )
+        if not value:
+            raise ValueError(
+                f"sweep.primitives.{primitive} must override at least one axis"
+            )
+        resolved[primitive] = PrimitiveSweep(
+            lengths=(
+                np.asarray(value["length"], dtype=np.float64) * 1.0e-6
+                if "length" in value
+                else lengths
+            ),
+            finger_widths=(
+                np.asarray(value["finger_width"], dtype=np.float64) * 1.0e-6
+                if "finger_width" in value
+                else finger_widths
+            ),
+            finger_counts=(
+                np.asarray(value["nf"], dtype=np.float64)
+                if "nf" in value
+                else finger_counts
+            ),
+        )
+    return resolved
+
+
 def _device_correction(
     raw: object,
     base: Path,
@@ -336,6 +438,7 @@ def _device_correction(
         )
     finger_counts = np.asarray(raw.get("nf", ()), dtype=np.float64)
     biases = {}
+    primitive_finger_counts = {}
     for primitive in primitives:
         value = raw.get(primitive)
         if not isinstance(value, dict):
@@ -347,6 +450,10 @@ def _device_correction(
             vgs=np.asarray(value.get("vgs", ()), dtype=np.float64),
             vds=np.asarray(value.get("vds", ()), dtype=np.float64),
         )
+        if "nf" in value:
+            primitive_finger_counts[primitive] = np.asarray(
+                value["nf"], dtype=np.float64
+            )
     model_library = raw.get("model_library")
     frequencies = tuple(
         float(value)
@@ -368,6 +475,7 @@ def _device_correction(
         frequencies_hz=frequencies,  # type: ignore[arg-type]
         workers=int(raw.get("workers", 1)),
         frequency_consistency=float(raw.get("frequency_consistency", 0.01)),
+        primitive_finger_counts=primitive_finger_counts,
     )
 
 
@@ -383,25 +491,33 @@ def _validate(config: GenerationConfig) -> None:
         raise ValueError("output path must end in .npz")
     if not config.pdk or not config.layout_policy:
         raise ValueError("pdk and layout_policy must not be empty")
-    for name, axis in (
-        ("length", config.lengths),
-        ("finger_width", config.finger_widths),
-        ("nf", config.finger_counts),
-    ):
-        if axis.ndim != 1 or axis.size == 0 or not np.isfinite(axis).all():
-            raise ValueError(f"{name} must be a non-empty finite vector")
-        if axis.size > 1 and not np.all(np.diff(axis) > 0):
-            raise ValueError(f"{name} must be strictly increasing")
-    if np.any(config.lengths <= 0) or np.any(config.finger_widths <= 0):
-        raise ValueError("length and finger_width must be positive")
-    if np.any(config.finger_counts < 1) or np.any(
-        config.finger_counts > MAX_FINGER_COUNT
-    ):
-        raise ValueError(f"nf samples must be in [1, {MAX_FINGER_COUNT}]")
-    if np.any(np.mod(config.finger_counts, 1.0) != 0.0):
-        raise ValueError("nf samples must be integers")
-    if not all(math.isfinite(float(value)) for value in config.finger_counts):
-        raise ValueError("nf samples must be finite")
+    _validate_sweep(
+        PrimitiveSweep(
+            config.lengths,
+            config.finger_widths,
+            config.finger_counts,
+        ),
+        "sweep",
+    )
+    for primitive in config.primitives:
+        sweep = config.sweep_for(primitive)
+        _validate_sweep(sweep, f"{primitive} sweep")
+        layout = config.primitive_layout(primitive)
+        limits = getattr(layout, "geometry_limits", None)
+        if limits is not None:
+            if limits.required_nf is not None and np.any(
+                sweep.finger_counts != limits.required_nf
+            ):
+                raise ValueError(
+                    f"{primitive} sweep requires nf={limits.required_nf}"
+                )
+            if limits.max_finger_width_m is not None and np.any(
+                sweep.finger_widths > limits.max_finger_width_m
+            ):
+                raise ValueError(
+                    f"{primitive} sweep requires finger_width <= "
+                    f"{limits.max_finger_width_m} m"
+                )
     if config.extractor.backend == "magic":
         if shutil.which(config.extractor.magic_binary) is None:
             raise FileNotFoundError(
@@ -416,20 +532,17 @@ def _validate(config: GenerationConfig) -> None:
     correction = config.device_correction
     if correction is None:
         return
-    _validate_axis(correction.finger_counts, "device correction nf")
-    if np.any(correction.finger_counts < 1) or np.any(
-        correction.finger_counts > MAX_FINGER_COUNT
-    ):
-        raise ValueError(
-            f"device correction nf samples must be in [1, {MAX_FINGER_COUNT}]"
-        )
-    if np.any(np.mod(correction.finger_counts, 1.0) != 0.0):
-        raise ValueError("device correction nf samples must be integers")
-    if not set(correction.finger_counts).issubset(set(config.finger_counts)):
-        raise ValueError(
-            "device correction nf samples must be a subset of the physical nf sweep"
-        )
+    _validate_nf_axis(correction.finger_counts, "device correction nf")
     for primitive, bias in correction.biases.items():
+        correction_nf = correction.finger_counts_for(primitive)
+        _validate_nf_axis(correction_nf, f"{primitive} device correction nf")
+        if not set(correction_nf).issubset(
+            set(config.sweep_for(primitive).finger_counts)
+        ):
+            raise ValueError(
+                f"{primitive} device correction nf samples must be a subset "
+                "of the physical nf sweep for that primitive"
+            )
         for name, axis in (
             ("vbs", bias.vbs),
             ("vgs", bias.vgs),
@@ -477,3 +590,23 @@ def _validate(config: GenerationConfig) -> None:
             assert path is not None
             if not path.is_file():
                 raise FileNotFoundError(path)
+
+
+def _validate_sweep(sweep: PrimitiveSweep, context: str) -> None:
+    for name, axis in (
+        ("length", sweep.lengths),
+        ("finger_width", sweep.finger_widths),
+        ("nf", sweep.finger_counts),
+    ):
+        _validate_axis(axis, f"{context} {name}")
+    if np.any(sweep.lengths <= 0) or np.any(sweep.finger_widths <= 0):
+        raise ValueError(f"{context} length and finger_width must be positive")
+    _validate_nf_axis(sweep.finger_counts, f"{context} nf")
+
+
+def _validate_nf_axis(axis: np.ndarray, name: str) -> None:
+    _validate_axis(axis, name)
+    if np.any(axis < 1) or np.any(axis > MAX_FINGER_COUNT):
+        raise ValueError(f"{name} samples must be in [1, {MAX_FINGER_COUNT}]")
+    if np.any(np.mod(axis, 1.0) != 0.0):
+        raise ValueError(f"{name} samples must be integers")

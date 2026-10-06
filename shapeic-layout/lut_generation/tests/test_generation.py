@@ -424,11 +424,15 @@ length = [0.4]
 finger_width = [1.0]
 nf = [1]
 
+[sweep.primitives.simplediffpair]
+nf = [4]
+
 [device_capacitance_correction]
 backend = "synthetic"
 nf = [1]
 
 [device_capacitance_correction.simplediffpair]
+nf = [4]
 vbs = [0.0]
 vgs = [0.5]
 vds = [0.5]
@@ -919,13 +923,20 @@ vds = [0.5]
             rcfile.parent.mkdir(parents=True)
             rcfile.write_text("", encoding="ascii")
             cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "ihp-sg13g2")
-            endpoints = (
-                ("minimum", 0.4e-6, 0.15e-6, 1),
-                ("maximum", 0.8e-6, 10.0e-6, 20),
-            )
             for primitive in ("simplediffpair", "currentmirror"):
                 descriptor = cellkit.catalog.primitive_descriptor_for_lut(primitive)
                 layout = cellkit.catalog.primitive(descriptor.catalog_name)
+                endpoints = (
+                    (
+                        ("minimum", 0.4e-6, 0.15e-6, 4),
+                        ("maximum", 0.8e-6, 10.0e-6, 4),
+                    )
+                    if primitive == "simplediffpair"
+                    else (
+                        ("minimum", 0.4e-6, 0.15e-6, 1),
+                        ("maximum", 0.8e-6, 10.0e-6, 20),
+                    )
+                )
                 for label, length, finger_width, nf in endpoints:
                     output = root / f"{primitive}-{label}.gds"
                     rendered = layout.render(
@@ -950,7 +961,7 @@ vds = [0.5]
             cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, "ihp-sg13g2")
             rendered = cellkit.catalog.macro_layout("ota_4t").render(
                 {
-                    "xdp": cellkit.geometry(1.0e-6, 10.0e-6, 20),
+                    "xdp": cellkit.geometry(1.0e-6, 10.0e-6, 4),
                     "xcm": cellkit.geometry(1.2e-6, 10.0e-6, 20),
                 }
             )
@@ -1042,7 +1053,10 @@ vds = [0.5]
             for primitive in ("simplediffpair", "currentmirror"):
                 descriptor = cellkit.catalog.primitive_descriptor_for_lut(primitive)
                 layout = cellkit.catalog.primitive(descriptor.catalog_name)
-                for nf in (1, 20):
+                finger_counts = (
+                    (4,) if primitive == "simplediffpair" else (1, 20)
+                )
+                for nf in finger_counts:
                     point = root / f"{primitive}-nf{nf}"
                     gds = point / "layout.gds"
                     rendered = layout.render(
@@ -1080,7 +1094,7 @@ vds = [0.5]
             cellkit = load_cellkit(CELLKIT_ROOT, pdk_root, os.environ["PDK"])
             rendered = cellkit.catalog.macro_layout("ota_4t").render(
                 {
-                    "xdp": cellkit.geometry(0.8e-6, 9.0e-6, 2),
+                    "xdp": cellkit.geometry(0.8e-6, 9.0e-6, 4),
                     "xcm": cellkit.geometry(0.4e-6, 5.0e-6, 1),
                 }
             )

@@ -19,6 +19,9 @@ length = [0.4, 0.8]
 finger_width = [0.15, 10.0]
 nf = [1, 2, 50]
 
+[sweep.primitives.simplediffpair]
+nf = [4]
+
 [physical]
 backend = "synthetic"
 work_directory = "../work-cellkit-smoke"
@@ -30,6 +33,7 @@ nf = [1, 2, 50]
 frequencies_hz = [1.0e6, 1.0e7]
 
 [device_capacitance_correction.simplediffpair]
+nf = [4]
 vbs = [-1.0, 0.0]
 vgs = [0.1, 1.2]
 vds = [0.1, 1.2]

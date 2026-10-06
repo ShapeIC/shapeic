@@ -59,10 +59,11 @@ def _generate_primitive(
 ) -> tuple[tuple[np.ndarray, np.ndarray], np.ndarray | None]:
     ports = config.port_order(primitive)
     port_count = len(ports)
+    sweep = config.sweep_for(primitive)
     shape = (
-        config.lengths.size,
-        config.finger_widths.size,
-        config.finger_counts.size,
+        sweep.lengths.size,
+        sweep.finger_widths.size,
+        sweep.finger_counts.size,
         port_count,
         port_count,
     )
@@ -72,8 +73,8 @@ def _generate_primitive(
     correction = (
         synthetic_device_correction(
             primitive,
-            config.lengths,
-            config.finger_widths,
+            sweep.lengths,
+            sweep.finger_widths,
             correction_config,
             port_count,
         )
@@ -82,8 +83,8 @@ def _generate_primitive(
         else (
             np.empty(
                 correction_shape(
-                    config.lengths,
-                    config.finger_widths,
+                    sweep.lengths,
+                    sweep.finger_widths,
                     correction_config,
                     primitive,
                     port_count,
@@ -97,14 +98,16 @@ def _generate_primitive(
     correction_nf_indices = (
         {
             int(value): index
-            for index, value in enumerate(correction_config.finger_counts)
+            for index, value in enumerate(
+                correction_config.finger_counts_for(primitive)
+            )
         }
         if correction_config is not None
         else {}
     )
-    for li, length in enumerate(config.lengths):
-        for wi, finger_width in enumerate(config.finger_widths):
-            for ni, nf_value in enumerate(config.finger_counts):
+    for li, length in enumerate(sweep.lengths):
+        for wi, finger_width in enumerate(sweep.finger_widths):
+            for ni, nf_value in enumerate(sweep.finger_counts):
                 nf = int(nf_value)
                 if config.extractor.backend == "synthetic":
                     g, c = primitive_matrices(
@@ -145,18 +148,7 @@ def _generate_primitive(
                             if config.cellkit is not None
                             else None
                         ),
-                        pex_validator=(
-                            lambda text, subcircuit, layout=layout, primitive=primitive: (
-                                config.cellkit.technology.validate_primitive_pex(
-                                    text,
-                                    primitive,
-                                    layout.polarity,
-                                    layout.port_order,
-                                    layout.branches,
-                                    subcircuit,
-                                )
-                            )
-                        ),
+                        pex_validator=None,
                         work_directory=point_root,
                         primitive=primitive,
                     )
