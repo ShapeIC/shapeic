@@ -69,13 +69,17 @@ impl PrimitiveCatalog {
         }
         let limits: GeometryLimitsFile = serde_json::from_value(serde_json::Value::Object(fields))
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        if limits.required_nf.is_none() && limits.max_finger_width_m.is_none() {
+        if limits.required_nf.is_none()
+            && limits.max_finger_width_m.is_none()
+            && limits.nf_multiple_of.is_none()
+        {
             return Err(format!(
                 "{}: at least one geometry limit is required",
                 path.display()
             ));
         }
         if limits.required_nf == Some(0)
+            || limits.nf_multiple_of == Some(0)
             || limits
                 .max_finger_width_m
                 .is_some_and(|width| !width.is_finite() || width <= 0.0)
@@ -88,6 +92,7 @@ impl PrimitiveCatalog {
         Ok(Some(CurrentSizingLimits {
             required_nf: limits.required_nf,
             max_finger_width_m: limits.max_finger_width_m,
+            nf_multiple_of: limits.nf_multiple_of,
         }))
     }
 
@@ -115,6 +120,7 @@ impl PrimitiveCatalog {
 struct GeometryLimitsFile {
     required_nf: Option<u32>,
     max_finger_width_m: Option<f64>,
+    nf_multiple_of: Option<u32>,
 }
 
 #[cfg(test)]
@@ -174,12 +180,14 @@ mod tests {
             .unwrap();
         assert_eq!(limits.required_nf, Some(4));
         assert_eq!(limits.max_finger_width_m, Some(1e-5));
-        assert_eq!(
-            catalog
-                .geometry_limits("simplecurrentmirror", "ihp-sg13g2")
-                .unwrap(),
-            None
-        );
+        assert_eq!(limits.nf_multiple_of, None);
+        let mirror_limits = catalog
+            .geometry_limits("simplecurrentmirror", "ihp-sg13g2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mirror_limits.required_nf, None);
+        assert_eq!(mirror_limits.max_finger_width_m, Some(1e-5));
+        assert_eq!(mirror_limits.nf_multiple_of, Some(2));
         assert_eq!(
             catalog
                 .geometry_limits("simplediffpair", "sky130A")
@@ -207,6 +215,10 @@ mod tests {
         for invalid in [
             r#"{"required_nf":0}"#,
             r#"{"max_finger_width_m":-1}"#,
+            r#"{"nf_multiple_of":0}"#,
+            r#"{"nf_multiple_of":-2}"#,
+            r#"{"nf_multiple_of":2.0}"#,
+            r#"{"nf_multiple_of":true}"#,
             r#"{"required_nf":null,"max_finger_width_m":1e-6}"#,
             r#"{"unknown":1}"#,
         ] {

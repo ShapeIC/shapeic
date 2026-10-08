@@ -29,6 +29,7 @@ pub struct CurrentSizingResult {
 pub struct CurrentSizingLimits {
     pub required_nf: Option<u32>,
     pub max_finger_width_m: Option<f64>,
+    pub nf_multiple_of: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,8 +128,36 @@ impl DeviceLut {
                 }
             }
             let candidate = if let Some(nf) = limits.required_nf {
+                if limits.nf_multiple_of.is_some_and(|multiple| multiple == 0 || nf % multiple != 0)
+                {
+                    return Ok(None);
+                }
                 let target = requested_current / f64::from(nf);
                 if target < curve[0].1 || target > curve.last().expect("non-empty curve").1 {
+                    return Ok(None);
+                }
+                CurrentCandidate {
+                    nf,
+                    finger_width: invert_current_curve(&curve, target),
+                }
+            } else if let Some(multiple) = limits.nf_multiple_of {
+                if multiple == 0 {
+                    return Ok(None);
+                }
+                let minimum_current = curve[0].1;
+                let maximum_current = curve.last().expect("non-empty curve").1;
+                let minimum_nf = checked_ceil_nf(self, requested_current, maximum_current)?;
+                let remainder = minimum_nf % multiple;
+                let nf = if remainder == 0 {
+                    minimum_nf
+                } else {
+                    let Some(nf) = minimum_nf.checked_add(multiple - remainder) else {
+                        return Ok(None);
+                    };
+                    nf
+                };
+                let target = requested_current / f64::from(nf);
+                if target < minimum_current || target > maximum_current {
                     return Ok(None);
                 }
                 CurrentCandidate {
@@ -402,6 +431,7 @@ mod tests {
         let limits = CurrentSizingLimits {
             required_nf: Some(4),
             max_finger_width_m: Some(2.5),
+            nf_multiple_of: None,
         };
         assert_eq!(model.size_for_current(&point(), 80.0, &[]).unwrap().nf, 3);
         let sized = model
@@ -426,6 +456,58 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn constrained_sizing_selects_smallest_feasible_multiple() {
+        let model = model(Some(vec![1.0, 2.0, 3.0]), vec![10.0, 20.0, 30.0]);
+        let limits = CurrentSizingLimits {
+            required_nf: None,
+            max_finger_width_m: None,
+            nf_multiple_of: Some(2),
+        };
+        let sized = model
+            .size_for_current_with_limits(&point(), 80.0, &[], limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!((sized.nf, sized.point.finger_width), (4, 2.0));
+        let sized = model
+            .size_for_current_with_limits(&point(), 60.0, &[], limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!((sized.nf, sized.point.finger_width), (2, 3.0));
+        assert!(model
+            .size_for_current_with_limits(&point(), 15.0, &[], limits)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn constrained_sizing_combines_multiple_with_fixed_nf_and_width_cap() {
+        let model = model(Some(vec![1.0, 2.0, 3.0]), vec![10.0, 20.0, 30.0]);
+        let limits = CurrentSizingLimits {
+            required_nf: Some(4),
+            max_finger_width_m: Some(2.5),
+            nf_multiple_of: Some(2),
+        };
+        let sized = model
+            .size_for_current_with_limits(&point(), 80.0, &[], limits)
+            .unwrap()
+            .unwrap();
+        assert_eq!((sized.nf, sized.point.finger_width), (4, 2.0));
+        assert!(model
+            .size_for_current_with_limits(&point(), 101.0, &[], limits)
+            .unwrap()
+            .is_none());
+        assert!(model
+            .size_for_current_with_limits(
+                &point(),
+                80.0,
+                &[],
+                CurrentSizingLimits { required_nf: Some(3), ..limits },
+            )
+            .unwrap()
+            .is_none());
     }
 
     #[test]

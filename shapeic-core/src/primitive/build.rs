@@ -1009,6 +1009,7 @@ mod tests {
         lut_query(model, &spec, &mut rows, &input, Some(CurrentSizingLimits {
             required_nf: Some(4),
             max_finger_width_m: Some(minimum_width / 2.0),
+            nf_multiple_of: None,
         })).unwrap();
         assert!(rows.is_empty());
     }
